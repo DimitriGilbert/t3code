@@ -18,4 +18,6 @@ export interface HomeHeaderProps {
   readonly onOpenEnvironments: () => void;
   readonly onOpenSettings: () => void;
   readonly onStartNewTask: () => void;
+  /** Present only when an environment advertises the watch-screen capability. */
+  readonly onOpenWatch?: () => void;
 }

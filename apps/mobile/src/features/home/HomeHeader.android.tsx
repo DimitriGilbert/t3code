@@ -99,6 +99,7 @@ export function HomeHeader(props: HomeHeaderProps) {
         filterCustomized={hasCustomListOptions}
         onFilterAction={handleMenuAction}
         onOpenEnvironments={props.onOpenEnvironments}
+        onOpenWatch={props.onOpenWatch}
       />
     </>
   );

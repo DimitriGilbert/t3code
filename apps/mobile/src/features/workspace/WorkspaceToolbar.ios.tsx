@@ -1,6 +1,6 @@
 import { useActiveNewTask } from "../../state/active-new-task";
 import { Toolbar } from "../../components/ui/Toolbar";
-import { useFocusEffect, useIsFocused } from "@react-navigation/native";
+import { useFocusEffect, useIsFocused, useNavigation } from "@react-navigation/native";
 import { use, useCallback, useEffect, useRef } from "react";
 import { Platform } from "react-native";
 import { isDuoDevice } from "../../lib/device-type";
@@ -15,6 +15,7 @@ import {
 } from "../../native/v5-workspace-context";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { useWatchEntryEnvironmentId } from "../watch/useWatchEntryEnvironmentId";
 import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 import { useCompactWorkspaceTabs, useSidebarWorkspaceTabs } from "./useSystemWorkspaceTabBar";
 import { WorkspaceTabToolbarButtons } from "./WorkspaceSectionToolbar";
@@ -47,6 +48,7 @@ export function WorkspaceToolbar(props: {
   const focused = useIsFocused();
   const { panes, togglePrimarySidebar } = useAdaptiveWorkspaceLayout();
   const searchRef = useRef<SearchBarCommands>(null);
+  const navigation = useNavigation();
   // The Settings list takes the selected tab's place, so search follows it.
   const selectedTab = workspace.settingsOpen ? "settings" : workspace.state.selectedTab;
   const tab = workspace.state.tabs[selectedTab];
@@ -64,6 +66,7 @@ export function WorkspaceToolbar(props: {
   const searchVisible = foldedSearch
     ? tab.searchMode !== "resting"
     : deviceType !== "duo-unfolded" || primaryColumn?.presented !== false;
+  const watchEnvironmentId = useWatchEntryEnvironmentId();
   const enterSearch = useCallback(() => {
     workspace.dispatch({
       type: "scroll",
@@ -188,6 +191,15 @@ export function WorkspaceToolbar(props: {
           header's own items, so an empty one would hide the Settings scope filter. */}
       {workspace.settingsOpen && !foldedSearch ? null : (
         <Toolbar placement="right">
+          {watchEnvironmentId !== null ? (
+            <Toolbar.Button
+              accessibilityLabel="Watch"
+              icon="square.grid.2x2"
+              onPress={() =>
+                navigation.navigate("Watch", { environmentId: watchEnvironmentId })
+              }
+            />
+          ) : null}
           {searchButton}
           {nativeToolbarCompose && foldedSearch ? <Toolbar.Spacer width={8} /> : null}
           {composeButton}

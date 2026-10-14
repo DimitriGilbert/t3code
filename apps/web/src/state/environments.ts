@@ -103,6 +103,10 @@ export function usePullRequestsSupported() {
   return useAtomValue(environmentSummaries.pullRequestsSupportedAtom);
 }
 
+export function useWatchScreenSupported() {
+  return useAtomValue(environmentSummaries.watchScreenSupportedAtom);
+}
+
 export function useEnvironmentMachines() {
   return useAtomValue(environmentSummaries.machineByIdAtom);
 }

@@ -61,6 +61,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   MessageSquareDashedIcon,
+  LayoutDashboardIcon,
   LinkIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -183,6 +184,7 @@ import {
   reduceCommandPaletteSearchState,
   type SearchOverlayMode,
 } from "./CommandPalette.logic";
+import { emitWatchUiAction } from "./watch/watchUiBus";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteContent } from "./CommandPaletteContent";
 import {
@@ -1492,6 +1494,82 @@ function OpenCommandPaletteDialog(props: {
       await navigate({ to: "/usage" });
     },
   });
+
+  const watchScreenSupported = environments.some(
+    (environment) => environment.serverConfig?.watchScreen === true,
+  );
+  if (watchScreenSupported) {
+    actionItems.push({
+      kind: "action",
+      value: "action:watch",
+      searchTerms: ["watch", "dashboard", "widgets", "monitor", "pages"],
+      title: "Open watch",
+      icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "watch.open",
+      run: async () => {
+        await navigate({ to: "/watch" });
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:watch-new-page-template",
+      searchTerms: ["watch", "page", "template", "gallery", "new", "create"],
+      title: "New watch page from template",
+      icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        // The gallery lives on the screen; the bus queues the action until it mounts.
+        await navigate({ to: "/watch" });
+        emitWatchUiAction("open-gallery");
+      },
+    });
+    // Page-local actions only make sense with the screen mounted; the bus
+    // delivers them to it.
+    if (pathname === "/watch") {
+      actionItems.push(
+        {
+          kind: "action",
+          value: "action:watch-new-page",
+          searchTerms: ["watch", "page", "new", "create", "blank"],
+          title: "New watch page",
+          icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+          run: async () => {
+            emitWatchUiAction("new-page");
+          },
+        },
+        {
+          kind: "action",
+          value: "action:watch-switch-page",
+          searchTerms: ["watch", "page", "switch", "open", "pages"],
+          title: "Switch watch page",
+          icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+          run: async () => {
+            emitWatchUiAction("switch-page");
+          },
+        },
+        {
+          kind: "action",
+          value: "action:watch-add-widget",
+          searchTerms: ["watch", "widget", "add", "new"],
+          title: "Add watch widget",
+          icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+          run: async () => {
+            emitWatchUiAction("add-widget");
+          },
+        },
+        {
+          kind: "action",
+          value: "action:watch-edit-page",
+          searchTerms: ["watch", "page", "edit", "layout", "done"],
+          title: "Edit watch page",
+          icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+          shortcutCommand: "watch.editPage",
+          run: async () => {
+            emitWatchUiAction("toggle-edit");
+          },
+        },
+      );
+    }
+  }
 
   actionItems.push({
     kind: "action",

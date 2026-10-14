@@ -234,15 +234,13 @@ export const collectWatchedFiles = Effect.fn("ConnectorFileTransport.collectWatc
               `Watched file ${relative} exceeds the ${MAX_WATCH_FILE_BYTES}-byte cap.`,
             );
           }
-          files[`${rootName}/${relative}`] = yield* fs
-            .readFileString(realEntry)
-            .pipe(
-              Effect.mapError((cause) =>
-                connectorError("fetchFailed", `Could not read watched file ${relative}.`, {
-                  cause,
-                }),
-              ),
-            );
+          files[`${rootName}/${relative}`] = yield* fs.readFileString(realEntry).pipe(
+            Effect.mapError((cause) =>
+              connectorError("fetchFailed", `Could not read watched file ${relative}.`, {
+                cause,
+              }),
+            ),
+          );
         }
       }
     }

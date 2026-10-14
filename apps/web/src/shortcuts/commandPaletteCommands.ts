@@ -14,6 +14,7 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { type CommandHandler, type CommandScopeOptions, registerCommands } from "./dispatcher";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
+import { emitWatchUiAction } from "../components/watch/watchUiBus";
 
 function consume(event: KeyboardEvent): void {
   event.preventDefault();
@@ -92,6 +93,16 @@ export function installCommandPaletteCommands(
         dispatchCommandPalette({ _tag: "SetOpen", open: false });
         void router.navigate({ to: "/usage" });
       },
+      "watch.open": (event) => {
+        consume(event);
+        dispatchCommandPalette({ _tag: "SetOpen", open: false });
+        void router.navigate({ to: "/watch" });
+      },
+      "watch.editPage": (event) => {
+        consume(event);
+        if (event.repeat) return;
+        emitWatchUiAction("toggle-edit");
+      },
       "commandPalette.toggle": toggleOverlay("commandPalette.toggle"),
       "filePicker.toggle": toggleOverlay("filePicker.toggle"),
       "projectSearch.toggle": toggleOverlay("projectSearch.toggle"),
@@ -113,6 +124,7 @@ export function installCommandPaletteCommands(
               "preview"
             : false,
           usagePageOpen: router.state.location.pathname === "/usage",
+          watchPageOpen: router.state.location.pathname === "/watch",
         };
       },
     },

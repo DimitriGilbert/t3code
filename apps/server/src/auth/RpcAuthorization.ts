@@ -126,6 +126,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.watchPagesReorder]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchPagesDuplicate]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchPagesDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.watchPagesRestore]: AuthOrchestrationOperateScope,
+  [WS_METHODS.watchPagesUpdateScope]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchPagesInstantiateFromGallery]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchWidgetsAdd]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchWidgetsRemove]: AuthOrchestrationOperateScope,

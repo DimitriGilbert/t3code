@@ -272,6 +272,24 @@ export class WidgetTranspileService extends Context.Service<
     readonly publish: (
       input: WatchWidgetSourcePublishInput,
     ) => Effect.Effect<WatchWidgetSourcePublishResult, WatchWidgetSourceError>;
+    /**
+     * The trusted publish leg for server-side callers (pack-bundled widget
+     * registration): identical validation, caching, and records, but it does
+     * not consume the agent-facing per-window publish cap — the cap bounds
+     * agent churn, not human-confirmed pack installs. Never exposed over RPC.
+     */
+    readonly publishTrusted: (
+      input: WatchWidgetSourcePublishInput,
+    ) => Effect.Effect<WatchWidgetSourcePublishResult, WatchWidgetSourceError>;
+    /**
+     * The way out of publish, server-side only: deletes the source's artifact
+     * and sidecar meta, drops the cached record, and emits a `null` tombstone
+     * so live subscribers re-render the missing-source state. A sourceId that
+     * cannot name an artifact still drops its record — it just has no files.
+     */
+    readonly remove: (
+      input: WatchWidgetSourceGetInput,
+    ) => Effect.Effect<void, WatchWidgetSourceError>;
     /** The source record plus, for a `ready` artifact, the emitted bundle. */
     readonly get: (
       input: WatchWidgetSourceGetInput,
@@ -296,7 +314,12 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
       // Indexed view of the artifact directory: records seen this run plus
       // any lazily decoded sidecar metas.
       const records = yield* Ref.make(new Map<WatchWidgetSourceId, WatchWidgetSourceRecord>());
-      const publishes = yield* PubSub.unbounded<WatchWidgetSourceRecord>();
+      // The sourceId rides alongside so a removal tombstone (record: null)
+      // can still reach the subscribers filtering on it.
+      const publishes = yield* PubSub.unbounded<{
+        readonly sourceId: WatchWidgetSourceId;
+        readonly record: WatchWidgetSourceRecord | null;
+      }>();
       const publishStamps = yield* Ref.make<ReadonlyArray<number>>([]);
 
       const artifactPath = (artifactHash: string) =>
@@ -342,10 +365,10 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
        */
       const storeRecord = Effect.fnUntraced(function* (record: WatchWidgetSourceRecord) {
         yield* Ref.update(records, (map) => new Map(map).set(record.sourceId, record));
-        yield* PubSub.publish(publishes, record);
+        yield* PubSub.publish(publishes, { sourceId: record.sourceId, record });
       });
 
-      const publish: WidgetTranspileService["Service"]["publish"] = (input) =>
+      const publishInner = (input: WatchWidgetSourcePublishInput, enforcePublishLimit: boolean) =>
         Effect.gen(function* () {
           if (
             input.manifest.subscriptions.length > limits.maxBridgeDeclarations ||
@@ -362,22 +385,26 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
               `Widget source exceeds the ${limits.maxSourceBytes}-byte limit.`,
             );
           }
-          const admitted = yield* Clock.currentTimeMillis.pipe(
-            Effect.flatMap((now) =>
-              Ref.modify(publishStamps, (stamps) => {
-                const fresh = stamps.filter((stamp) => now - stamp < limits.publishWindowMs);
-                if (fresh.length >= limits.maxPublishesPerWindow) {
-                  return [false, fresh] as const;
-                }
-                return [true, [...fresh, now]] as const;
-              }),
-            ),
-          );
-          if (!admitted) {
-            return yield* sourceError(
-              "publishRateLimited",
-              `Widget source publishes are limited to ${limits.maxPublishesPerWindow} per ${Math.round(limits.publishWindowMs / 1_000)}s.`,
+          // The per-window cap bounds agent-authored churn only: trusted
+          // pack registration neither consumes nor is rejected by it.
+          if (enforcePublishLimit) {
+            const admitted = yield* Clock.currentTimeMillis.pipe(
+              Effect.flatMap((now) =>
+                Ref.modify(publishStamps, (stamps) => {
+                  const fresh = stamps.filter((stamp) => now - stamp < limits.publishWindowMs);
+                  if (fresh.length >= limits.maxPublishesPerWindow) {
+                    return [false, fresh] as const;
+                  }
+                  return [true, [...fresh, now]] as const;
+                }),
+              ),
             );
+            if (!admitted) {
+              return yield* sourceError(
+                "publishRateLimited",
+                `Widget source publishes are limited to ${limits.maxPublishesPerWindow} per ${Math.round(limits.publishWindowMs / 1_000)}s.`,
+              );
+            }
           }
 
           // The cache key covers exactly what determines the artifact: the
@@ -467,6 +494,49 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           ),
         );
 
+      const publish: WidgetTranspileService["Service"]["publish"] = (input) =>
+        publishInner(input, true);
+
+      const publishTrusted: WidgetTranspileService["Service"]["publishTrusted"] = (input) =>
+        publishInner(input, false);
+
+      const remove: WidgetTranspileService["Service"]["remove"] = (input) =>
+        Effect.gen(function* () {
+          // Files go first: if they cannot be deleted the record stays
+          // fetchable — matching the state a failed removal should leave.
+          const artifactHash = input.sourceId.startsWith(SOURCE_ID_PREFIX)
+            ? input.sourceId.slice(SOURCE_ID_PREFIX.length)
+            : null;
+          if (artifactHash !== null && ARTIFACT_HASH_PATTERN.test(artifactHash)) {
+            yield* Effect.all(
+              [
+                fs.remove(artifactPath(artifactHash), { force: true }),
+                fs.remove(metaPath(artifactHash), { force: true }),
+              ],
+              { concurrency: 1, discard: true },
+            ).pipe(
+              Effect.mapError((cause) =>
+                sourceError("artifactStoreFailed", "Could not remove the widget artifact.", {
+                  sourceId: input.sourceId,
+                  cause,
+                }),
+              ),
+            );
+          }
+          yield* Ref.update(records, (map) => {
+            const next = new Map(map);
+            next.delete(input.sourceId);
+            return next;
+          });
+          yield* PubSub.publish(publishes, { sourceId: input.sourceId, record: null });
+        }).pipe(
+          Effect.mapError((cause) =>
+            isSourceError(cause)
+              ? cause
+              : sourceError("artifactStoreFailed", "Widget source removal failed.", { cause }),
+          ),
+        );
+
       const get: WidgetTranspileService["Service"]["get"] = (input) =>
         Effect.gen(function* () {
           const record = yield* loadRecord(input.sourceId);
@@ -506,14 +576,14 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
             return Stream.concat(
               Stream.succeed(current),
               Stream.fromSubscription(subscription).pipe(
-                Stream.filter((record) => record.sourceId === input.sourceId),
-                Stream.map((record): WatchWidgetSourceRecord | null => record),
+                Stream.filter((event) => event.sourceId === input.sourceId),
+                Stream.map((event) => event.record),
               ),
             );
           }),
         );
 
-      return { publish, get, subscribe };
+      return { publish, publishTrusted, remove, get, subscribe };
     }),
   );
 

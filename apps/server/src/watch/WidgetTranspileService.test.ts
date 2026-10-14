@@ -437,3 +437,62 @@ it.effect("subscribe emits the current record, then the republished one", () => 
     ),
   );
 });
+
+it.effect("trusted publishes bypass the per-window cap without consuming it", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      // Three trusted publishes under a two-per-window cap — and none of
+      // them spends the agent-facing budget.
+      yield* service.publishTrusted(input("const a = 1;"));
+      yield* service.publishTrusted(input("const a = 2;"));
+      yield* service.publishTrusted(input("const a = 3;"));
+      yield* service.publish(input("const a = 4;"));
+      yield* service.publish(input("const a = 5;"));
+      yield* expectSourceError("publishRateLimited", service.publish(input("const a = 6;")));
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        layerTranspiler((source) => Effect.succeed(`/* ${source} */`)),
+        { maxPublishesPerWindow: 2 },
+      ),
+    ),
+  ),
+);
+
+it.effect("remove deletes the artifact files and emits a tombstone", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+
+      const { source } = yield* service.publish(input("const a = 1;"));
+      const collected = yield* service
+        .subscribe({ sourceId: source.sourceId })
+        .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      yield* service.remove({ sourceId: source.sourceId });
+
+      const chunk = yield* Fiber.join(collected);
+      assert.deepEqual(
+        [...chunk].map((record) => record?.status ?? null),
+        ["ready", null],
+      );
+
+      const { source: gone, bundle } = yield* service.get({ sourceId: source.sourceId });
+      assert.isNull(gone);
+      assert.isNull(bundle);
+      const artifactFile = path.join(serverConfig.widgetArtifactsDir, `${source.artifactHash}.js`);
+      const metaFile = path.join(serverConfig.widgetArtifactsDir, `${source.artifactHash}.json`);
+      assert.isFalse(yield* fs.exists(artifactFile));
+      assert.isFalse(yield* fs.exists(metaFile));
+
+      // A second removal is a no-op, not an error.
+      yield* service.remove({ sourceId: source.sourceId });
+    }),
+  ).pipe(
+    Effect.provide(layerServiceWithDeps(layerTranspiler(() => Effect.succeed("T3.render();")))),
+  ),
+);

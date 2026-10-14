@@ -32,6 +32,12 @@ import { watchEnvironment } from "~/state/watch";
  * `allow-same-origin`, no forms), and a generated document whose CSP
  * hash-authorizes exactly the prelude and the artifact — zero network, no
  * credential-entry UI.
+ *
+ * Kept in sync with its mobile twin,
+ * `apps/mobile/src/features/watch/WatchAppWebView.tsx`: the feed plumbing
+ * (subscription state, deliver/deliverError) is intentionally duplicated
+ * because the host differs — srcdoc iframe + window.postMessage here,
+ * react-native WebView + ReactNativeWebView bridge there.
  */
 
 export interface WatchAppFeedSubscription {

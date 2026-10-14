@@ -519,10 +519,12 @@ export const layer = Layer.effect(
         return { page, widgets };
       });
 
+    // Archived rows count toward the max: a page created while the max-keyed
+    // page is archived must still append after it, or restoring that page
+    // lands two rows on one key and ordering falls to arbitrary page_id.
     const lastOrderKey = Effect.gen(function* () {
       const rows = yield* sql<{ order_key: string }>`
         SELECT order_key FROM watch_pages
-        WHERE archived_at IS NULL
         ORDER BY order_key DESC, page_id DESC
         LIMIT 1
       `;

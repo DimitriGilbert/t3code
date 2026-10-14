@@ -544,6 +544,46 @@ export const WatchNotificationHistoryEntry = Schema.Struct({
 });
 export type WatchNotificationHistoryEntry = typeof WatchNotificationHistoryEntry.Type;
 
+export class WatchNotificationError extends Schema.TaggedError<WatchNotificationError>()(
+  "WatchNotificationError",
+  {
+    message: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {}
+
+/**
+ * One item on the notification subscription: the client's current prefs first
+ * (and again after every `setPrefs`), then each notification the server emits.
+ */
+export const WatchNotificationStreamItem = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("prefs"),
+    prefs: WatchNotificationPrefs,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("notification"),
+    notification: WatchNotificationEvent,
+  }),
+]);
+export type WatchNotificationStreamItem = typeof WatchNotificationStreamItem.Type;
+
+export const WatchNotificationsHistoryInput = Schema.Struct({
+  /** Newest-first; defaults server-side when omitted. */
+  limit: Schema.optionalKey(PositiveInt),
+});
+export type WatchNotificationsHistoryInput = typeof WatchNotificationsHistoryInput.Type;
+
+export const WatchNotificationsHistoryResult = Schema.Struct({
+  entries: ForwardCompatibleArray(WatchNotificationHistoryEntry),
+});
+export type WatchNotificationsHistoryResult = typeof WatchNotificationsHistoryResult.Type;
+
+export const WatchNotificationsSetPrefsResult = Schema.Struct({
+  prefs: WatchNotificationPrefs,
+});
+export type WatchNotificationsSetPrefsResult = typeof WatchNotificationsSetPrefsResult.Type;
+
 // ── Agent-authored widgets (contracts only; pipeline lands in a later phase)
 
 /** Declared bridge surface: the only data subscriptions and actions the frame may use. */

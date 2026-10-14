@@ -363,6 +363,12 @@ import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts
 import {
   WatchGalleryListResult,
   WatchLayoutCollisionError,
+  WatchNotificationError,
+  WatchNotificationPrefs,
+  WatchNotificationsHistoryInput,
+  WatchNotificationsHistoryResult,
+  WatchNotificationsSetPrefsResult,
+  WatchNotificationStreamItem,
   WatchPageCreateInput,
   WatchPageDeleteInput,
   WatchPageDeleteResult,
@@ -2088,6 +2094,34 @@ const WsWatchWidgetsMoveToPageRpc = Rpc.make(WS_METHODS.watchWidgetsMoveToPage, 
   error: WsWatchLayoutCheckedError,
 });
 
+const WsWatchNotificationReadError = Schema.Union([
+  WatchNotificationError,
+  EnvironmentAuthorizationError,
+]);
+
+/**
+ * Streams the subscriber's prefs first, then each notification the server
+ * emits once; per-channel delivery decisions stay client-side.
+ */
+const WsWatchNotificationsSubscribeRpc = Rpc.make(WS_METHODS.watchNotificationsSubscribe, {
+  payload: Schema.Struct({}),
+  success: WatchNotificationStreamItem,
+  error: WsWatchNotificationReadError,
+  stream: true,
+});
+
+const WsWatchNotificationsHistoryRpc = Rpc.make(WS_METHODS.watchNotificationsHistory, {
+  payload: WatchNotificationsHistoryInput,
+  success: WatchNotificationsHistoryResult,
+  error: WsWatchNotificationReadError,
+});
+
+const WsWatchNotificationsSetPrefsRpc = Rpc.make(WS_METHODS.watchNotificationsSetPrefs, {
+  payload: WatchNotificationPrefs,
+  success: WatchNotificationsSetPrefsResult,
+  error: WsWatchNotificationReadError,
+});
+
 /**
  * Checks the connection's scopes against the scope each RPC declares, before
  * the handler runs. Every RPC in `WsRpcGroup` carries it, so a handler cannot
@@ -2326,6 +2360,9 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchWidgetsSetLayoutRpc,
   WsWatchWidgetsSetMobileProjectionRpc,
   WsWatchWidgetsMoveToPageRpc,
+  WsWatchNotificationsSubscribeRpc,
+  WsWatchNotificationsHistoryRpc,
+  WsWatchNotificationsSetPrefsRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = WsRpcGroupCore.merge(WsWatchRpcGroup);

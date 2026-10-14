@@ -317,8 +317,16 @@ describe("buildWatchWidgetAddInput", () => {
       pageId: target.id,
       expectedRevision: 7,
       kind: "connector-status",
+      config: { source: { kind: "static" } },
       placement: { x: 0, y: 4, w: 12, h: 2 },
     });
+  });
+
+  it("defaults threads-section widgets to the ambient threads source", () => {
+    const input = buildWatchWidgetAddInput(page("p"), [], "active-work");
+    expect(input.config).toEqual({ source: { kind: "threads" } });
+    // Kinds outside the first-party catalog carry no seed config.
+    expect(buildWatchWidgetAddInput(page("p"), [], "agent:src-1").config).toBeUndefined();
   });
 
   it("sizes unknown kinds from the provided override or the fallback", () => {

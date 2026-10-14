@@ -363,6 +363,10 @@
       "types": "./src/state/watchPages.ts",
       "default": "./src/state/watchPages.ts"
     },
+    "./state/watch-widgets": {
+      "types": "./src/state/watchWidgets.ts",
+      "default": "./src/state/watchWidgets.ts"
+    },
     "./work-log/user-input": {
       "types": "./src/work-log/userInput.ts",
       "default": "./src/work-log/userInput.ts"

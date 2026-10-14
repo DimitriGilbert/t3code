@@ -26,8 +26,8 @@ export function WatchProvenanceMarker(props: { readonly provenance: WatchWidgetP
       />
       <TooltipPopup>
         {isAgentAuthored
-          ? "Authored by an agent — sandboxed, no network"
-          : `Installed by connector pack ${provenance.slice(PACK_PROVENANCE_PREFIX.length)}`}
+          ? "Authored by an agent. Sandboxed, no network."
+          : `Installed by connector pack ${provenance.slice(PACK_PROVENANCE_PREFIX.length)}.`}
       </TooltipPopup>
     </Tooltip>
   );

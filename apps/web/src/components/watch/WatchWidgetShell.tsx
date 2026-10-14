@@ -5,7 +5,6 @@ import {
   watchFirstPartyWidgetSpec,
   watchWidgetDisplayTitle,
   watchWidgetIsConfigurable,
-  watchWidgetProvenanceMarker,
   type WatchResizeEdge,
 } from "@t3tools/client-runtime/state/watch-pages";
 import type { WatchWidget, WatchWidgetId } from "@t3tools/contracts";
@@ -13,11 +12,11 @@ import { CheckIcon, EllipsisIcon, GripVerticalIcon, Settings2Icon } from "lucide
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { useRef } from "react";
 
-import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
 
+import { WatchProvenanceMarker } from "./WatchProvenanceMarker";
 import { watchWidgetConfigFormId } from "./WatchWidgetSettingsForm";
 
 const RESIZE_HANDLE_STYLES: Record<WatchResizeEdge, string> = {
@@ -58,28 +57,6 @@ const GRIP_KEY_DELTAS: Record<string, readonly [number, number]> = {
   ArrowLeft: [-1, 0],
   ArrowRight: [1, 0],
 };
-
-function WatchProvenanceBadge(props: { readonly widget: WatchWidget }) {
-  const marker = watchWidgetProvenanceMarker(props.widget.provenance);
-  if (marker === null) return null;
-  const packId = marker === "pack" ? props.widget.provenance.slice("pack:".length) : null;
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <Badge size="sm" variant={marker === "agent" ? "info" : "secondary"}>
-            {marker === "agent" ? "Agent" : "Pack"}
-          </Badge>
-        }
-      />
-      <TooltipPopup>
-        {marker === "agent"
-          ? "Authored by an agent. Sandboxed, no network."
-          : `Installed by connector pack ${packId}.`}
-      </TooltipPopup>
-    </Tooltip>
-  );
-}
 
 /**
  * The card chrome around every watch widget: fixed 28px header carrying the
@@ -162,7 +139,7 @@ export function WatchWidgetShell(props: {
           (editing || configuring) && "border-b border-border/60",
         )}
       >
-        <WatchProvenanceBadge widget={props.widget} />
+        <WatchProvenanceMarker provenance={props.widget.provenance} />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">
           {configuring ? "Configure" : watchWidgetDisplayTitle(props.widget)}
         </span>

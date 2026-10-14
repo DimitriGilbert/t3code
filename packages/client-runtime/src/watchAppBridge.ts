@@ -69,6 +69,9 @@ export interface WatchAppHostHandlers {
     /**
      * The connector instance resolved host-side from the widget row's config —
      * `undefined` for widgets with no connector binding. Never a frame-supplied id.
+     * Bridge feeds are connector-bound only in v1: a widget configured on a
+     * `threads` or `static` source gets `undefined` here and its subscribes are
+     * refused — those source kinds feed first-party widget kinds natively.
      */
     readonly instanceId: WatchConnectorInstanceId | undefined;
   }) => Promise<void>;
@@ -205,8 +208,12 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
     answer(id, () =>
       options.openSubscription({ name, instanceId: bound }).then(
         () => {
-          opening.delete(name);
-          if (disposed) {
+          // An unsubscribe that landed while the open was in flight already
+          // dropped the name from `opening`; the just-opened feed is closed
+          // back rather than tracked, or a dead feed leaks past the widget's
+          // own release.
+          const wanted = opening.delete(name);
+          if (disposed || !wanted) {
             options.closeSubscription({ name });
             return {};
           }

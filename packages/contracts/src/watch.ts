@@ -123,6 +123,13 @@ export const WatchWidgetStaticSource = Schema.Struct({
 });
 export type WatchWidgetStaticSource = typeof WatchWidgetStaticSource.Type;
 
+/**
+ * What a widget's data reads bind to. For `agent:` widgets the bridge's data
+ * subscriptions are connector-bound only in v1: a `threads` or `static` source
+ * configures the widget but binds no connector instance, so its `T3.subscribe`
+ * calls are refused — those source kinds feed first-party widget kinds
+ * natively.
+ */
 export const WatchWidgetSource = Schema.Union([
   WatchWidgetThreadsSource,
   WatchWidgetConnectorSource,

@@ -17,6 +17,16 @@ vi.mock("~/state/watch", () => ({
   },
 }));
 
+const harness = vi.hoisted(() => ({
+  theme: { appearance: "dark" as const, variables: { "--background": "#000000" } },
+}));
+
+// The frame contributes the live theme to host context; pinned here so the
+// palette modules (localStorage, matchMedia) stay out of the bridge tests.
+vi.mock("~/hooks/useHtmlRenderTheme", () => ({
+  useHtmlRenderTheme: () => harness.theme,
+}));
+
 import { WatchAppFrame, type WatchAppFeedProps } from "./WatchAppFrame";
 
 const environmentId = Schema.decodeSync(EnvironmentId)("env-1");
@@ -87,6 +97,11 @@ async function mount(overrides: Partial<Parameters<typeof WatchAppFrame>[0]> = {
 
 const postedMessages = () => contentWindow.postMessage.mock.calls.map((call) => call[0]);
 
+// Mount pushes the initial host context as a notification; assertions about
+// request/response traffic filter it out rather than restating it.
+const postedReplies = () =>
+  postedMessages().filter((message) => !("method" in (message as Record<string, unknown>)));
+
 const postToHost = (data: unknown, source: unknown = contentWindow) =>
   act(async () => {
     messageListener?.({ source, data });
@@ -128,7 +143,7 @@ describe("WatchAppFrame bridge wiring", () => {
       params: { name: "status" },
     });
     expect(onViolation).not.toHaveBeenCalled();
-    expect(postedMessages()).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+    expect(postedReplies()).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
     const feed = feeds.get("status");
     expect(feed?.feed).toEqual({ name: "status", instanceId });
     expect(feed?.environmentId).toBe(environmentId);
@@ -147,7 +162,7 @@ describe("WatchAppFrame bridge wiring", () => {
     expect(onViolation).toHaveBeenCalledWith(
       expect.objectContaining({ code: "undeclaredSubscription", name: "secrets" }),
     );
-    const replies = postedMessages();
+    const replies = postedReplies();
     expect(replies).toHaveLength(1);
     expect(replies[0]).toMatchObject({ jsonrpc: "2.0", id: 1, error: expect.anything() });
   });
@@ -167,7 +182,7 @@ describe("WatchAppFrame bridge wiring", () => {
   it("ignores messages that did not come from this frame's window", async () => {
     await mount();
     await postToHost({ jsonrpc: "2.0", id: 1, method: "t3.watch/context" }, { other: true });
-    expect(postedMessages()).toEqual([]);
+    expect(postedReplies()).toEqual([]);
   });
 
   it("lets an injected feed deliver stream items to the document", async () => {
@@ -186,5 +201,68 @@ describe("WatchAppFrame bridge wiring", () => {
       method: "t3.watch/data",
       params: { name: "status", item: { up: true } },
     });
+  });
+
+  it("answers t3.watch/context with the live theme, merged under caller context", async () => {
+    await mount({ hostContext: () => ({ density: "compact" }) });
+    await postToHost({ jsonrpc: "2.0", id: 1, method: "t3.watch/context" });
+    expect(postedMessages()).toEqual([
+      {
+        jsonrpc: "2.0",
+        method: "t3.watch/context",
+        params: {
+          theme: "dark",
+          styles: { variables: { "--background": "#000000" } },
+          density: "compact",
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          theme: "dark",
+          styles: { variables: { "--background": "#000000" } },
+          density: "compact",
+        },
+      },
+    ]);
+  });
+});
+
+describe("WatchAppFrame navigation containment", () => {
+  it("unmounts the iframe and stops the widget when the document navigates away", async () => {
+    const { onViolation, feeds } = await mount();
+    await postToHost({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "t3.watch/subscribe",
+      params: { name: "status" },
+    });
+    expect(feeds.get("status")).toBeDefined();
+
+    // The first load is the generated document; a second load on the same
+    // document means the frame navigated itself.
+    const fireLoad = () =>
+      act(async () => {
+        (renderer!.root.findByType("iframe").props as { onLoad: () => void }).onLoad();
+      });
+    await fireLoad();
+    expect(renderer!.root.findAllByType("iframe")).toHaveLength(1);
+    await fireLoad();
+
+    expect(onViolation).toHaveBeenCalledWith(expect.objectContaining({ code: "navigatedAway" }));
+    // The hostile document is unmounted, not just disconnected, and the
+    // stopped message renders in its place.
+    expect(renderer!.root.findAllByType("iframe")).toHaveLength(0);
+    expect(
+      renderer!.root.findAllByType("p").some((p) => p.children.join("").includes("stopped")),
+    ).toBe(true);
+    // Disposal closed the feed; the dead host can no longer post to the page.
+    act(() => {
+      feeds.get("status")?.host.deliver("status", { up: true });
+    });
+    expect(
+      postedMessages().every((m) => (m as { method?: string }).method !== "t3.watch/data"),
+    ).toBe(true);
   });
 });

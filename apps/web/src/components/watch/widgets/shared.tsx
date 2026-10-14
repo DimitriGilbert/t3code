@@ -22,7 +22,9 @@ export function WatchWidgetRows(props: { readonly children: ReactNode }) {
 
 /**
  * One clickable row: title, a small status/meta cluster, and trailing
- * actions that don't bubble the row's click.
+ * actions. The row itself is not the button — `actions` holds real buttons,
+ * and a <button> cannot legally nest inside one. The title+meta cluster is
+ * the open-target; actions sit beside it so their clicks are never row clicks.
  */
 export function WatchWidgetRow(props: {
   readonly title: string;
@@ -32,18 +34,22 @@ export function WatchWidgetRow(props: {
   readonly className?: string | undefined;
 }) {
   return (
-    <button
-      type="button"
-      onClick={props.onOpen}
+    <div
       className={cn(
-        "group/row flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent/60",
+        "group/row flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 transition-colors hover:bg-accent/60",
         props.className,
       )}
     >
-      <span className="min-w-0 flex-1 truncate text-xs font-medium">{props.title}</span>
-      {props.meta}
+      <button
+        type="button"
+        onClick={props.onOpen}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+      >
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{props.title}</span>
+        {props.meta}
+      </button>
       {props.actions}
-    </button>
+    </div>
   );
 }
 

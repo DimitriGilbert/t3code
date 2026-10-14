@@ -1,6 +1,6 @@
 {
   "id": "pack.fixture.clanker",
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "operations": [
     {
       "name": "clanker.watchRuns",
@@ -9,5 +9,12 @@
   ],
   "egressHosts": [],
   "secretKeys": [],
-  "transport": "file"
+  "transport": "file",
+  "widgets": [
+    {
+      "name": "Clanker runs",
+      "file": "widgets/runs.tsx",
+      "bridge": { "subscriptions": ["runs"], "actions": [] }
+    }
+  ]
 }

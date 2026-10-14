@@ -232,6 +232,18 @@ const RPC_AGGREGATES = {
   [WS_METHODS.watchNotificationsSubscribe]: "watch",
   [WS_METHODS.watchNotificationsHistory]: "watch",
   [WS_METHODS.watchNotificationsSetPrefs]: "watch",
+  [WS_METHODS.watchConnectorsListInstances]: "watch",
+  [WS_METHODS.watchConnectorsSubscribeInstances]: "watch",
+  [WS_METHODS.watchConnectorsCreateInstance]: "watch",
+  [WS_METHODS.watchConnectorsUpdateInstance]: "watch",
+  [WS_METHODS.watchConnectorsDeleteInstance]: "watch",
+  [WS_METHODS.watchConnectorsSetInstanceConfig]: "watch",
+  [WS_METHODS.watchConnectorsRequestInstall]: "watch",
+  [WS_METHODS.watchConnectorsRequestUpgrade]: "watch",
+  [WS_METHODS.watchConnectorsPrepareInstallConfirm]: "watch",
+  [WS_METHODS.watchConnectorsConfirmInstall]: "watch",
+  [WS_METHODS.watchConnectorsConfirmUpgrade]: "watch",
+  [WS_METHODS.watchConnectorsCancelInstallRequest]: "watch",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

@@ -1,5 +1,6 @@
 import {
   AuthEnvironmentMaintainScope,
+  CLIENT_GUARDED_RPC_SCOPES,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
   AuthProvidersManageScope,
@@ -61,6 +62,45 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.terminalClose,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthTerminalOperateScope);
+    }
+  });
+
+  it("splits watch connector scopes across read, operate, and the human-confirm grant", () => {
+    for (const method of [
+      WS_METHODS.watchConnectorsListInstances,
+      WS_METHODS.watchConnectorsSubscribeInstances,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+    for (const method of [
+      WS_METHODS.watchConnectorsCreateInstance,
+      WS_METHODS.watchConnectorsUpdateInstance,
+      WS_METHODS.watchConnectorsDeleteInstance,
+      WS_METHODS.watchConnectorsSetInstanceConfig,
+      WS_METHODS.watchConnectorsRequestInstall,
+      WS_METHODS.watchConnectorsRequestUpgrade,
+      WS_METHODS.watchConnectorsPrepareInstallConfirm,
+      WS_METHODS.watchConnectorsCancelInstallRequest,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+    for (const method of [
+      WS_METHODS.watchConnectorsConfirmInstall,
+      WS_METHODS.watchConnectorsConfirmUpgrade,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthEnvironmentMaintainScope);
+      // The client-side grant gate matches the server grant — an agent or a
+      // read-only client cannot even surface the confirm affordance.
+      expect(CLIENT_GUARDED_RPC_SCOPES[method]).toBe(AuthEnvironmentMaintainScope);
+    }
+    // Request-side calls are agent-reachable, so they are intentionally not
+    // client-guarded — the human confirm is the guard.
+    for (const method of [
+      WS_METHODS.watchConnectorsRequestInstall,
+      WS_METHODS.watchConnectorsRequestUpgrade,
+      WS_METHODS.watchConnectorsPrepareInstallConfirm,
+    ]) {
+      expect(Object.hasOwn(CLIENT_GUARDED_RPC_SCOPES, method)).toBe(false);
     }
   });
 

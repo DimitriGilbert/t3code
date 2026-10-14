@@ -82,6 +82,8 @@ export function WatchBoard(props: {
   readonly onWidgetMenu?: (widget: WatchWidget, position: { x: number; y: number }) => void;
   /** Live body inside each widget shell; absent keeps the placeholder copy. */
   readonly renderBody?: (widget: WatchWidget) => ReactNode;
+  /** Extra header chrome per widget — e.g. the threshold alert badge. */
+  readonly renderHeaderAlert?: (widget: WatchWidget) => ReactNode;
 }) {
   const wide = useMediaQuery({ min: WATCH_GRID_EDIT_MIN_WIDTH_PX });
   const stacked = useMediaQuery({ max: WATCH_GRID_STACK_MIN_WIDTH_PX - 1 });
@@ -288,6 +290,7 @@ export function WatchBoard(props: {
       colliding={interaction?.widgetId === widget.id && interaction.collides}
       onConfigure={props.onConfigureWidget ? () => props.onConfigureWidget?.(widget) : undefined}
       onMenu={props.onWidgetMenu ? (position) => props.onWidgetMenu?.(widget, position) : undefined}
+      headerAlert={props.renderHeaderAlert?.(widget)}
       onKeyboardAdjust={(deltaColumns, deltaRows, resize) =>
         handleKeyboardAdjust(widget, deltaColumns, deltaRows, resize)
       }
@@ -328,6 +331,7 @@ export function WatchBoard(props: {
                   ? (position) => props.onWidgetMenu?.(widget, position)
                   : undefined
               }
+              headerAlert={props.renderHeaderAlert?.(widget)}
               style={{ minHeight: `calc(${ROW_UNIT_PX} * ${widget.placement.h})` }}
             >
               {props.renderBody?.(widget)}

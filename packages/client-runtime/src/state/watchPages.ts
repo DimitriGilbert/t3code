@@ -1,6 +1,8 @@
 import type {
   ProjectId,
+  WatchConnectorInstanceId,
   WatchGalleryTemplate,
+  WatchPackWidgetSource,
   WatchPage,
   WatchPageId,
   WatchPageInstantiateFromGalleryInput,
@@ -504,11 +506,16 @@ export function watchFirstPartyWidgetSpec(
  * bindable `threads`/`connector` source or a declared settings field.
  * Widgets with neither (e.g. connector-status) suppress the Configure
  * affordance rather than swapping in an empty card. Non-first-party kinds
- * have no generated form at all.
+ * have no generated settings form but stay repointable when they bind a
+ * connector instance.
  */
 export function watchWidgetIsConfigurable(widget: Pick<WatchWidget, "kind" | "config">): boolean {
   const spec = watchFirstPartyWidgetSpec(widget.kind);
-  if (spec === undefined) return false;
+  if (spec === undefined) {
+    // Agent/pack kinds have no declared settings fields, but a connector
+    // source binding is still repointable through the same picker.
+    return widget.config.source?.kind === "connector";
+  }
   if (spec.settingsFields.length > 0) return true;
   const source = widget.config.source;
   return source?.kind === "threads" || source?.kind === "connector";
@@ -581,6 +588,34 @@ export function buildWatchWidgetAddInput(
     kind,
     ...(config === undefined ? {} : { config }),
     placement: firstFreeWatchPlacement(pageWidgets, size ?? spec?.defaultSize ?? { w: 4, h: 3 }),
+  };
+}
+
+/**
+ * The `addWidget` payload for a pack-bundled widget source: the `agent:` kind
+ * names the published source, the `pack:<packId>` provenance marks where the
+ * code shipped from, and the widget binds a connector source — to
+ * `options.instanceId` when the caller resolved one, otherwise unbound for
+ * the user to pick in Configure.
+ */
+export function buildWatchWidgetAddPackInput(
+  page: WatchPage,
+  pageWidgets: ReadonlyArray<WatchWidget>,
+  source: WatchPackWidgetSource,
+  options?: { readonly instanceId?: WatchConnectorInstanceId },
+): WatchWidgetAddInput {
+  return {
+    pageId: page.id,
+    expectedRevision: page.revision,
+    kind: `agent:${source.sourceId}`,
+    config: {
+      source: {
+        kind: "connector",
+        ...(options?.instanceId === undefined ? {} : { binding: options.instanceId }),
+      },
+    },
+    provenance: `pack:${source.packId}`,
+    placement: firstFreeWatchPlacement(pageWidgets, { w: 4, h: 3 }),
   };
 }
 

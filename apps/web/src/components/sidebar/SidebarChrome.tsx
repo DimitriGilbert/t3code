@@ -11,6 +11,8 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { usePullRequestsSupported, useWatchScreenSupported } from "../../state/environments";
+import { useActiveEnvironmentId } from "../../state/entities";
+import { useWatchUnreadCount } from "../watch/watchNotificationStore";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -140,10 +142,13 @@ function SidebarUtilityItem({
   icon,
   label,
   onClick,
+  badgeCount,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
+  /** Unread count surfaced on the icon (e.g. Watch notifications). */
+  badgeCount?: number;
 }) {
   return (
     <SidebarMenuItem className="shrink-0">
@@ -151,7 +156,19 @@ function SidebarUtilityItem({
         <TooltipTrigger
           render={
             <SidebarMenuButton aria-label={label} onClick={onClick} size="icon">
-              {icon}
+              <span className="relative inline-flex">
+                {icon}
+                {badgeCount === undefined || badgeCount === 0 ? null : (
+                  <Badge
+                    size="sm"
+                    variant="default"
+                    className="absolute -top-1.5 -right-2"
+                    aria-label={`${badgeCount} unread notifications`}
+                  >
+                    {badgeCount > 9 ? "9+" : badgeCount}
+                  </Badge>
+                )}
+              </span>
             </SidebarMenuButton>
           }
         />
@@ -170,6 +187,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   });
   const pullRequestsSupported = usePullRequestsSupported();
   const watchScreenSupported = useWatchScreenSupported();
+  const watchUnreadCount = useWatchUnreadCount(useActiveEnvironmentId());
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);
@@ -232,6 +250,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               icon={<LayoutDashboardIcon />}
               label="Watch"
               onClick={handleWatchClick}
+              badgeCount={watchUnreadCount}
             />
           ) : null}
           <SidebarUtilityItem

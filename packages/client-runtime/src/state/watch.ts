@@ -151,6 +151,14 @@ export function createWatchEnvironmentAtoms<R, E>(
       label: "environment-command:watch:page-delete",
       tag: WS_METHODS.watchPagesDelete,
     }),
+    restorePage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:page-restore",
+      tag: WS_METHODS.watchPagesRestore,
+    }),
+    updatePageScope: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:page-update-scope",
+      tag: WS_METHODS.watchPagesUpdateScope,
+    }),
     instantiatePageFromGallery: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:watch:page-instantiate-from-gallery",
       tag: WS_METHODS.watchPagesInstantiateFromGallery,

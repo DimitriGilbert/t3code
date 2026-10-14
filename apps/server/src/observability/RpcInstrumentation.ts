@@ -219,6 +219,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.watchPagesReorder]: "watch",
   [WS_METHODS.watchPagesDuplicate]: "watch",
   [WS_METHODS.watchPagesDelete]: "watch",
+  [WS_METHODS.watchPagesRestore]: "watch",
+  [WS_METHODS.watchPagesUpdateScope]: "watch",
   [WS_METHODS.watchPagesInstantiateFromGallery]: "watch",
   [WS_METHODS.watchGalleryList]: "watch",
   [WS_METHODS.watchWidgetsAdd]: "watch",

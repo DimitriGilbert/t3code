@@ -263,6 +263,26 @@ export const WatchPageDeleteInput = Schema.Struct({
 });
 export type WatchPageDeleteInput = typeof WatchPageDeleteInput.Type;
 
+/** Un-archives a page parked by a project delete; widgets ride along untouched. */
+export const WatchPageRestoreInput = Schema.Struct({
+  pageId: WatchPageId,
+});
+export type WatchPageRestoreInput = typeof WatchPageRestoreInput.Type;
+
+/**
+ * Moves a page between `global` and `project` scope. Only the page row
+ * changes: unbound widgets keep no binding and inherit the new ambient
+ * project, while explicit `source.binding` values are stored config and
+ * stay exactly as they were.
+ */
+export const WatchPageUpdateScopeInput = Schema.Struct({
+  pageId: WatchPageId,
+  scope: WatchPageScope,
+  /** Required when `scope` is `"project"`; ignored for global pages. */
+  projectId: Schema.optionalKey(ProjectId),
+});
+export type WatchPageUpdateScopeInput = typeof WatchPageUpdateScopeInput.Type;
+
 export const WatchPageInstantiateFromGalleryInput = Schema.Struct({
   templateId: TrimmedNonEmptyString,
   /** When set, the instance is scoped to this project instead of the template scope. */

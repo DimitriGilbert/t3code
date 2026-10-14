@@ -347,6 +347,10 @@
       "types": "./src/state/watchMounts.ts",
       "default": "./src/state/watchMounts.ts"
     },
+    "./state/watch-pages": {
+      "types": "./src/state/watchPages.ts",
+      "default": "./src/state/watchPages.ts"
+    },
     "./work-log/user-input": {
       "types": "./src/work-log/userInput.ts",
       "default": "./src/work-log/userInput.ts"

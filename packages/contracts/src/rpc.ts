@@ -292,7 +292,7 @@ import {
   DeviceSession,
   DeviceShutdownInput,
 } from "./device.ts";
-import {} from "./previewAutomation.ts";
+import "./previewAutomation.ts";
 import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
@@ -402,8 +402,10 @@ import {
   WatchPageListResult,
   WatchPageRenameInput,
   WatchPageReorderInput,
+  WatchPageRestoreInput,
   WatchPageResult,
   WatchPageRevisionConflictError,
+  WatchPageUpdateScopeInput,
   WatchPageWithWidgetsResult,
   WatchWidgetAddInput,
   WatchWidgetConfigureInput,
@@ -653,6 +655,8 @@ export const WS_METHODS = {
   watchPagesReorder: "watchPages.reorder",
   watchPagesDuplicate: "watchPages.duplicate",
   watchPagesDelete: "watchPages.delete",
+  watchPagesRestore: "watchPages.restore",
+  watchPagesUpdateScope: "watchPages.updateScope",
   watchPagesInstantiateFromGallery: "watchPages.instantiateFromGallery",
   watchGalleryList: "watchGallery.list",
   watchWidgetsAdd: "watchWidgets.add",
@@ -2046,6 +2050,18 @@ const WsWatchPagesDeleteRpc = Rpc.make(WS_METHODS.watchPagesDelete, {
   error: WsWatchReadError,
 });
 
+const WsWatchPagesRestoreRpc = Rpc.make(WS_METHODS.watchPagesRestore, {
+  payload: WatchPageRestoreInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesUpdateScopeRpc = Rpc.make(WS_METHODS.watchPagesUpdateScope, {
+  payload: WatchPageUpdateScopeInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
 const WsWatchPagesInstantiateFromGalleryRpc = Rpc.make(
   WS_METHODS.watchPagesInstantiateFromGallery,
   {
@@ -2521,6 +2537,8 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchPagesReorderRpc,
   WsWatchPagesDuplicateRpc,
   WsWatchPagesDeleteRpc,
+  WsWatchPagesRestoreRpc,
+  WsWatchPagesUpdateScopeRpc,
   WsWatchPagesInstantiateFromGalleryRpc,
   WsWatchWidgetsAddRpc,
   WsWatchWidgetsRemoveRpc,

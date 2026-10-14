@@ -571,6 +571,8 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchPagesReorder,
   WS_METHODS.watchPagesDuplicate,
   WS_METHODS.watchPagesDelete,
+  WS_METHODS.watchPagesRestore,
+  WS_METHODS.watchPagesUpdateScope,
   WS_METHODS.watchPagesInstantiateFromGallery,
   WS_METHODS.watchWidgetsAdd,
   WS_METHODS.watchWidgetsRemove,
@@ -650,6 +652,14 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
       [WS_METHODS.watchPagesDelete]: (input) =>
         Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
           Effect.andThen(watchPages.delete(input)),
+        ),
+      [WS_METHODS.watchPagesRestore]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.restore(input)),
+        ),
+      [WS_METHODS.watchPagesUpdateScope]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.updateScope(input)),
         ),
       [WS_METHODS.watchPagesInstantiateFromGallery]: (input) =>
         watchPages.instantiateFromGallery(input),

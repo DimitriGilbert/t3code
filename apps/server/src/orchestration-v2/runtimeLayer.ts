@@ -57,6 +57,7 @@ import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as WatchPageService from "../watch/WatchPageService.ts";
+import * as WidgetTranspileService from "../watch/WidgetTranspileService.ts";
 import * as ConnectorPoller from "../watch/connectors/ConnectorPoller.ts";
 import * as ConnectorService from "../watch/connectors/ConnectorService.ts";
 import * as ConfirmationTokens from "../watch/connectors/ConfirmationTokens.ts";
@@ -388,6 +389,7 @@ export const layerProduction = Layer.mergeAll(
     Layer.provide(Layer.merge(layerOrchestratorProvided, layerCommandOutputHubProvided)),
   ),
   WatchPageService.layer,
+  WidgetTranspileService.layer.pipe(Layer.provide(WidgetTranspileService.layerTranspiler)),
   layerConnectorsProvided,
   layerConnectorPollerProvided,
   layerUserNotificationsProvided,

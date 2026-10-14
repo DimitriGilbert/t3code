@@ -39,6 +39,10 @@ describe("shouldBundleCliDependency", () => {
       "@napi-rs/keyring",
       "@clerk/electron-passkeys",
       "node-addon-api",
+      // esbuild's JS wrapper resolves its platform binary package by real path.
+      "esbuild",
+      "@esbuild/linux-x64",
+      "@esbuild/win32-arm64",
     ]) {
       assert.strictEqual(shouldBundleCliDependency(id), false, id);
     }

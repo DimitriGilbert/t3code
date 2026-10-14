@@ -108,6 +108,29 @@ export function createWatchEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
     }),
     needsReload,
+    /** Connector packs, instances, pending requests, and pack-registered widget sources. */
+    connectorsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:watch:connectors",
+      tag: WS_METHODS.watchConnectorsSubscribeInstances,
+    }),
+    /**
+     * One connector instance's snapshot stream (`WatchConnectorStreamItem`):
+     * the data an agent widget's bridge feed delivers into its sandbox.
+     */
+    connectorStream: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:watch:connector-stream",
+      tag: WS_METHODS.watchConnectorSubscribe,
+    }),
+    /** A published widget source's record; emits on publish, republish, and removal. */
+    widgetSourceLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:watch:widget-source",
+      tag: WS_METHODS.watchWidgetSourceSubscribe,
+    }),
+    /** The emitted bundle for a `ready` artifact — what the sandbox document injects. */
+    getWidgetSource: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:widget-source-get",
+      tag: WS_METHODS.watchWidgetSourceGet,
+    }),
     createPage: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:watch:page-create",
       tag: WS_METHODS.watchPagesCreate,

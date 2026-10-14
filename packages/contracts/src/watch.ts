@@ -496,8 +496,53 @@ export const WatchConnectorErrorReason = Schema.Literals([
   "confirmationExpired",
   "secretKeyUndeclared",
   "configInvalid",
+  "egressBlocked",
+  "confinementRejected",
+  "watchLimitExceeded",
+  "snapshotTooLarge",
+  "packCodeInvalid",
 ]);
 export type WatchConnectorErrorReason = typeof WatchConnectorErrorReason.Type;
+
+/**
+ * A widget-declared threshold checked server-side against each new connector
+ * snapshot; a false→true crossing emits a `widget.threshold` notification.
+ */
+export const WatchConnectorThresholdRule = Schema.Struct({
+  /** Dotted path into the snapshot data (e.g. `"runs.0.status"`). */
+  path: TrimmedNonEmptyString,
+  op: Schema.Literals(["exists", "eq", "ne", "gt", "gte", "lt", "lte"]),
+  value: Schema.optionalKey(Schema.Unknown),
+  /** Human-readable text carried on the emitted notification. */
+  summary: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type WatchConnectorThresholdRule = typeof WatchConnectorThresholdRule.Type;
+
+export const WatchConnectorSubscribeInput = Schema.Struct({
+  instanceId: WatchConnectorInstanceId,
+  /**
+   * The subscriber's requested cadence — a request, not a guarantee. The
+   * instance's effective interval is the min over subscriber requests,
+   * clamped up to the instance's configured floor.
+   */
+  refreshPolicy: Schema.optionalKey(WatchWidgetRefreshPolicy),
+  /** Widget this subscription serves; needed to attribute threshold alerts. */
+  widgetId: Schema.optionalKey(WatchWidgetId),
+  /** Threshold rules evaluated against each new snapshot for this widget. */
+  thresholds: Schema.optionalKey(Schema.Array(WatchConnectorThresholdRule)),
+});
+export type WatchConnectorSubscribeInput = typeof WatchConnectorSubscribeInput.Type;
+
+/**
+ * One transformed connector snapshot. `data` is the pack's transform output —
+ * raw file bytes and raw upstream responses never cross the wire.
+ */
+export const WatchConnectorSnapshot = Schema.Struct({
+  instanceId: WatchConnectorInstanceId,
+  fetchedAt: IsoDateTime,
+  data: Schema.Unknown,
+});
+export type WatchConnectorSnapshot = typeof WatchConnectorSnapshot.Type;
 
 export class WatchConnectorError extends Schema.TaggedError<WatchConnectorError>()(
   "WatchConnectorError",
@@ -844,3 +889,16 @@ export const WatchWidgetErrorState = Schema.Union([
   }),
 ]);
 export type WatchWidgetErrorState = typeof WatchWidgetErrorState.Type;
+
+/** The connector subscription stream: shared cached snapshots, or a typed widget-facing error. */
+export const WatchConnectorStreamItem = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("snapshot"),
+    snapshot: WatchConnectorSnapshot,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("error"),
+    error: WatchWidgetErrorState,
+  }),
+]);
+export type WatchConnectorStreamItem = typeof WatchConnectorStreamItem.Type;

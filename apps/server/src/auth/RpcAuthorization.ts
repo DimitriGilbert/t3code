@@ -149,6 +149,10 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.watchConnectorsConfirmUpgrade]: AuthEnvironmentMaintainScope,
   [WS_METHODS.watchConnectorsCancelInstallRequest]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchConnectorSubscribe]: AuthOrchestrationReadScope,
+  // Publishing runs the transpiler and touches the artifact cache: a write.
+  [WS_METHODS.watchWidgetSourcePublish]: AuthOrchestrationOperateScope,
+  [WS_METHODS.watchWidgetSourceGet]: AuthOrchestrationReadScope,
+  [WS_METHODS.watchWidgetSourceSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,
   [WS_METHODS.pullRequestsList]: AuthOrchestrationReadScope,

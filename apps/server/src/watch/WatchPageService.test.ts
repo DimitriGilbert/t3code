@@ -294,6 +294,42 @@ it.effect("widget config edits check the widget revision, not the page's", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("pack provenance sticks to agent: kinds and is rejected elsewhere", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    const { page } = yield* createPage("Page");
+
+    const { widget } = yield* watch.addWidget({
+      pageId: page.id,
+      expectedRevision: page.revision,
+      kind: "agent:pack-chart",
+      provenance: "pack:pack.test",
+      placement: { x: 0, y: 0, w: 6, h: 4 },
+    });
+    assert.equal(widget.provenance, "pack:pack.test");
+
+    const agentDefault = yield* watch.addWidget({
+      pageId: page.id,
+      expectedRevision: page.revision + 1,
+      kind: "agent:scratch",
+      placement: { x: 6, y: 0, w: 6, h: 4 },
+    });
+    assert.equal(agentDefault.widget.provenance, "agentPublished");
+
+    const pageNow = (yield* watch.list({})).pages[0]!;
+    const rejected = yield* watch
+      .addWidget({
+        pageId: page.id,
+        expectedRevision: pageNow.revision,
+        kind: "active-work",
+        provenance: "pack:pack.test",
+        placement: { x: 0, y: 4, w: 4, h: 4 },
+      })
+      .pipe(Effect.flip);
+    assert.equal(rejected._tag, "WatchPageError");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("gallery instantiate creates real rows and is repeatable after delete", () =>
   Effect.gen(function* () {
     const watch = yield* WatchPageService.WatchPageService;

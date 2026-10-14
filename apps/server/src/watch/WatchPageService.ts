@@ -334,6 +334,20 @@ const decodeWidgetRow = (row: WatchWidgetRow) =>
 const provenanceForKind = (kind: string): WatchWidgetProvenance =>
   kind.startsWith("agent:") ? "agentPublished" : "firstParty";
 
+/**
+ * Pack-provided widgets are `agent:`-kind widgets whose source shipped inside
+ * a connector pack, so the pack install flow marks them `pack:<packId>` —
+ * provenance a kind alone cannot express. The marker is accepted only on
+ * `agent:` kinds; anything else would mislabel first-party chrome.
+ */
+const provenanceForAdd = (
+  kind: string,
+  provenance: `pack:${string}` | undefined,
+): WatchWidgetProvenance | "invalid" => {
+  if (provenance === undefined) return provenanceForKind(kind);
+  return kind.startsWith("agent:") ? provenance : "invalid";
+};
+
 export const layer = Layer.effect(
   WatchPageService,
   Effect.gen(function* () {
@@ -892,6 +906,13 @@ export const layer = Layer.effect(
             message: conflict.message,
           });
         }
+        const provenance = provenanceForAdd(input.kind, input.provenance);
+        if (provenance === "invalid") {
+          return yield* watchError(
+            `Pack provenance is only valid on agent: widget kinds, not "${input.kind}".`,
+            { pageId: input.pageId },
+          );
+        }
         const nowIso = iso(yield* localNow);
         yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -920,7 +941,7 @@ export const layer = Layer.effect(
               placement: input.placement,
               mobileOrder,
               mobileHidden: false,
-              provenance: provenanceForKind(input.kind),
+              provenance,
               nowIso,
             });
           }),

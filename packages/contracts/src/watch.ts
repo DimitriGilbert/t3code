@@ -15,6 +15,7 @@ import {
   WatchNotificationId,
   WatchPageId,
   WatchWidgetId,
+  WatchWidgetSourceId,
 } from "./baseSchemas.ts";
 
 // ── Pages ────────────────────────────────────────────────────────────────
@@ -51,6 +52,13 @@ export type WatchPage = typeof WatchPage.Type;
 export const WatchWidgetKind = TrimmedNonEmptyString;
 export type WatchWidgetKind = typeof WatchWidgetKind.Type;
 
+/** `pack:<packId>` — a widget whose code shipped inside a connector pack. */
+export const WatchWidgetPackProvenance = Schema.TemplateLiteral([
+  Schema.Literal("pack:"),
+  Schema.String.check(Schema.isNonEmpty()),
+]);
+export type WatchWidgetPackProvenance = typeof WatchWidgetPackProvenance.Type;
+
 /**
  * Who authored the widget's code. Set at creation, never user-editable; it
  * varies the chrome marker text, never the sandbox posture.
@@ -58,7 +66,7 @@ export type WatchWidgetKind = typeof WatchWidgetKind.Type;
 export const WatchWidgetProvenance = Schema.Union([
   Schema.Literal("firstParty"),
   Schema.Literal("agentPublished"),
-  Schema.TemplateLiteral([Schema.Literal("pack:"), Schema.String]),
+  WatchWidgetPackProvenance,
 ]);
 export type WatchWidgetProvenance = typeof WatchWidgetProvenance.Type;
 
@@ -278,6 +286,13 @@ export const WatchWidgetAddInput = Schema.Struct({
   kind: WatchWidgetKind,
   config: Schema.optionalKey(WatchWidgetConfig),
   placement: WatchWidgetPlacement,
+  /**
+   * Overrides the kind-derived provenance for pack-provided widgets: a pack's
+   * install flow creates `agent:`-kind widgets whose code shipped with the
+   * pack, so it marks them `pack:<packId>` at creation. Only the `pack:` form
+   * is settable — `firstParty`/`agentPublished` always derive from `kind`.
+   */
+  provenance: Schema.optionalKey(WatchWidgetPackProvenance),
 });
 export type WatchWidgetAddInput = typeof WatchWidgetAddInput.Type;
 
@@ -827,7 +842,7 @@ export const WatchNotificationsSetPrefsResult = Schema.Struct({
 });
 export type WatchNotificationsSetPrefsResult = typeof WatchNotificationsSetPrefsResult.Type;
 
-// ── Agent-authored widgets (contracts only; pipeline lands in a later phase)
+// ── Agent-authored widgets (source records; the sandbox host lands in a later phase)
 
 /** Declared bridge surface: the only data subscriptions and actions the frame may use. */
 export const WatchWidgetBridgeManifest = Schema.Struct({
@@ -842,6 +857,87 @@ export const WatchWidgetSourcePublishInput = Schema.Struct({
   manifest: WatchWidgetBridgeManifest,
 });
 export type WatchWidgetSourcePublishInput = typeof WatchWidgetSourcePublishInput.Type;
+
+/**
+ * Why a publish call itself was rejected. Transpile outcomes are not here —
+ * a bad build produces a `failed` source record, not a call error.
+ */
+export const WatchWidgetSourceErrorReason = Schema.Literals([
+  "manifestInvalid",
+  "sourceTooLarge",
+  "publishRateLimited",
+  "artifactStoreFailed",
+]);
+export type WatchWidgetSourceErrorReason = typeof WatchWidgetSourceErrorReason.Type;
+
+export class WatchWidgetSourceError extends Schema.TaggedError<WatchWidgetSourceError>()(
+  "WatchWidgetSourceError",
+  {
+    message: Schema.String,
+    reason: Schema.optionalKey(WatchWidgetSourceErrorReason),
+    sourceId: Schema.optionalKey(WatchWidgetSourceId),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {}
+
+/** The typed degradation a widget shell renders when its bundle cannot be built. */
+export const WatchWidgetSourceFailure = Schema.Struct({
+  cause: Schema.Literal("transpileFailed"),
+  /** Transpiler diagnostics or the probe failure, for the "View source" affordance. */
+  detail: Schema.optionalKey(Schema.String),
+});
+export type WatchWidgetSourceFailure = typeof WatchWidgetSourceFailure.Type;
+
+/**
+ * Lowercase hex SHA-256. The value doubles as the artifact filename the
+ * record points at, so the pattern is what keeps a decoded meta from naming
+ * a path outside the artifact directory.
+ */
+export const WatchWidgetArtifactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+export type WatchWidgetArtifactHash = typeof WatchWidgetArtifactHash.Type;
+
+/**
+ * One published widget source and the state of its derived artifact. The
+ * record is deterministic: republishing identical `{source, manifest}`
+ * resolves the same `sourceId` and artifact.
+ */
+export const WatchWidgetSourceRecord = Schema.Struct({
+  sourceId: WatchWidgetSourceId,
+  source: TrimmedNonEmptyString,
+  manifest: WatchWidgetBridgeManifest,
+  /** SHA-256 of the canonical `{source, manifest}` pair — the on-disk cache key. */
+  artifactHash: WatchWidgetArtifactHash,
+  /** Base64 SHA-256 of the emitted bundle — the digest a CSP `sha256-…` source wants. Null while no usable artifact exists. */
+  scriptHash: Schema.NullOr(TrimmedNonEmptyString),
+  status: Schema.Literals(["ready", "failed"]),
+  /** Set when `status` is `failed`; the widget renders this typed state instead of a frame. */
+  failure: Schema.NullOr(WatchWidgetSourceFailure),
+});
+export type WatchWidgetSourceRecord = typeof WatchWidgetSourceRecord.Type;
+
+export const WatchWidgetSourcePublishResult = Schema.Struct({
+  source: WatchWidgetSourceRecord,
+});
+export type WatchWidgetSourcePublishResult = typeof WatchWidgetSourcePublishResult.Type;
+
+export const WatchWidgetSourceGetInput = Schema.Struct({
+  sourceId: WatchWidgetSourceId,
+});
+export type WatchWidgetSourceGetInput = typeof WatchWidgetSourceGetInput.Type;
+
+export const WatchWidgetSourceGetResult = Schema.Struct({
+  /** Null when nothing was ever published under this id. */
+  source: Schema.NullOr(WatchWidgetSourceRecord),
+  /** The emitted single-file bundle for a `ready` artifact; null otherwise. */
+  bundle: Schema.NullOr(Schema.String),
+});
+export type WatchWidgetSourceGetResult = typeof WatchWidgetSourceGetResult.Type;
+
+/** Streamed `null` while unknown, then the record on first publish and after every republish. */
+export const WatchWidgetSourceSubscribeInput = Schema.Struct({
+  sourceId: WatchWidgetSourceId,
+});
+export type WatchWidgetSourceSubscribeInput = typeof WatchWidgetSourceSubscribeInput.Type;
 
 // ── Widget error states ──────────────────────────────────────────────────
 

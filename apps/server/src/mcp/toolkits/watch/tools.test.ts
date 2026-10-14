@@ -14,6 +14,7 @@ describe("watch MCP toolkit", () => {
       "t3_watch_connector_instance_config_set",
       "t3_watch_connector_request_install",
       "t3_watch_connector_request_upgrade",
+      "t3_watch_widget_source_publish",
     ]) {
       expect(toolNames).toContain(name);
     }

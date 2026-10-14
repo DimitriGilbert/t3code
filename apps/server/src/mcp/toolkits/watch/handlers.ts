@@ -58,4 +58,14 @@ export const layer = McpToolAccess.toLayer(WatchToolkit, {
       service.requestUpgrade(params).pipe(Effect.mapError(unavailable)),
     ),
   ),
+  t3_watch_connector_rollback: McpToolAccess.writes((params) =>
+    Effect.flatMap(ConnectorService.ConnectorService, (service) =>
+      service.rollback(params).pipe(Effect.mapError(unavailable)),
+    ),
+  ),
+  t3_watch_connector_uninstall: McpToolAccess.writes((params) =>
+    Effect.flatMap(ConnectorService.ConnectorService, (service) =>
+      service.uninstall(params).pipe(Effect.mapError(unavailable)),
+    ),
+  ),
 });

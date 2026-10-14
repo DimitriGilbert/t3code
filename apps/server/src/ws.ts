@@ -593,6 +593,10 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchConnectorsConfirmInstall,
   WS_METHODS.watchConnectorsConfirmUpgrade,
   WS_METHODS.watchConnectorsCancelInstallRequest,
+  WS_METHODS.watchConnectorsRollback,
+  WS_METHODS.watchConnectorsUninstall,
+  WS_METHODS.watchConnectorsPreparePurge,
+  WS_METHODS.watchConnectorsPurgeInstanceData,
   WS_METHODS.watchConnectorSubscribe,
   WS_METHODS.watchWidgetSourcePublish,
   WS_METHODS.watchWidgetSourceGet,
@@ -714,6 +718,22 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
       [WS_METHODS.watchConnectorsCancelInstallRequest]: (input) =>
         Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
           Effect.andThen(connectors.cancelInstallRequest(input)),
+        ),
+      [WS_METHODS.watchConnectorsRollback]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.rollback(input)),
+        ),
+      [WS_METHODS.watchConnectorsUninstall]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.uninstall(input)),
+        ),
+      [WS_METHODS.watchConnectorsPreparePurge]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.preparePurge(input)),
+        ),
+      [WS_METHODS.watchConnectorsPurgeInstanceData]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.purgeInstanceData(input)),
         ),
       [WS_METHODS.watchConnectorSubscribe]: (input) => connectorPoller.subscribe(input),
       [WS_METHODS.watchWidgetSourcePublish]: (input) => widgetSources.publish(input),

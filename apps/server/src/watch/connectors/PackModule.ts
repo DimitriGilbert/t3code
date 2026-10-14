@@ -18,6 +18,10 @@ import * as Schema from "effect/Schema";
  *     async fetch(ctx) { ... return rawData; },
  *     // optional; defaults to the raw fetch result / collected files
  *     async transform(raw, ctx) { ... return snapshot; },
+ *     // optional; runs server-side when an upgrade/rollback re-pins an
+ *     // instance: migrateConfig(fromVersion, toVersion, ctx) with
+ *     // ctx.config = the instance's current config. Returns the new config.
+ *     async migrateConfig(from, to, ctx) { ... return newConfig; },
  *   };
  *
  * There is no isolate in v1 — the vm realm only removes ambient power (no
@@ -77,6 +81,13 @@ export interface ConnectorModuleContext {
 export interface ConnectorModule {
   readonly fetch?: (ctx: ConnectorModuleContext) => unknown;
   readonly transform?: (raw: unknown, ctx: ConnectorModuleContext) => unknown;
+  /**
+   * Optional config migrator the versioned pack ships: invoked as
+   * `migrateConfig(fromSchemaVersion, toSchemaVersion, ctx)` when a re-pin
+   * (upgrade or rollback) lands. `ctx.config` is the instance's current
+   * config; the return value replaces it after manifest re-validation.
+   */
+  readonly migrateConfig?: (from: number, to: number, ctx: ConnectorModuleContext) => unknown;
 }
 
 const connectorError = (
@@ -147,6 +158,7 @@ export const evalConnectorModule = Effect.fn("ConnectorPackModule.eval")(functio
   const candidate = exported as Record<string, unknown>;
   const fetchFn = candidate["fetch"];
   const transformFn = candidate["transform"];
+  const migrateConfigFn = candidate["migrateConfig"];
   if (fetchFn !== undefined && typeof fetchFn !== "function") {
     return yield* connectorError(
       "packCodeInvalid",
@@ -157,6 +169,12 @@ export const evalConnectorModule = Effect.fn("ConnectorPackModule.eval")(functio
     return yield* connectorError(
       "packCodeInvalid",
       `Connector ${CONNECTOR_ENTRY_FILE} export "transform" is not a function.`,
+    );
+  }
+  if (migrateConfigFn !== undefined && typeof migrateConfigFn !== "function") {
+    return yield* connectorError(
+      "packCodeInvalid",
+      `Connector ${CONNECTOR_ENTRY_FILE} export "migrateConfig" is not a function.`,
     );
   }
   if (fetchFn === undefined && transformFn === undefined) {
@@ -172,6 +190,15 @@ export const evalConnectorModule = Effect.fn("ConnectorPackModule.eval")(functio
     ...(transformFn === undefined
       ? {}
       : { transform: transformFn as (raw: unknown, ctx: ConnectorModuleContext) => unknown }),
+    ...(migrateConfigFn === undefined
+      ? {}
+      : {
+          migrateConfig: migrateConfigFn as (
+            from: number,
+            to: number,
+            ctx: ConnectorModuleContext,
+          ) => unknown,
+        }),
   } satisfies ConnectorModule;
 });
 

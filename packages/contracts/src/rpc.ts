@@ -369,11 +369,18 @@ import {
   WatchConnectorInstanceResult,
   WatchConnectorPrepareInstallConfirmInput,
   WatchConnectorPrepareInstallConfirmResult,
+  WatchConnectorPreparePurgeInput,
+  WatchConnectorPreparePurgeResult,
+  WatchConnectorPurgeInstanceDataInput,
+  WatchConnectorPurgeResult,
   WatchConnectorRequestInstallInput,
   WatchConnectorRequestUpgradeInput,
+  WatchConnectorRollbackInput,
   WatchConnectorSetInstanceConfigInput,
   WatchConnectorStreamItem,
   WatchConnectorSubscribeInput,
+  WatchConnectorUninstallInput,
+  WatchConnectorUninstallResult,
   WatchConnectorUpdateInstanceInput,
   WatchConnectorsListInput,
   WatchConnectorsListResult,
@@ -669,11 +676,9 @@ export const WS_METHODS = {
   watchConnectorsConfirmInstall: "watchConnectors.confirmInstall",
   watchConnectorsConfirmUpgrade: "watchConnectors.confirmUpgrade",
   watchConnectorsCancelInstallRequest: "watchConnectors.cancelInstallRequest",
-  // Watch screen methods reserved for later phases (transports/polling,
-  // rollback/uninstall/purge, widget sources) — wire vocabulary declared here
-  // so it is stable, but not yet part of `WsRpcGroup`.
   watchConnectorsRollback: "watchConnectors.rollback",
   watchConnectorsUninstall: "watchConnectors.uninstall",
+  watchConnectorsPreparePurge: "watchConnectors.preparePurge",
   watchConnectorsPurgeInstanceData: "watchConnectors.purgeInstanceData",
   watchConnectorSubscribe: "watchConnector.subscribe",
   watchWidgetSourcePublish: "watchWidgetSource.publish",
@@ -2208,6 +2213,46 @@ const WsWatchConnectorsCancelInstallRequestRpc = Rpc.make(
 );
 
 /**
+ * Re-pins an instance to a previously-approved pack version — no fetch, no
+ * new code: the target must already be an approved pack row. Agent-callable.
+ */
+const WsWatchConnectorsRollbackRpc = Rpc.make(WS_METHODS.watchConnectorsRollback, {
+  payload: WatchConnectorRollbackInput,
+  success: WatchConnectorInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+/** Soft-archives a pack and its instances — polling stops, config is retained, widgets degrade to placeholders. */
+const WsWatchConnectorsUninstallRpc = Rpc.make(WS_METHODS.watchConnectorsUninstall, {
+  payload: WatchConnectorUninstallInput,
+  success: WatchConnectorUninstallResult,
+  error: WsWatchConnectorError,
+});
+
+/**
+ * Minted only for a UI client: describes what a purge destroys and returns a
+ * single-use token bound to that descriptor. Not in the MCP toolkit.
+ */
+const WsWatchConnectorsPreparePurgeRpc = Rpc.make(WS_METHODS.watchConnectorsPreparePurge, {
+  payload: WatchConnectorPreparePurgeInput,
+  success: WatchConnectorPreparePurgeResult,
+  error: WsWatchConnectorError,
+});
+
+/**
+ * The destructive counterpart to uninstall — requires the prepare-minted
+ * token. Not in the MCP toolkit: an agent can never complete a purge.
+ */
+const WsWatchConnectorsPurgeInstanceDataRpc = Rpc.make(
+  WS_METHODS.watchConnectorsPurgeInstanceData,
+  {
+    payload: WatchConnectorPurgeInstanceDataInput,
+    success: WatchConnectorPurgeResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+/**
  * Widget-facing connector data stream: transformed snapshots (shared fetch —
  * N widgets on one instance share one poll) and typed error states. The
  * payload's `refreshPolicy` feeds the instance's min-of-subscribers interval.
@@ -2498,6 +2543,10 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchConnectorsConfirmInstallRpc,
   WsWatchConnectorsConfirmUpgradeRpc,
   WsWatchConnectorsCancelInstallRequestRpc,
+  WsWatchConnectorsRollbackRpc,
+  WsWatchConnectorsUninstallRpc,
+  WsWatchConnectorsPreparePurgeRpc,
+  WsWatchConnectorsPurgeInstanceDataRpc,
   WsWatchConnectorSubscribeRpc,
   WsWatchWidgetSourcePublishRpc,
   WsWatchWidgetSourceGetRpc,

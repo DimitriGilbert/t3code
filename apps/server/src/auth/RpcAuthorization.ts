@@ -148,6 +148,14 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.watchConnectorsConfirmInstall]: AuthEnvironmentMaintainScope,
   [WS_METHODS.watchConnectorsConfirmUpgrade]: AuthEnvironmentMaintainScope,
   [WS_METHODS.watchConnectorsCancelInstallRequest]: AuthOrchestrationOperateScope,
+  // Rollback and soft-archive are standard-scope — they only re-pin or park
+  // already-approved code, so agents can reach them.
+  [WS_METHODS.watchConnectorsRollback]: AuthOrchestrationOperateScope,
+  [WS_METHODS.watchConnectorsUninstall]: AuthOrchestrationOperateScope,
+  // Prepare mints the purge token but stays standard-scope (not in the MCP
+  // toolkit); the purge itself is environment:maintain + client-guarded.
+  [WS_METHODS.watchConnectorsPreparePurge]: AuthOrchestrationOperateScope,
+  [WS_METHODS.watchConnectorsPurgeInstanceData]: AuthEnvironmentMaintainScope,
   [WS_METHODS.watchConnectorSubscribe]: AuthOrchestrationReadScope,
   // Publishing runs the transpiler and touches the artifact cache: a write.
   [WS_METHODS.watchWidgetSourcePublish]: AuthOrchestrationOperateScope,

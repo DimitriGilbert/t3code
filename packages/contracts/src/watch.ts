@@ -372,11 +372,34 @@ export type WatchGalleryListResult = typeof WatchGalleryListResult.Type;
 export const WatchConnectorTransport = Schema.Literals(["http", "file"]);
 export type WatchConnectorTransport = typeof WatchConnectorTransport.Type;
 
+/** Declared bridge surface: the only data subscriptions and actions the frame may use. */
+export const WatchWidgetBridgeManifest = Schema.Struct({
+  subscriptions: Schema.Array(TrimmedNonEmptyString),
+  actions: Schema.Array(TrimmedNonEmptyString),
+});
+export type WatchWidgetBridgeManifest = typeof WatchWidgetBridgeManifest.Type;
+
 export const WatchConnectorOperation = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type WatchConnectorOperation = typeof WatchConnectorOperation.Type;
+
+/**
+ * A widget source bundled in a connector pack. On install the server
+ * transpiles `file` into an `agent:<sourceId>` widget kind carrying
+ * `pack:<packId>` provenance; uninstalling the pack degrades it to the
+ * connector-missing placeholder.
+ */
+export const WatchConnectorPackWidget = Schema.Struct({
+  /** Registry-facing name for the widget this source produces. */
+  name: TrimmedNonEmptyString,
+  /** Pack-relative path to the TS/TSX source file (e.g. `widgets/status.tsx`). */
+  file: TrimmedNonEmptyString,
+  /** The bridge the widget is allowed to use — enforced by the sandbox host. */
+  bridge: WatchWidgetBridgeManifest,
+});
+export type WatchConnectorPackWidget = typeof WatchConnectorPackWidget.Type;
 
 /**
  * The pack contract a human confirms at install: declared operations, declared
@@ -393,6 +416,8 @@ export const WatchConnectorPackManifest = Schema.Struct({
   /** Secret keys the pack may read at fetch time; values live in the secret store. */
   secretKeys: Schema.Array(TrimmedNonEmptyString),
   transport: WatchConnectorTransport,
+  /** Widget sources the pack ships; transpiled server-side on confirm. */
+  widgets: Schema.optionalKey(Schema.Array(WatchConnectorPackWidget)),
 });
 export type WatchConnectorPackManifest = typeof WatchConnectorPackManifest.Type;
 
@@ -415,11 +440,21 @@ export const WatchConnectorOrigin = Schema.Union([
 ]);
 export type WatchConnectorOrigin = typeof WatchConnectorOrigin.Type;
 
+/** The last re-pin to a previously-approved version, for the Connector status widget. */
+export const WatchConnectorRollbackRecord = Schema.Struct({
+  fromSchemaVersion: PositiveInt,
+  toSchemaVersion: PositiveInt,
+  at: IsoDateTime,
+});
+export type WatchConnectorRollbackRecord = typeof WatchConnectorRollbackRecord.Type;
+
 export const WatchConnectorHealth = Schema.Struct({
   status: Schema.Literals(["healthy", "unhealthy", "authExpired", "unknown"]),
   lastError: Schema.NullOr(Schema.String),
   lastFetchAt: Schema.NullOr(IsoDateTime),
   consecutiveFailures: NonNegativeInt,
+  /** Most recent rollback; sticky — later poll health writes preserve it. */
+  lastRollback: Schema.optionalKey(WatchConnectorRollbackRecord),
 });
 export type WatchConnectorHealth = typeof WatchConnectorHealth.Type;
 
@@ -516,6 +551,12 @@ export const WatchConnectorErrorReason = Schema.Literals([
   "watchLimitExceeded",
   "snapshotTooLarge",
   "packCodeInvalid",
+  /** A rollback target that was never human-approved (or no longer installed). */
+  "versionNotApproved",
+  /** A rollback naming the version the instance already pins — a no-op, not a rollback. */
+  "sameVersionRollback",
+  /** Purge refused because the pack still has live (non-archived) rows — uninstall first. */
+  "packNotArchived",
 ]);
 export type WatchConnectorErrorReason = typeof WatchConnectorErrorReason.Type;
 
@@ -567,6 +608,8 @@ export class WatchConnectorError extends Schema.TaggedError<WatchConnectorError>
     packId: Schema.optionalKey(WatchConnectorPackId),
     instanceId: Schema.optionalKey(WatchConnectorInstanceId),
     requestId: Schema.optionalKey(WatchConnectorInstallRequestId),
+    /** The config field a `configInvalid` failure names — surfaced to the widget error state. */
+    field: Schema.optionalKey(TrimmedNonEmptyString),
     cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}
@@ -576,11 +619,29 @@ export const WatchConnectorsListInput = Schema.Struct({
 });
 export type WatchConnectorsListInput = typeof WatchConnectorsListInput.Type;
 
+/**
+ * A widget source a pack registered at install time — transpiled through the
+ * same pipeline as agent-published sources. `archivedAt` follows the pack
+ * row, so an uninstalled pack's widget kinds degrade to `connectorMissing`.
+ */
+export const WatchPackWidgetSource = Schema.Struct({
+  packId: WatchConnectorPackId,
+  schemaVersion: PositiveInt,
+  /** The `agent:<sourceId>` kind widgets reference. */
+  sourceId: WatchWidgetSourceId,
+  name: TrimmedNonEmptyString,
+  file: TrimmedNonEmptyString,
+  archivedAt: Schema.NullOr(IsoDateTime),
+});
+export type WatchPackWidgetSource = typeof WatchPackWidgetSource.Type;
+
 /** Instances plus the pending requests a human still has to rule on. */
 export const WatchConnectorsListResult = Schema.Struct({
   packs: ForwardCompatibleArray(WatchConnectorPack),
   instances: ForwardCompatibleArray(WatchConnectorInstance),
   installRequests: ForwardCompatibleArray(WatchConnectorInstallRequest),
+  /** Widget sources registered by installed packs, keyed to `agent:<sourceId>` kinds. */
+  widgetSources: ForwardCompatibleArray(WatchPackWidgetSource),
 });
 export type WatchConnectorsListResult = typeof WatchConnectorsListResult.Type;
 
@@ -673,6 +734,11 @@ export type WatchConnectorPrepareInstallConfirmInput =
 
 export const WatchConnectorPrepareInstallConfirmResult = Schema.Struct({
   request: WatchConnectorInstallRequest,
+  /**
+   * For an upgrade: the currently-approved pack version the pending manifest
+   * diffs against — what the confirm dialog renders. Null on installs.
+   */
+  diffBase: Schema.NullOr(WatchConnectorPack),
   confirmationToken: TrimmedNonEmptyString,
 });
 export type WatchConnectorPrepareInstallConfirmResult =
@@ -700,6 +766,69 @@ export const WatchConnectorCancelInstallRequestInput = Schema.Struct({
 });
 export type WatchConnectorCancelInstallRequestInput =
   typeof WatchConnectorCancelInstallRequestInput.Type;
+
+/**
+ * Re-pins an instance to a previously-approved pack version — no fetch: the
+ * target must already exist as an approved (non-archived) pack row. Direction
+ * is unrestricted; any approved version is a valid pin.
+ */
+export const WatchConnectorRollbackInput = Schema.Struct({
+  instanceId: WatchConnectorInstanceId,
+  schemaVersion: PositiveInt,
+});
+export type WatchConnectorRollbackInput = typeof WatchConnectorRollbackInput.Type;
+
+/** Soft-archives a pack and all its instances: polling stops, config is retained. */
+export const WatchConnectorUninstallInput = Schema.Struct({
+  packId: WatchConnectorPackId,
+});
+export type WatchConnectorUninstallInput = typeof WatchConnectorUninstallInput.Type;
+
+export const WatchConnectorUninstallResult = Schema.Struct({
+  packId: WatchConnectorPackId,
+  /** How many live instances the archive pass took down. */
+  archivedInstances: NonNegativeInt,
+});
+export type WatchConnectorUninstallResult = typeof WatchConnectorUninstallResult.Type;
+
+/**
+ * Minted only for a UI client: describes what purging a fully-archived pack
+ * destroys and returns a single-use token bound to that exact descriptor.
+ * Not in the MCP toolkit — an agent can never obtain the token.
+ */
+export const WatchConnectorPreparePurgeInput = Schema.Struct({
+  packId: WatchConnectorPackId,
+});
+export type WatchConnectorPreparePurgeInput = typeof WatchConnectorPreparePurgeInput.Type;
+
+export const WatchConnectorPreparePurgeResult = Schema.Struct({
+  packId: WatchConnectorPackId,
+  /** Archived instances whose rows and secret-store values are destroyed. */
+  instances: Schema.Array(WatchConnectorInstanceId),
+  /** Approved pack versions whose rows and on-disk code are destroyed. */
+  schemaVersions: Schema.Array(PositiveInt),
+  /** Widget source registrations that disappear. */
+  widgetSources: Schema.Array(WatchWidgetSourceId),
+  confirmationToken: TrimmedNonEmptyString,
+});
+export type WatchConnectorPreparePurgeResult = typeof WatchConnectorPreparePurgeResult.Type;
+
+/**
+ * The destructive counterpart to soft-archive — destroys the retained config,
+ * secrets, approved-version history, widget registrations, and pack files.
+ * Human-only: environment:maintain scope, client-guarded, token-gated.
+ */
+export const WatchConnectorPurgeInstanceDataInput = Schema.Struct({
+  packId: WatchConnectorPackId,
+  confirmationToken: TrimmedNonEmptyString,
+});
+export type WatchConnectorPurgeInstanceDataInput = typeof WatchConnectorPurgeInstanceDataInput.Type;
+
+export const WatchConnectorPurgeResult = Schema.Struct({
+  packId: WatchConnectorPackId,
+  purgedInstances: NonNegativeInt,
+});
+export type WatchConnectorPurgeResult = typeof WatchConnectorPurgeResult.Type;
 
 // ── Notifications (contracts only; the service lands in a later phase) ───
 
@@ -749,6 +878,17 @@ export const WatchConnectorAuthExpiredNotification = Schema.Struct({
 export type WatchConnectorAuthExpiredNotification =
   typeof WatchConnectorAuthExpiredNotification.Type;
 
+/** A connector instance was re-pinned to a previously-approved version — history-visible. */
+export const WatchConnectorRolledBackNotification = Schema.Struct({
+  type: Schema.Literal("connector.rolledBack"),
+  ...watchNotificationFields,
+  instanceId: WatchConnectorInstanceId,
+  packId: WatchConnectorPackId,
+  fromSchemaVersion: PositiveInt,
+  toSchemaVersion: PositiveInt,
+});
+export type WatchConnectorRolledBackNotification = typeof WatchConnectorRolledBackNotification.Type;
+
 export const WatchWidgetThresholdNotification = Schema.Struct({
   type: Schema.Literal("widget.threshold"),
   ...watchNotificationFields,
@@ -771,6 +911,7 @@ export const WatchNotificationEvent = ForwardCompatibleUnion(
     WatchThreadAwaitingInputNotification,
     WatchConnectorUnhealthyNotification,
     WatchConnectorAuthExpiredNotification,
+    WatchConnectorRolledBackNotification,
     WatchWidgetThresholdNotification,
   ],
   "type",
@@ -783,6 +924,7 @@ export const WatchNotificationEventType = Schema.Literals([
   "thread.awaitingInput",
   "connector.unhealthy",
   "connector.authExpired",
+  "connector.rolledBack",
   "widget.threshold",
 ]);
 export type WatchNotificationEventType = typeof WatchNotificationEventType.Type;
@@ -843,13 +985,6 @@ export const WatchNotificationsSetPrefsResult = Schema.Struct({
 export type WatchNotificationsSetPrefsResult = typeof WatchNotificationsSetPrefsResult.Type;
 
 // ── Agent-authored widgets (source records; the sandbox host lands in a later phase)
-
-/** Declared bridge surface: the only data subscriptions and actions the frame may use. */
-export const WatchWidgetBridgeManifest = Schema.Struct({
-  subscriptions: Schema.Array(TrimmedNonEmptyString),
-  actions: Schema.Array(TrimmedNonEmptyString),
-});
-export type WatchWidgetBridgeManifest = typeof WatchWidgetBridgeManifest.Type;
 
 export const WatchWidgetSourcePublishInput = Schema.Struct({
   /** The TS/TSX source the server transpiles into a sandboxed bundle. */

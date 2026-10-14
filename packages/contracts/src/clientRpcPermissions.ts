@@ -55,6 +55,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   // the MCP toolkit — an agent can open a pending request but never rule on it.
   [WS_METHODS.watchConnectorsConfirmInstall]: AuthEnvironmentMaintainScope,
   [WS_METHODS.watchConnectorsConfirmUpgrade]: AuthEnvironmentMaintainScope,
+  // Purging connector data is destructive — same human-only admin gate as
+  // the install confirms, and absent from the MCP toolkit.
+  [WS_METHODS.watchConnectorsPurgeInstanceData]: AuthEnvironmentMaintainScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

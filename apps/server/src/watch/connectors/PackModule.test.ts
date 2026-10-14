@@ -90,6 +90,34 @@ it.effect("rejects an entry exporting neither fetch nor transform", () =>
   ),
 );
 
+it.effect("rejects a non-function migrateConfig export", () =>
+  expectConnectorError(
+    "packCodeInvalid",
+    PackModule.evalConnectorModule(
+      connector(`module.exports = { transform: (raw) => raw, migrateConfig: 42 };`),
+    ),
+  ),
+);
+
+it.effect("exposes migrateConfig for the re-pin path with the instance config on ctx", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        transform: (raw) => raw,
+        migrateConfig: (from, to, ctx) => ({ from, to, repo: ctx.config["repo"] }),
+      };`),
+    );
+    assert.isDefined(mod.migrateConfig);
+    const ctx = {
+      config: { repo: "t3" },
+      secrets: PackModule.makeSecretsAccessor([], {}),
+      failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
+    } satisfies PackModule.ConnectorModuleContext;
+    const migrated = yield* PackModule.invokePackFunction(() => mod.migrateConfig?.(1, 2, ctx));
+    assert.deepEqual(migrated, { from: 1, to: 2, repo: "t3" });
+  }),
+);
+
 it("declared secret keys resolve; undeclared keys throw before any lookup", () => {
   const secrets = PackModule.makeSecretsAccessor(["apiKey"], { apiKey: "s3cr3t" });
   assert.equal(secrets.get("apiKey"), "s3cr3t");

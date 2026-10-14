@@ -355,8 +355,18 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 const layerUserNotificationsProvided = UserNotificationService.layer.pipe(
   Layer.provide(Layer.mergeAll(layerEventSinkProvided, ProjectionStore.layer)),
 );
+const layerWidgetTranspileProvided = WidgetTranspileService.layer.pipe(
+  Layer.provide(WidgetTranspileService.layerTranspiler),
+);
 const layerConnectorsProvided = ConnectorService.layer.pipe(
-  Layer.provide(Layer.mergeAll(ConfirmationTokens.layer, PackStore.layerPackFetch)),
+  Layer.provide(
+    Layer.mergeAll(
+      ConfirmationTokens.layer,
+      PackStore.layerPackFetch,
+      layerUserNotificationsProvided,
+      layerWidgetTranspileProvided,
+    ),
+  ),
 );
 const layerConnectorPollerProvided = ConnectorPoller.layer.pipe(
   Layer.provide(Layer.mergeAll(layerConnectorsProvided, layerUserNotificationsProvided)),
@@ -384,7 +394,7 @@ export const layerProduction = Layer.mergeAll(
   layerScheduledTaskProvided,
   layerSecretRequestsProvided,
   WatchPageService.layer,
-  WidgetTranspileService.layer.pipe(Layer.provide(WidgetTranspileService.layerTranspiler)),
+  layerWidgetTranspileProvided,
   layerConnectorsProvided,
   layerConnectorPollerProvided,
   layerUserNotificationsProvided,

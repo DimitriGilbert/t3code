@@ -1,12 +1,3 @@
-import type {
-  EnvironmentId,
-  WatchConnectorInstanceId,
-  WatchPackWidgetSource,
-  WatchWidget,
-  WatchWidgetSourceRecord,
-} from "@t3tools/contracts";
-import { WatchConnectorInstanceId as WatchConnectorInstanceIdSchema } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import {
   isMissingPackWidgetKind,
   watchAgentSourceId,
@@ -17,11 +8,19 @@ import {
   resolveWatchAppArtifact,
   type WatchAppBridgeViolation,
 } from "@t3tools/client-runtime/watch-app-bridge";
+import type {
+  EnvironmentId,
+  WatchConnectorInstanceId,
+  WatchPackWidgetSource,
+  WatchWidget,
+  WatchWidgetSourceRecord,
+} from "@t3tools/contracts";
+import { WatchConnectorInstanceId as WatchConnectorInstanceIdSchema } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useAtomValue } from "@effect/atom-react";
-import { CodeIcon, EllipsisIcon, Trash2Icon, TriangleAlertIcon, UnplugIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { TriangleAlertIcon, UnplugIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Button } from "~/components/ui/button";
 import {
   Empty,
   EmptyDescription,
@@ -29,7 +28,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "~/components/ui/empty";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -37,19 +35,20 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { watchEnvironment } from "~/state/watch";
 
 import { WatchAppFrame, type WatchAppActionHandler } from "./WatchAppFrame";
-import { WatchAppSourceDialog } from "./WatchAppSourceDialog";
 import { WatchAppTapToLoad } from "./WatchAppTapToLoad";
-import { WatchProvenanceMarker } from "./WatchProvenanceMarker";
 
 /**
- * The host-owned chrome and artifact path around one `agent:<sourceId>`
- * widget. The provenance marker plus the "View source" / "Remove" affordances
- * render outside the sandbox — widget content can neither fake nor suppress
- * them — and they stay mounted across widget errors. Both affordances live in
- * the chrome's context menu, not as always-visible icons, matching the watch
- * board's density. The artifact itself resolves through the source stream
- * (the record) plus one bundle fetch per `artifactHash`; the frame mounts
- * only for a `ready` artifact.
+ * The body of one `agent:<sourceId>` widget, embedded inside `WatchWidgetShell`.
+ * The shell owns the chrome — title, provenance badge, context menu — so this
+ * component renders only the governed content region: an
+ * `IntersectionObserver` reports card visibility to the page's mount registry
+ * (≤6 mounted agent frames), `mountState` switches between nothing
+ * (offscreen), `WatchAppTapToLoad` (over the cap), and the sandboxed
+ * `WatchAppFrame`. The artifact resolves through the source stream plus one
+ * bundle fetch per `artifactHash`; the frame mounts only for a `ready`
+ * artifact. Bridge violations surface as a host-rendered corner chip, and the
+ * resolved source record is reported up so the shell menu can offer
+ * "View source" — both stay outside the sandbox.
  */
 
 const isConnectorInstanceId = Schema.is(WatchConnectorInstanceIdSchema);
@@ -89,10 +88,15 @@ export function WatchAppWidget(props: {
   readonly packWidgetSources: ReadonlyArray<WatchPackWidgetSource>;
   /** Governance state from the page's mount registry; offscreen widgets render nothing. */
   readonly mountState: WatchAppMountState;
+  /** IntersectionObserver report — the registry turns it into mount changes. */
+  readonly onVisibilityChange: (visible: boolean) => void;
   /** The "tap to load" tap; the registry re-seats this widget on mount. */
   readonly onRequestLoad: () => void;
-  /** Host-owned remove affordance; when absent the menu entry is hidden. */
-  readonly onRemove?: () => void;
+  /**
+   * The resolved source record (or null while unresolved/gone), lifted so the
+   * shell context menu can offer "View source".
+   */
+  readonly onSourceRecord: (record: WatchWidgetSourceRecord | null) => void;
   /** Declared actions the host implements; undeclared names never reach it. */
   readonly actions?: Readonly<Record<string, WatchAppActionHandler>>;
   readonly hostContext?: () => Record<string, unknown>;
@@ -101,8 +105,35 @@ export function WatchAppWidget(props: {
   const { widget } = props;
   const sourceId = watchAgentSourceId(widget.kind);
   const [violation, setViolation] = useState<string | null>(null);
-  const [sourceRecord, setSourceRecord] = useState<WatchWidgetSourceRecord | null>(null);
-  const [sourceOpen, setSourceOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // The caller hands a fresh closure every render; subscribing the observer
+  // to it directly would teardown-and-hide on every render, an oscillation.
+  // The ref syncs ahead of the observer effect, which re-runs only when the
+  // widget identity changes.
+  const onVisibilityChangeRef = useRef(props.onVisibilityChange);
+  useEffect(() => {
+    onVisibilityChangeRef.current = props.onVisibilityChange;
+  });
+
+  // Visibility reporting lives on this filling wrapper: the shell's content
+  // region gives it a real box even while the body renders nothing, so the
+  // registry hears every enter/leave regardless of mount state. Cleanup
+  // reports hidden — an unmounted widget must not hold a mount seat.
+  useEffect(() => {
+    const element = rootRef.current;
+    if (element === null) return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        onVisibilityChangeRef.current(entry.isIntersecting);
+      }
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      onVisibilityChangeRef.current(false);
+    };
+  }, [widget.id]);
 
   const body = (() => {
     if (props.mountState === "unmounted") return null;
@@ -110,7 +141,7 @@ export function WatchAppWidget(props: {
       return <WatchAppTapToLoad onLoad={props.onRequestLoad} />;
     }
     if (sourceId === undefined) {
-      // Not an agent kind — this shell only hosts published artifacts.
+      // Not an agent kind — this body only hosts published artifacts.
       return <WatchAppEmptyState title="Unknown widget" />;
     }
     if (
@@ -128,7 +159,7 @@ export function WatchAppWidget(props: {
         widget={widget}
         sourceId={sourceId}
         onViolation={setViolation}
-        onRecord={setSourceRecord}
+        onRecord={props.onSourceRecord}
         {...(props.actions === undefined ? {} : { actions: props.actions })}
         {...(props.hostContext === undefined ? {} : { hostContext: props.hostContext })}
       />
@@ -136,54 +167,23 @@ export function WatchAppWidget(props: {
   })();
 
   return (
-    <div className={cn("relative flex size-full flex-col overflow-hidden", props.className)}>
-      <div className="flex h-7 shrink-0 items-center gap-1 px-1.5">
-        <WatchProvenanceMarker provenance={widget.provenance} />
-        <div className="flex-1" />
-        {violation === null ? null : (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <span className="inline-flex items-center gap-1 text-destructive">
-                  <TriangleAlertIcon className="size-3" />
-                  <span className="text-xs">Widget error</span>
-                </span>
-              }
-            />
-            <TooltipPopup>{violation}</TooltipPopup>
-          </Tooltip>
-        )}
-        {props.onRemove === undefined && sourceRecord === null ? null : (
-          <Menu>
-            <MenuTrigger
-              render={<Button variant="ghost" size="icon-micro" aria-label="Widget options" />}
-            >
-              <EllipsisIcon />
-            </MenuTrigger>
-            <MenuPopup align="end">
-              {sourceRecord === null ? null : (
-                <MenuItem onClick={() => setSourceOpen(true)}>
-                  <CodeIcon />
-                  View source
-                </MenuItem>
-              )}
-              {props.onRemove === undefined ? null : (
-                <MenuItem variant="destructive" onClick={props.onRemove}>
-                  <Trash2Icon />
-                  Remove
-                </MenuItem>
-              )}
-            </MenuPopup>
-          </Menu>
-        )}
-      </div>
+    <div
+      ref={rootRef}
+      className={cn("relative flex min-h-0 w-full flex-1 flex-col", props.className)}
+    >
       <div className="relative min-h-0 flex-1">{body}</div>
-      {sourceRecord === null ? null : (
-        <WatchAppSourceDialog
-          record={sourceRecord}
-          open={sourceOpen}
-          onOpenChange={setSourceOpen}
-        />
+      {violation === null ? null : (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="absolute top-1 right-1 z-10 inline-flex items-center gap-1 rounded-sm bg-card/90 px-1.5 py-0.5 text-destructive shadow-xs/5">
+                <TriangleAlertIcon className="size-3" />
+                <span className="text-2xs">Widget error</span>
+              </span>
+            }
+          />
+          <TooltipPopup>{violation}</TooltipPopup>
+        </Tooltip>
       )}
     </div>
   );
@@ -215,10 +215,19 @@ function WatchAppArtifactBody(props: {
   const record: WatchWidgetSourceRecord | null | undefined =
     recordResult._tag === "Success" ? recordResult.value : undefined;
 
-  const onRecord = props.onRecord;
+  // Same fresh-closure hazard as the visibility observer: the caller's prop
+  // changes identity every render, so the ref carries it and the effect keys
+  // on the record alone — a re-render must not clear-and-re-report.
+  const onRecordRef = useRef(props.onRecord);
   useEffect(() => {
-    onRecord(record === undefined ? null : record);
-  }, [onRecord, record]);
+    onRecordRef.current = props.onRecord;
+  });
+  useEffect(() => {
+    onRecordRef.current(record === undefined ? null : record);
+    // Unmounting (evicted, removed, or a later failed resolution) clears the
+    // record so the host menu never offers a stale "View source".
+    return () => onRecordRef.current(null);
+  }, [record]);
 
   const getSource = useAtomCommand(watchEnvironment.getWidgetSource, {
     reportFailure: false,

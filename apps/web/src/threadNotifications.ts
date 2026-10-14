@@ -38,7 +38,25 @@ export function threadNotificationTag(environmentId: EnvironmentId, threadId: Th
 let originalFavicon: HTMLLinkElement | undefined;
 let badgeFavicon: HTMLLinkElement | undefined;
 
+// The badge is shared across notification producers (thread events, watch
+// events): each contributes a count under its own key and the rendered badge
+// is the sum, so one producer clearing cannot erase another's pending count.
+const badgeCounts = new Map<string, number>();
+
+export function setNotificationBadgeForSource(source: string, count: number) {
+  if (count > 0) {
+    badgeCounts.set(source, count);
+  } else {
+    badgeCounts.delete(source);
+  }
+  renderNotificationBadge([...badgeCounts.values()].reduce((sum, value) => sum + value, 0));
+}
+
 export function setNotificationBadge(count: number) {
+  setNotificationBadgeForSource("threads", count);
+}
+
+function renderNotificationBadge(count: number) {
   const bridge = window.desktopBridge;
   let image: string | null = null;
   if (count > 0 && (!bridge || bridge.getClientPlatform?.() === "win32")) {

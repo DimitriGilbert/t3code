@@ -101,6 +101,8 @@ export function WatchWidgetShell(props: {
   readonly onConfigure?: (() => void) | undefined;
   /** Opens the widget context menu at a client position. */
   readonly onMenu?: ((position: { x: number; y: number }) => void) | undefined;
+  /** Extra header chrome next to the title — e.g. the threshold alert badge. */
+  readonly headerAlert?: ReactNode;
   /** Grip arrow keys: move by cell; shift+arrows resize the south/east edges. */
   readonly onKeyboardAdjust?:
     | ((deltaColumns: number, deltaRows: number, resize: boolean) => void)
@@ -164,6 +166,7 @@ export function WatchWidgetShell(props: {
         <span className="min-w-0 flex-1 truncate text-xs font-medium">
           {configuring ? "Configure" : watchWidgetDisplayTitle(props.widget)}
         </span>
+        {props.headerAlert}
         {configuring ? (
           <Tooltip>
             <TooltipTrigger

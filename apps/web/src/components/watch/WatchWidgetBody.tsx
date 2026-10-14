@@ -3,6 +3,10 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 import {
+  watchAgentSourceId,
+  type WatchAppMountState,
+} from "@t3tools/client-runtime/state/watch-mounts";
+import {
   resolveWatchThreadsProjectBinding,
   watchFirstPartyWidgetSpec,
   watchWidgetIsConfigurable,
@@ -19,13 +23,18 @@ import type {
   ServerProvider,
   TimestampFormat,
   WatchConnectorInstance,
+  WatchConnectorInstallRequest,
   WatchConnectorPack,
+  WatchPackWidgetSource,
   WatchPage,
   WatchWidget,
   WatchWidgetConfig,
+  WatchWidgetId,
+  WatchWidgetSourceRecord,
 } from "@t3tools/contracts";
 import type { ReactNode } from "react";
 
+import { WatchAppWidget } from "./WatchAppWidget";
 import { WatchActiveWorkWidget } from "./widgets/WatchActiveWorkWidget";
 import { WatchConnectorStatusWidget } from "./widgets/WatchConnectorStatusWidget";
 import { WatchNeedsAttentionWidget } from "./widgets/WatchNeedsAttentionWidget";
@@ -35,13 +44,24 @@ import { WatchWidgetErrorBody } from "./WatchWidgetErrorBody";
 import { WatchWidgetSettingsForm } from "./WatchWidgetSettingsForm";
 
 /**
- * Picks the live body for a first-party widget, layered over the same
- * degradation contract the sandboxed kinds get: `configure` swaps the body
+ * The mount governance an `agent:<sourceId>` widget obeys — wired by the
+ * board through {@link useWatchAppMounts}. Absent on paths that never mount
+ * agent code (the archived read-only board is a plain render).
+ */
+export interface WatchAppMountControls {
+  readonly stateOf: (widgetId: WatchWidgetId) => WatchAppMountState;
+  readonly reportVisibility: (widgetId: WatchWidgetId, visible: boolean) => void;
+  readonly requestMount: (widgetId: WatchWidgetId) => void;
+}
+
+/**
+ * Picks the live body for a widget, layered over the same degradation
+ * contract for first-party and sandboxed kinds: `configure` swaps the body
  * for the generated settings form, then typed source errors (stale project
  * binding, missing/down connector) replace it entirely — a widget that
- * cannot show data must still be repointable.
- * Non-first-party kinds (`agent:*`, `pack:*`) return undefined so the shell
- * keeps its placeholder until the frame mount lands.
+ * cannot show data must still be repointable. Agent kinds defer to
+ * `WatchAppWidget`, which the mount registry's `WatchAppMountControls`
+ * governs: offscreen bodies unmount, over-cap bodies get tap-to-load.
  */
 export function WatchWidgetBody(props: {
   readonly environmentId: EnvironmentId;
@@ -54,6 +74,18 @@ export function WatchWidgetBody(props: {
   readonly timestampFormat: TimestampFormat;
   readonly connectorInstances: ReadonlyArray<WatchConnectorInstance>;
   readonly connectorPacks: ReadonlyArray<WatchConnectorPack>;
+  /** Pack-registered widget sources — resolves `connectorMissing` for `pack:*` provenance. */
+  readonly packWidgetSources: ReadonlyArray<WatchPackWidgetSource>;
+  /** Mount governance for `agent:*` kinds; absent renders them unmounted. */
+  readonly appMounts?: WatchAppMountControls;
+  /**
+   * Lifts the published source record an agent widget resolves, so the host
+   * can offer "View source" from the widget context menu.
+   */
+  readonly onAppSourceRecord?: (
+    widgetId: WatchWidgetId,
+    record: WatchWidgetSourceRecord | null,
+  ) => void;
   /**
    * True once the connectors query has produced data. Until then a connector
    * binding's health is unknown, so source errors stay silent — resolving
@@ -72,11 +104,45 @@ export function WatchWidgetBody(props: {
   readonly onReconnectConnector: (instance: WatchConnectorInstance) => void;
   /** Open the secret dialog for a bound connector instance. */
   readonly onUpdateConnectorSecret: (instance: WatchConnectorInstance) => void;
+  /** Pending install/upgrade requests — the connector-status widget lists them. */
+  readonly installRequests: ReadonlyArray<WatchConnectorInstallRequest>;
+  /** Opens the human-confirm dialog for a pending request. */
+  readonly onReviewInstallRequest: (request: WatchConnectorInstallRequest) => void;
   readonly onOpenThread: (ref: ScopedThreadRef) => void;
 }): ReactNode {
   const { widget, page } = props;
   const spec = watchFirstPartyWidgetSpec(widget.kind);
-  if (spec === undefined) return undefined;
+
+  // Agent/pack kinds: the generated configure form handles the connector
+  // binding (they have no declared settings fields); the live body is the
+  // governed sandbox frame. While configuring or errored, the app body
+  // unmounts entirely — its observer reports hidden and the mount seat frees.
+  if (spec === undefined) {
+    if (watchAgentSourceId(widget.kind) === undefined) return undefined;
+    if (props.configuring && watchWidgetIsConfigurable(widget)) {
+      return (
+        <WatchWidgetSettingsForm
+          widget={widget}
+          projects={props.projects}
+          connectorInstances={props.connectorInstances}
+          onSubmit={(config) => props.onConfigureSubmit(widget, config)}
+          onCancel={props.onConfigureClose}
+        />
+      );
+    }
+    if (props.appMounts === undefined) return undefined;
+    return (
+      <WatchAppWidget
+        environmentId={props.environmentId}
+        widget={widget}
+        packWidgetSources={props.packWidgetSources}
+        mountState={props.appMounts.stateOf(widget.id)}
+        onVisibilityChange={(visible) => props.appMounts?.reportVisibility(widget.id, visible)}
+        onRequestLoad={() => props.appMounts?.requestMount(widget.id)}
+        onSourceRecord={(record) => props.onAppSourceRecord?.(widget.id, record)}
+      />
+    );
+  }
 
   const boundProject = resolveWatchThreadsProjectBinding(page, widget);
   const boundProjectId = boundProject === null ? null : ProjectId.make(boundProject);
@@ -196,9 +262,10 @@ export function WatchWidgetBody(props: {
           widget={widget}
           instances={props.connectorInstances}
           packs={props.connectorPacks}
-          timestampFormat={props.timestampFormat}
+          installRequests={props.installRequests}
           connectorsReady={props.connectorsReady}
           connectorsError={props.connectorsError}
+          onReviewInstallRequest={props.onReviewInstallRequest}
         />
       );
     default:

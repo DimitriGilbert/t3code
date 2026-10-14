@@ -21,6 +21,7 @@ import {
   createEnvironmentRpcSubscriptionAtomFamily,
   environmentRpcKey,
 } from "./runtime.ts";
+import { createWatchNotificationAtoms } from "./watchNotifications.ts";
 
 /**
  * Whether a failed watch write means the page changed under the client and
@@ -196,5 +197,42 @@ export function createWatchEnvironmentAtoms<R, E>(
       label: "environment-command:watch:connector-set-instance-config",
       tag: WS_METHODS.watchConnectorsSetInstanceConfig,
     }),
+    /**
+     * The UI-only half of the install gate: returns the pending request plus
+     * the single-use token bound to its manifest hash (and, for `localUrl`
+     * requests, performs the deferred fetch under the caller's
+     * `allowLocalUrl` acknowledgement). Not agent-reachable.
+     */
+    prepareConnectorInstallConfirm: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-prepare-install-confirm",
+      tag: WS_METHODS.watchConnectorsPrepareInstallConfirm,
+    }),
+    /** Human confirm for a pending install — requires the prepare-minted token. */
+    confirmConnectorInstall: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-confirm-install",
+      tag: WS_METHODS.watchConnectorsConfirmInstall,
+    }),
+    /** Human confirm for a pending upgrade — same token gate as install. */
+    confirmConnectorUpgrade: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-confirm-upgrade",
+      tag: WS_METHODS.watchConnectorsConfirmUpgrade,
+    }),
+    /** Decline a pending install/upgrade request; reversible by requesting again. */
+    cancelConnectorInstallRequest: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-cancel-install-request",
+      tag: WS_METHODS.watchConnectorsCancelInstallRequest,
+    }),
+    /** Re-pin an instance to a previously-approved pack version — no fetch, no new code. */
+    rollbackConnector: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-rollback",
+      tag: WS_METHODS.watchConnectorsRollback,
+    }),
+    /** Soft-archive a pack and its instances — polling stops, config retained. */
+    uninstallConnector: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-uninstall",
+      tag: WS_METHODS.watchConnectorsUninstall,
+    }),
+    /** Notification subscription, history query, and prefs write. */
+    notifications: createWatchNotificationAtoms(runtime),
   };
 }

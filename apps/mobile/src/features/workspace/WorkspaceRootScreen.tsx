@@ -20,6 +20,7 @@ import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCom
 import { WorkspaceConnectionTitle } from "../home/WorkspaceConnectionTitle";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { PullRequestsScreen } from "../pull-requests/PullRequestsScreen";
+import { useWatchEntryEnvironmentId } from "../watch/useWatchEntryEnvironmentId";
 import {
   WorkspaceTabsContext,
   WorkspaceTabsProvider,
@@ -90,6 +91,7 @@ function WorkspaceRootContent() {
     [width, navigation],
   );
   const tab = state.tabs[state.selectedTab];
+  const watchEnvironmentId = useWatchEntryEnvironmentId();
   const bottomClearance =
     Platform.OS === "ios" && isDuoDevice(deviceType)
       ? Math.max(bottomBarInset ?? Math.max(insets.bottom, 12), keyboardHeight + 8) +
@@ -128,6 +130,16 @@ function WorkspaceRootContent() {
             title="T3 Code"
             titleContent={renderHeaderTitle()}
             actions={[
+              ...(watchEnvironmentId === null
+                ? []
+                : [
+                    {
+                      accessibilityLabel: "Watch",
+                      icon: "square.grid.2x2" as const,
+                      onPress: () =>
+                        navigation.navigate("Watch", { environmentId: watchEnvironmentId }),
+                    },
+                  ]),
               {
                 accessibilityLabel:
                   state.selectedTab === "threads" ? "Search threads" : "Search pull requests",

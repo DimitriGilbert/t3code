@@ -17,6 +17,7 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { NativeWorkspaceTabActivityContext } from "../../native/v5-workspace-context";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { useWatchEntryEnvironmentId } from "../watch/useWatchEntryEnvironmentId";
 import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 import { WorkspaceSearchField } from "./WorkspaceSearchField";
 import { WORKSPACE_TOOLBAR } from "./workspace-tabs-state";
@@ -85,6 +86,7 @@ export function WorkspaceToolbar(props: {
   const fieldRef = useRef<TextInputInstance>(null);
   const tab = workspace.state.tabs[workspace.state.selectedTab];
   const selectedTab = workspace.state.selectedTab;
+  const watchEnvironmentId = useWatchEntryEnvironmentId();
   const enterSearch = useCallback(() => {
     workspace.dispatch({
       type: "scroll",
@@ -168,6 +170,13 @@ export function WorkspaceToolbar(props: {
       />
       {/* UIKit lays trailing items out from the edge inward. */}
       <Toolbar placement="right">
+        {watchEnvironmentId !== null ? (
+          <Toolbar.Button
+            accessibilityLabel="Watch"
+            icon="square.grid.2x2"
+            onPress={() => navigation.navigate("Watch", { environmentId: watchEnvironmentId })}
+          />
+        ) : null}
         <Toolbar.Button
           accessibilityLabel="Settings"
           icon="gearshape"

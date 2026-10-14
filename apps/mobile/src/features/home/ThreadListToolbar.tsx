@@ -27,6 +27,8 @@ export function ThreadListToolbar(props: {
   readonly filterCustomized: boolean;
   readonly onFilterAction: NonNullable<ComponentProps<typeof Menu>["onPressAction"]>;
   readonly onOpenEnvironments: () => void;
+  /** Present only when an environment advertises the watch-screen capability. */
+  readonly onOpenWatch?: () => void;
   readonly sidebar?: boolean;
   readonly onLayout?: (event: LayoutChangeEvent) => void;
   readonly onRequestVisibility?: () => void;
@@ -100,6 +102,15 @@ export function ThreadListToolbar(props: {
     </AndroidAnchoredMenu>
   ) : null;
 
+  const watchButton =
+    props.onOpenWatch !== undefined ? (
+      <AndroidHeaderIconButton
+        accessibilityLabel="Watch"
+        icon="square.grid.2x2"
+        onPress={props.onOpenWatch}
+      />
+    ) : null;
+
   return (
     <View
       onLayout={props.onLayout}
@@ -114,6 +125,7 @@ export function ThreadListToolbar(props: {
         searchAccessibilityLabel="Search threads"
         titleAccessibilityLabel="T3 Code, Threads"
         onOpenEnvironments={props.onOpenEnvironments}
+        watch={watchButton}
         filter={filterButton}
       />
     </View>

@@ -16,7 +16,10 @@ import type {
   WatchWidgetPlacement,
   WatchWidgetProvenance,
   WatchWidgetSetLayoutInput,
+  WatchWidgetSetMobileProjectionInput,
 } from "@t3tools/contracts";
+
+import { watchAgentSourceId } from "./watchMounts.ts";
 
 /**
  * Pure watch-page and board-layout helpers shared by web and mobile. Nothing
@@ -155,6 +158,108 @@ export function watchPageWidgets(
   pageId: WatchPageId,
 ): WatchWidget[] {
   return canonicalWatchWidgetOrder(widgets.filter((widget) => widget.pageId === pageId));
+}
+
+// ── Mobile projection ─────────────────────────────────────────────────
+
+/**
+ * The page's single-column stack on mobile: canonical order, `mobileHidden`
+ * widgets removed, then `mobileOrder` applied (stable sort, so canonical
+ * order breaks ties on equal slots). A projection — `placement` is never
+ * read here and never written by the edits below.
+ */
+export function watchPageMobileWidgets(
+  widgets: ReadonlyArray<WatchWidget>,
+  pageId: WatchPageId,
+): WatchWidget[] {
+  return watchPageWidgets(widgets, pageId)
+    .filter((widget) => !widget.mobileHidden)
+    .sort((a, b) => a.mobileOrder - b.mobileOrder);
+}
+
+/** Every widget on the page in mobile-stack order, hidden rows included. */
+export function watchPageMobileSequence(
+  widgets: ReadonlyArray<WatchWidget>,
+  pageId: WatchPageId,
+): WatchWidget[] {
+  return watchPageWidgets(widgets, pageId).sort((a, b) => a.mobileOrder - b.mobileOrder);
+}
+
+export type WatchMobileProjectionEdit =
+  | { readonly type: "move"; readonly widgetId: WatchWidgetId; readonly direction: "up" | "down" }
+  | { readonly type: "setHidden"; readonly widgetId: WatchWidgetId; readonly hidden: boolean };
+
+/**
+ * The `setMobileProjection` payload for one reorder/hide/unhide edit,
+ * guarded by the page's `mobileRevision` — the only fields a phone may
+ * write. Moves swap the widget with the nearest *visible* neighbour so
+ * hidden rows keep their slots; the whole page is renumbered 0..n-1 and
+ * only changed widgets ship as patches. Returns `null` when the edit is a
+ * no-op (edge move, already-hidden, unknown widget) so the caller skips
+ * the write entirely.
+ */
+export function buildWatchWidgetSetMobileProjectionInput(input: {
+  readonly page: Pick<WatchPage, "id" | "mobileRevision">;
+  readonly widgets: ReadonlyArray<WatchWidget>;
+  readonly edit: WatchMobileProjectionEdit;
+  /**
+   * Mobile's agent-widget kill switch. When `false`, `agent:*` widgets are
+   * capability-hidden: like `mobileHidden` rows they render nothing, keep
+   * their slots, and are never move targets. Defaults to enabled.
+   */
+  readonly agentWidgetsEnabled?: boolean;
+}): WatchWidgetSetMobileProjectionInput | null {
+  const ordered = watchPageMobileSequence(input.widgets, input.page.id);
+  const index = ordered.findIndex((widget) => widget.id === input.edit.widgetId);
+  if (index < 0) return null;
+  const target = ordered[index]!;
+
+  if (input.edit.type === "setHidden") {
+    if (target.mobileHidden === input.edit.hidden) return null;
+    return {
+      pageId: input.page.id,
+      expectedMobileRevision: input.page.mobileRevision,
+      widgets: [
+        { widgetId: target.id, mobileOrder: target.mobileOrder, mobileHidden: input.edit.hidden },
+      ],
+    };
+  }
+
+  // Rows that render nothing are never move targets: `mobileHidden`
+  // widgets, and `agent:*` widgets while the mobile kill switch is off.
+  const isMoveInert = (widget: WatchWidget): boolean =>
+    widget.mobileHidden ||
+    (input.agentWidgetsEnabled === false && watchAgentSourceId(widget.kind) !== undefined);
+  if (isMoveInert(target)) return null;
+
+  const step = input.edit.direction === "up" ? -1 : 1;
+  let neighbourIndex = index + step;
+  while (
+    neighbourIndex >= 0 &&
+    neighbourIndex < ordered.length &&
+    isMoveInert(ordered[neighbourIndex]!)
+  ) {
+    neighbourIndex += step;
+  }
+  if (neighbourIndex < 0 || neighbourIndex >= ordered.length) return null;
+
+  const next = [...ordered];
+  next[index] = ordered[neighbourIndex]!;
+  next[neighbourIndex] = target;
+  const patches = next
+    .map((widget, order) => ({ widget, order }))
+    .filter(({ widget, order }) => widget.mobileOrder !== order)
+    .map(({ widget, order }) => ({
+      widgetId: widget.id,
+      mobileOrder: order,
+      mobileHidden: widget.mobileHidden,
+    }));
+  if (patches.length === 0) return null;
+  return {
+    pageId: input.page.id,
+    expectedMobileRevision: input.page.mobileRevision,
+    widgets: patches,
+  };
 }
 
 /** True when two placements share at least one grid cell. */

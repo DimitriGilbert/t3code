@@ -343,6 +343,10 @@
       "types": "./src/state/watch.ts",
       "default": "./src/state/watch.ts"
     },
+    "./state/watch-mounts": {
+      "types": "./src/state/watchMounts.ts",
+      "default": "./src/state/watchMounts.ts"
+    },
     "./work-log/user-input": {
       "types": "./src/work-log/userInput.ts",
       "default": "./src/work-log/userInput.ts"
@@ -418,6 +422,10 @@
     "./mcp-apps": {
       "types": "./src/mcpApps/host.ts",
       "default": "./src/mcpApps/host.ts"
+    },
+    "./watch-app-bridge": {
+      "types": "./src/watchAppBridge.ts",
+      "default": "./src/watchAppBridge.ts"
     },
     "./state/mcp-apps": {
       "types": "./src/state/mcpApps.ts",

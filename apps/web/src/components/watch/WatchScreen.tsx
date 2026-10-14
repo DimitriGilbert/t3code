@@ -1,11 +1,21 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  type AtomCommandResult,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { isWatchPageRevisionConflict } from "@t3tools/client-runtime/state/watch";
+import {
   buildWatchWidgetAddInput,
+  buildWatchWidgetConfigureInput,
+  buildWatchWidgetDuplicateInput,
+  buildWatchWidgetMoveToPageInput,
+  buildWatchWidgetSetLayoutInput,
   nextWatchPageName,
   partitionWatchPages,
   watchGalleryInstantiateInput,
   watchPageAmbientProjectId,
   watchPageWidgets,
+  watchPlacementFits,
   WATCH_GRID_EDIT_MIN_WIDTH_PX,
   type WatchFirstPartyWidgetSpec,
 } from "@t3tools/client-runtime/state/watch-pages";
@@ -14,6 +24,10 @@ import type {
   ProjectId,
   WatchGalleryTemplate,
   WatchPageId,
+  WatchWidget,
+  WatchWidgetConfig,
+  WatchWidgetId,
+  WatchWidgetPlacement,
 } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { CheckIcon, LayoutDashboardIcon, PencilIcon } from "lucide-react";
@@ -51,12 +65,15 @@ import { watchEnvironment } from "~/state/watch";
 import { WatchBoard } from "./WatchBoard";
 import { WatchGalleryDialog } from "./WatchGalleryDialog";
 import { WatchPageTabs } from "./WatchPageTabs";
+import { WatchWidgetConfigureDialog } from "./WatchWidgetConfigureDialog";
 import { WatchWidgetPickerDialog } from "./WatchWidgetPickerDialog";
 import { onWatchUiAction, type WatchUiAction } from "./watchUiBus";
 
 const NEVER_NEEDS_RELOAD_ATOM = Atom.make(false).pipe(
   Atom.withLabel("watch-screen:never-needs-reload"),
 );
+
+type WidgetMenuAction = "configure" | "duplicate" | "move-to" | `move-to:${number}` | "remove";
 
 function WatchBoardSkeleton() {
   return (
@@ -67,6 +84,22 @@ function WatchBoardSkeleton() {
       <Skeleton className="col-span-2 h-24 md:col-span-3" />
     </div>
   );
+}
+
+/**
+ * The toast half of a revision conflict — `revisionCheckedCommand` already
+ * flagged the page's inline reload banner; this prompts at the write that
+ * failed. Other failures stay on the command reporter.
+ */
+function reportWatchWriteConflict(result: AtomCommandResult<unknown, unknown>): void {
+  if (!AsyncResult.isFailure(result)) return;
+  if (!isWatchPageRevisionConflict(squashAtomCommandFailure(result))) return;
+  toastManager.add({
+    type: "warning",
+    title: "This page changed on another client.",
+    description: "Reload to pick up the latest layout, then retry.",
+    timeout: 5000,
+  });
 }
 
 export function WatchScreen() {
@@ -90,6 +123,7 @@ export function WatchScreen() {
   // pauses it — it resumes when the page is viewed again at editing width.
   const [editingPageId, setEditingPageId] = useState<WatchPageId | null>(null);
   const [renamingPageId, setRenamingPageId] = useState<WatchPageId | null>(null);
+  const [configuringWidgetId, setConfiguringWidgetId] = useState<WatchWidgetId | null>(null);
   const canEditLayout = useMediaQuery({ min: WATCH_GRID_EDIT_MIN_WIDTH_PX });
 
   const { active, archived } = partitionWatchPages(pagesQuery.data?.pages ?? []);
@@ -101,6 +135,11 @@ export function WatchScreen() {
     null;
   const selectedWidgets =
     selectedPage === null ? [] : watchPageWidgets(pagesQuery.data?.widgets ?? [], selectedPage.id);
+  const configuringWidget =
+    configuringWidgetId === null
+      ? null
+      : ((pagesQuery.data?.widgets ?? []).find((widget) => widget.id === configuringWidgetId) ??
+        null);
   const needsReload = useAtomValue(
     environmentId !== null && selectedPage !== null
       ? watchEnvironment.needsReload({ environmentId, pageId: selectedPage.id })
@@ -125,6 +164,17 @@ export function WatchScreen() {
   );
   const templates = galleryQuery.data?.templates ?? [];
 
+  // Connector instances feed the configure dialog's binding picker; the
+  // subscription only attaches while a connector-source widget is open.
+  const connectorsQuery = useEnvironmentQuery(
+    environmentId !== null && configuringWidget?.config.source?.kind === "connector"
+      ? watchEnvironment.connectorsLive({ environmentId, input: {} })
+      : null,
+  );
+  const connectorInstances = (connectorsQuery.data?.instances ?? []).filter(
+    (instance) => instance.archivedAt === null,
+  );
+
   const createPage = useAtomCommand(watchEnvironment.createPage);
   const renamePage = useAtomCommand(watchEnvironment.renamePage);
   const reorderPage = useAtomCommand(watchEnvironment.reorderPage);
@@ -134,6 +184,10 @@ export function WatchScreen() {
   const updatePageScope = useAtomCommand(watchEnvironment.updatePageScope);
   const instantiateFromGallery = useAtomCommand(watchEnvironment.instantiatePageFromGallery);
   const addWidget = useAtomCommand(watchEnvironment.addWidget);
+  const removeWidget = useAtomCommand(watchEnvironment.removeWidget);
+  const configureWidget = useAtomCommand(watchEnvironment.configureWidget);
+  const setLayout = useAtomCommand(watchEnvironment.setLayout);
+  const moveWidgetToPage = useAtomCommand(watchEnvironment.moveWidgetToPage);
 
   const handleCreatePage = useCallback(
     (projectId?: ProjectId) => {
@@ -204,9 +258,112 @@ export function WatchScreen() {
       void addWidget({
         environmentId,
         input: buildWatchWidgetAddInput(selectedPage, selectedWidgets, spec.kind),
-      });
+      }).then(reportWatchWriteConflict);
     },
     [addWidget, environmentId, selectedPage, selectedWidgets],
+  );
+
+  // One committed placement per gesture — the board only calls this for
+  // non-colliding candidates, and the same check runs here so a stale read
+  // can never send an overlapping write.
+  const handleCommitLayout = useCallback(
+    (widgetId: WatchWidgetId, placement: WatchWidgetPlacement) => {
+      if (environmentId === null || selectedPage === null || !editing) return;
+      const others = selectedWidgets
+        .filter((widget) => widget.id !== widgetId)
+        .map((widget) => widget.placement);
+      if (!watchPlacementFits(placement, others)) return;
+      void setLayout({
+        environmentId,
+        input: buildWatchWidgetSetLayoutInput(selectedPage, widgetId, placement),
+      }).then(reportWatchWriteConflict);
+    },
+    [editing, environmentId, selectedPage, selectedWidgets, setLayout],
+  );
+
+  const handleConfigureSave = useCallback(
+    (widget: WatchWidget, config: WatchWidgetConfig) => {
+      setConfiguringWidgetId(null);
+      if (environmentId === null) return;
+      void configureWidget({
+        environmentId,
+        input: buildWatchWidgetConfigureInput(widget, config),
+      }).then(reportWatchWriteConflict);
+    },
+    [configureWidget, environmentId],
+  );
+
+  const handleWidgetMenu = useCallback(
+    async (widget: WatchWidget, position: { x: number; y: number }) => {
+      const api = readLocalApi();
+      const page = selectedPage;
+      if (api === undefined || page === null || environmentId === null) return;
+      const destinations = active.filter((entry) => entry.id !== page.id);
+      const action = await api.contextMenu.show<WidgetMenuAction>(
+        [
+          { id: "configure", label: "Configure", icon: "settings" },
+          { id: "duplicate", label: "Duplicate", icon: "copy" },
+          {
+            id: "move-to",
+            label: "Move to page",
+            icon: "folder-tree",
+            disabled: destinations.length === 0,
+            children: destinations.map((destination, index) => ({
+              id: `move-to:${index}` as const,
+              label: destination.name,
+            })),
+          },
+          {
+            id: "remove",
+            label: "Remove",
+            icon: "trash",
+            destructive: true,
+            separatorBefore: true,
+          },
+        ],
+        position,
+      );
+      if (action === null) return;
+      if (action === "configure") {
+        setConfiguringWidgetId(widget.id);
+        return;
+      }
+      if (action === "duplicate") {
+        void addWidget({
+          environmentId,
+          input: buildWatchWidgetDuplicateInput(page, selectedWidgets, widget),
+        }).then(reportWatchWriteConflict);
+        return;
+      }
+      if (action === "remove") {
+        void removeWidget({
+          environmentId,
+          input: { pageId: page.id, widgetId: widget.id, expectedRevision: page.revision },
+        }).then(reportWatchWriteConflict);
+        return;
+      }
+      if (action.startsWith("move-to:")) {
+        const destination = destinations[Number.parseInt(action.slice("move-to:".length), 10)];
+        if (destination === undefined) return;
+        const destinationWidgets = (pagesQuery.data?.widgets ?? []).filter(
+          (entry) => entry.pageId === destination.id,
+        );
+        void moveWidgetToPage({
+          environmentId,
+          input: buildWatchWidgetMoveToPageInput(widget, page, destination, destinationWidgets),
+        }).then(reportWatchWriteConflict);
+      }
+    },
+    [
+      active,
+      addWidget,
+      environmentId,
+      moveWidgetToPage,
+      pagesQuery.data?.widgets,
+      removeWidget,
+      selectedPage,
+      selectedWidgets,
+    ],
   );
 
   const requestEditToggle = useCallback(
@@ -460,16 +617,17 @@ export function WatchScreen() {
               <Empty size="default" className="flex-1">
                 <EmptyHeader>
                   <EmptyTitle>This page is empty</EmptyTitle>
-                  <EmptyDescription>
-                    {editing
-                      ? "Add a widget, then drag to arrange."
-                      : "Add a widget to start tracking work."}
-                  </EmptyDescription>
+                  <EmptyDescription>Add a widget to start tracking work.</EmptyDescription>
                 </EmptyHeader>
                 <EmptyContent>
                   <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
                     Add a widget
                   </Button>
+                  {editing ? (
+                    <p className="text-xs text-muted-foreground">
+                      Drag to arrange once widgets exist.
+                    </p>
+                  ) : null}
                 </EmptyContent>
               </Empty>
             ) : (
@@ -477,6 +635,9 @@ export function WatchScreen() {
                 widgets={selectedWidgets}
                 editing={editing}
                 onAddWidget={() => setPickerOpen(true)}
+                onCommitLayout={handleCommitLayout}
+                onConfigureWidget={(widget) => setConfiguringWidgetId(widget.id)}
+                onWidgetMenu={(widget, position) => void handleWidgetMenu(widget, position)}
               />
             )}
           </div>
@@ -493,6 +654,19 @@ export function WatchScreen() {
           onOpenChange={setPickerOpen}
           onPick={handlePickWidget}
         />
+        {configuringWidget !== null ? (
+          <WatchWidgetConfigureDialog
+            key={configuringWidget.id}
+            widget={configuringWidget}
+            open
+            onOpenChange={(open) => {
+              if (!open) setConfiguringWidgetId(null);
+            }}
+            projects={projects}
+            connectorInstances={connectorInstances}
+            onSave={(config) => handleConfigureSave(configuringWidget, config)}
+          />
+        ) : null}
       </div>
     </SidebarInset>
   );

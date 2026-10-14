@@ -122,6 +122,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as WatchPageService from "./watch/WatchPageService.ts";
+import * as ConnectorService from "./watch/connectors/ConnectorService.ts";
 import * as UserNotificationService from "./notifications/UserNotificationService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
@@ -578,6 +579,18 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchNotificationsSubscribe,
   WS_METHODS.watchNotificationsHistory,
   WS_METHODS.watchNotificationsSetPrefs,
+  WS_METHODS.watchConnectorsListInstances,
+  WS_METHODS.watchConnectorsSubscribeInstances,
+  WS_METHODS.watchConnectorsCreateInstance,
+  WS_METHODS.watchConnectorsUpdateInstance,
+  WS_METHODS.watchConnectorsDeleteInstance,
+  WS_METHODS.watchConnectorsSetInstanceConfig,
+  WS_METHODS.watchConnectorsRequestInstall,
+  WS_METHODS.watchConnectorsRequestUpgrade,
+  WS_METHODS.watchConnectorsPrepareInstallConfirm,
+  WS_METHODS.watchConnectorsConfirmInstall,
+  WS_METHODS.watchConnectorsConfirmUpgrade,
+  WS_METHODS.watchConnectorsCancelInstallRequest,
 ] as const;
 
 const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(...WS_WATCH_METHOD_TAGS);
@@ -604,6 +617,7 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
   Effect.gen(function* () {
     const watchPages = yield* WatchPageService.WatchPageService;
     const userNotifications = yield* UserNotificationService.UserNotificationService;
+    const connectors = yield* ConnectorService.ConnectorService;
     return ServerWsWatchRpcGroup.of({
       [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
       [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
@@ -654,6 +668,45 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
       [WS_METHODS.watchNotificationsSubscribe]: (_input) => userNotifications.subscribe(),
       [WS_METHODS.watchNotificationsHistory]: (input) => userNotifications.history(input),
       [WS_METHODS.watchNotificationsSetPrefs]: (input) => userNotifications.setPrefs(input),
+      [WS_METHODS.watchConnectorsListInstances]: (input) => connectors.list(input),
+      [WS_METHODS.watchConnectorsSubscribeInstances]: (input) => connectors.subscribeList(input),
+      [WS_METHODS.watchConnectorsCreateInstance]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.createInstance(input)),
+        ),
+      [WS_METHODS.watchConnectorsUpdateInstance]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.updateInstance(input)),
+        ),
+      [WS_METHODS.watchConnectorsDeleteInstance]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.deleteInstance(input)),
+        ),
+      [WS_METHODS.watchConnectorsSetInstanceConfig]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.setInstanceConfig(input)),
+        ),
+      [WS_METHODS.watchConnectorsRequestInstall]: (input) => connectors.requestInstall(input),
+      [WS_METHODS.watchConnectorsRequestUpgrade]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.requestUpgrade(input)),
+        ),
+      [WS_METHODS.watchConnectorsPrepareInstallConfirm]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.prepareInstallConfirm(input)),
+        ),
+      [WS_METHODS.watchConnectorsConfirmInstall]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.confirmInstall(input)),
+        ),
+      [WS_METHODS.watchConnectorsConfirmUpgrade]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.confirmUpgrade(input)),
+        ),
+      [WS_METHODS.watchConnectorsCancelInstallRequest]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.cancelInstallRequest(input)),
+        ),
     });
   }),
 );

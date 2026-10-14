@@ -55,6 +55,9 @@ import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as WatchPageService from "../watch/WatchPageService.ts";
+import * as ConnectorService from "../watch/connectors/ConnectorService.ts";
+import * as ConfirmationTokens from "../watch/connectors/ConfirmationTokens.ts";
+import * as PackStore from "../watch/connectors/PackStore.ts";
 import * as UserNotificationService from "../notifications/UserNotificationService.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -350,6 +353,9 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 const layerUserNotificationsProvided = UserNotificationService.layer.pipe(
   Layer.provide(Layer.mergeAll(layerEventSinkProvided, ProjectionStore.layer)),
 );
+const layerConnectorsProvided = ConnectorService.layer.pipe(
+  Layer.provide(Layer.mergeAll(ConfirmationTokens.layer, PackStore.layerPackFetch)),
+);
 
 export const layer = Layer.mergeAll(
   layerCommandOutputHubProvided,
@@ -373,6 +379,7 @@ export const layerProduction = Layer.mergeAll(
   layerScheduledTaskProvided,
   layerSecretRequestsProvided,
   WatchPageService.layer,
+  layerConnectorsProvided,
   layerUserNotificationsProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(

@@ -357,6 +357,24 @@ import {
 } from "./scheduledTask.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
+  WatchConnectorCancelInstallRequestInput,
+  WatchConnectorConfirmInstallInput,
+  WatchConnectorConfirmResult,
+  WatchConnectorConfirmUpgradeInput,
+  WatchConnectorCreateInstanceInput,
+  WatchConnectorDeleteInstanceInput,
+  WatchConnectorDeleteInstanceResult,
+  WatchConnectorError,
+  WatchConnectorInstallRequestResult,
+  WatchConnectorInstanceResult,
+  WatchConnectorPrepareInstallConfirmInput,
+  WatchConnectorPrepareInstallConfirmResult,
+  WatchConnectorRequestInstallInput,
+  WatchConnectorRequestUpgradeInput,
+  WatchConnectorSetInstanceConfigInput,
+  WatchConnectorUpdateInstanceInput,
+  WatchConnectorsListInput,
+  WatchConnectorsListResult,
   WatchGalleryListResult,
   WatchLayoutCollisionError,
   WatchNotificationError,
@@ -611,7 +629,7 @@ export const WS_METHODS = {
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
 
-  // Watch screen methods (Phase 1: pages + widgets)
+  // Watch screen methods (pages, widgets, notifications, connector installs)
   watchPagesList: "watchPages.list",
   watchPagesSubscribe: "watchPages.subscribe",
   watchPagesCreate: "watchPages.create",
@@ -627,9 +645,6 @@ export const WS_METHODS = {
   watchWidgetsSetLayout: "watchWidgets.setLayout",
   watchWidgetsSetMobileProjection: "watchWidgets.setMobileProjection",
   watchWidgetsMoveToPage: "watchWidgets.moveToPage",
-  // Watch screen methods reserved for later phases (notifications, connectors,
-  // widget sources). They are declared here so the wire vocabulary is stable,
-  // but are not part of `WsRpcGroup` yet.
   watchNotificationsSubscribe: "watchNotifications.subscribe",
   watchNotificationsHistory: "watchNotifications.history",
   watchNotificationsSetPrefs: "watchNotifications.setPrefs",
@@ -645,6 +660,9 @@ export const WS_METHODS = {
   watchConnectorsConfirmInstall: "watchConnectors.confirmInstall",
   watchConnectorsConfirmUpgrade: "watchConnectors.confirmUpgrade",
   watchConnectorsCancelInstallRequest: "watchConnectors.cancelInstallRequest",
+  // Watch screen methods reserved for later phases (transports/polling,
+  // rollback/uninstall/purge, widget sources) — wire vocabulary declared here
+  // so it is stable, but not yet part of `WsRpcGroup`.
   watchConnectorsRollback: "watchConnectors.rollback",
   watchConnectorsUninstall: "watchConnectors.uninstall",
   watchConnectorsPurgeInstanceData: "watchConnectors.purgeInstanceData",
@@ -2087,6 +2105,99 @@ const WsWatchNotificationsSetPrefsRpc = Rpc.make(WS_METHODS.watchNotificationsSe
   error: WsWatchNotificationReadError,
 });
 
+const WsWatchConnectorError = Schema.Union([WatchConnectorError, EnvironmentAuthorizationError]);
+
+const WsWatchConnectorsListInstancesRpc = Rpc.make(WS_METHODS.watchConnectorsListInstances, {
+  payload: WatchConnectorsListInput,
+  success: WatchConnectorsListResult,
+  error: WsWatchConnectorError,
+});
+
+/** Streams the connector list — packs, instances, pending install requests — on subscribe and after every change. */
+const WsWatchConnectorsSubscribeInstancesRpc = Rpc.make(
+  WS_METHODS.watchConnectorsSubscribeInstances,
+  {
+    payload: WatchConnectorsListInput,
+    success: WatchConnectorsListResult,
+    error: WsWatchConnectorError,
+    stream: true,
+  },
+);
+
+const WsWatchConnectorsCreateInstanceRpc = Rpc.make(WS_METHODS.watchConnectorsCreateInstance, {
+  payload: WatchConnectorCreateInstanceInput,
+  success: WatchConnectorInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsUpdateInstanceRpc = Rpc.make(WS_METHODS.watchConnectorsUpdateInstance, {
+  payload: WatchConnectorUpdateInstanceInput,
+  success: WatchConnectorInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsDeleteInstanceRpc = Rpc.make(WS_METHODS.watchConnectorsDeleteInstance, {
+  payload: WatchConnectorDeleteInstanceInput,
+  success: WatchConnectorDeleteInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsSetInstanceConfigRpc = Rpc.make(
+  WS_METHODS.watchConnectorsSetInstanceConfig,
+  {
+    payload: WatchConnectorSetInstanceConfigInput,
+    success: WatchConnectorInstanceResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+const WsWatchConnectorsRequestInstallRpc = Rpc.make(WS_METHODS.watchConnectorsRequestInstall, {
+  payload: WatchConnectorRequestInstallInput,
+  success: WatchConnectorInstallRequestResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsRequestUpgradeRpc = Rpc.make(WS_METHODS.watchConnectorsRequestUpgrade, {
+  payload: WatchConnectorRequestUpgradeInput,
+  success: WatchConnectorInstallRequestResult,
+  error: WsWatchConnectorError,
+});
+
+/**
+ * Minted only for a UI client: returns the pending request plus the
+ * single-use confirmation token bound to its manifest hash. Not in the MCP
+ * toolkit — an agent can never reach the token.
+ */
+const WsWatchConnectorsPrepareInstallConfirmRpc = Rpc.make(
+  WS_METHODS.watchConnectorsPrepareInstallConfirm,
+  {
+    payload: WatchConnectorPrepareInstallConfirmInput,
+    success: WatchConnectorPrepareInstallConfirmResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+const WsWatchConnectorsConfirmInstallRpc = Rpc.make(WS_METHODS.watchConnectorsConfirmInstall, {
+  payload: WatchConnectorConfirmInstallInput,
+  success: WatchConnectorConfirmResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsConfirmUpgradeRpc = Rpc.make(WS_METHODS.watchConnectorsConfirmUpgrade, {
+  payload: WatchConnectorConfirmUpgradeInput,
+  success: WatchConnectorConfirmResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsCancelInstallRequestRpc = Rpc.make(
+  WS_METHODS.watchConnectorsCancelInstallRequest,
+  {
+    payload: WatchConnectorCancelInstallRequestInput,
+    success: WatchConnectorInstallRequestResult,
+    error: WsWatchConnectorError,
+  },
+);
+
 /**
  * Checks the connection's scopes against the scope each RPC declares, before
  * the handler runs. Every RPC in `WsRpcGroup` carries it, so a handler cannot
@@ -2323,6 +2434,18 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchNotificationsSubscribeRpc,
   WsWatchNotificationsHistoryRpc,
   WsWatchNotificationsSetPrefsRpc,
+  WsWatchConnectorsListInstancesRpc,
+  WsWatchConnectorsSubscribeInstancesRpc,
+  WsWatchConnectorsCreateInstanceRpc,
+  WsWatchConnectorsUpdateInstanceRpc,
+  WsWatchConnectorsDeleteInstanceRpc,
+  WsWatchConnectorsSetInstanceConfigRpc,
+  WsWatchConnectorsRequestInstallRpc,
+  WsWatchConnectorsRequestUpgradeRpc,
+  WsWatchConnectorsPrepareInstallConfirmRpc,
+  WsWatchConnectorsConfirmInstallRpc,
+  WsWatchConnectorsConfirmUpgradeRpc,
+  WsWatchConnectorsCancelInstallRequestRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = WsRpcGroupCore.merge(WsWatchRpcGroup);

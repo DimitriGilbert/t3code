@@ -32,6 +32,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as WatchPageService from "../watch/WatchPageService.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
@@ -486,6 +487,20 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  // Project-scoped watch pages outlive their project as archived rows; the
+  // widget bindings stay so they degrade to the "project missing" state.
+  // Optional like the settings cleanup above: a composition without the watch
+  // feature simply has nothing to archive.
+  const archiveWatchPages = (projectId: ProjectId) =>
+    Effect.serviceOption(WatchPageService.WatchPageService).pipe(
+      Effect.flatMap((watchPages) =>
+        Option.isSome(watchPages) ? watchPages.value.archiveForProject(projectId) : Effect.void,
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning(`Failed to archive watch pages for deleted project ${projectId}.`, cause),
+      ),
+    );
+
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
     function* (input) {
       const { projectId } = input;
@@ -502,6 +517,7 @@ export const make = Effect.gen(function* () {
       yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
       if (isFirstDelete) {
         yield* clearProjectSettingsOverrides(projectId);
+        yield* archiveWatchPages(projectId);
       }
       yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
       return yield* readCommitted(projectId);

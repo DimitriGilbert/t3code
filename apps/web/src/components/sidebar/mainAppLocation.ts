@@ -7,8 +7,12 @@ export function isAppModalPage(pathname: string) {
   return pathname === "/settings" || pathname.startsWith("/settings/") || pathname === "/usage";
 }
 
+// Watch, Pull Requests, and legacy `/projects/<key>` redirects replace the
+// sidebar utility row with a Back button. Everything else is the main app.
 export function isSidebarUtilityPage(pathname: string) {
-  return pathname.startsWith("/projects/") || pathname === "/pull-requests";
+  return (
+    pathname.startsWith("/projects/") || pathname === "/watch" || pathname === "/pull-requests"
+  );
 }
 
 // Pages the root route always renders without the app shell, so they are never

@@ -231,6 +231,9 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+shift+2", command: "usage.period.week", when: "usagePageOpen" },
   { key: "mod+shift+3", command: "usage.period.month", when: "usagePageOpen" },
   { key: "mod+shift+4", command: "usage.period.quarter", when: "usagePageOpen" },
+  // A bare key: usable only because the watch page's editable fields claim it
+  // first via !editableFocus, and it never applies outside /watch.
+  { key: "e", command: "watch.editPage", when: "watchPageOpen && !editableFocus" },
 ];
 
 function normalizeKeyToken(token: string): string {

@@ -13,8 +13,10 @@ import {
   type WatchPageListResult,
   type WatchPageRenameInput,
   type WatchPageReorderInput,
+  type WatchPageRestoreInput,
   type WatchPageResult,
   WatchPageRevisionConflictError,
+  type WatchPageUpdateScopeInput,
   type WatchPageWithWidgetsResult,
   WatchWidget,
   type WatchWidgetAddInput,
@@ -69,6 +71,23 @@ export class WatchPageService extends Context.Service<
     readonly delete: (
       input: WatchPageDeleteInput,
     ) => Effect.Effect<WatchPageDeleteResult, WatchPageError>;
+    /**
+     * Un-archives a page parked by a project delete. The page keeps its
+     * original scope and projectId — when the project is gone for good the
+     * user rescopes it with `updateScope`.
+     */
+    readonly restore: (
+      input: WatchPageRestoreInput,
+    ) => Effect.Effect<WatchPageResult, WatchPageError>;
+    /**
+     * Moves a page between `global` and `project` scope. Widget rows are
+     * untouched: unbound widgets still carry no binding and resolve against
+     * the new ambient project at read time; explicit `source.binding` values
+     * keep pointing where the user put them.
+     */
+    readonly updateScope: (
+      input: WatchPageUpdateScopeInput,
+    ) => Effect.Effect<WatchPageResult, WatchPageError>;
     /** Instantiates a gallery template into a real page; repeatable — never a seeded row. */
     readonly instantiateFromGallery: (
       input: WatchPageInstantiateFromGalleryInput,
@@ -827,6 +846,75 @@ export const layer = Layer.effect(
           Effect.as({ id: input.pageId }),
         );
 
+    const restore: WatchPageService["Service"]["restore"] = (input) =>
+      Effect.gen(function* () {
+        const nowIso = iso(yield* localNow);
+        const rows = yield* sql<{ page_id: string }>`
+          UPDATE watch_pages
+          SET archived_at = NULL,
+              revision = revision + 1,
+              updated_at = ${nowIso}
+          WHERE page_id = ${input.pageId} AND archived_at IS NOT NULL
+          RETURNING page_id
+        `;
+        const page = yield* findPage(input.pageId);
+        if (rows.length === 0) {
+          if (page === null) {
+            return yield* watchError("Watch page not found.", { pageId: input.pageId });
+          }
+          return yield* watchError("Watch page is not archived.", { pageId: input.pageId });
+        }
+        if (page === null) {
+          return yield* watchError("Watch page not found.", { pageId: input.pageId });
+        }
+        yield* notifyChanged;
+        return { page };
+      }).pipe(
+        Effect.mapError((cause) =>
+          isTypedWatchError(cause)
+            ? cause
+            : watchError("Could not restore watch page.", { pageId: input.pageId, cause }),
+        ),
+      );
+
+    const updateScope: WatchPageService["Service"]["updateScope"] = (input) =>
+      Effect.gen(function* () {
+        const projectId = input.scope === "project" ? (input.projectId ?? null) : null;
+        if (input.scope === "project" && projectId === null) {
+          return yield* watchError("A project-scoped watch page requires a projectId.", {
+            pageId: input.pageId,
+          });
+        }
+        const nowIso = iso(yield* localNow);
+        const rows = yield* sql<{ page_id: string }>`
+          UPDATE watch_pages
+          SET scope = ${input.scope},
+              project_id = ${projectId},
+              revision = revision + 1,
+              updated_at = ${nowIso}
+          WHERE page_id = ${input.pageId} AND archived_at IS NULL
+          RETURNING page_id
+        `;
+        const page = yield* findPage(input.pageId);
+        if (rows.length === 0) {
+          if (page === null) {
+            return yield* watchError("Watch page not found.", { pageId: input.pageId });
+          }
+          return yield* watchError("Watch page is archived.", { pageId: input.pageId });
+        }
+        if (page === null) {
+          return yield* watchError("Watch page not found.", { pageId: input.pageId });
+        }
+        yield* notifyChanged;
+        return { page };
+      }).pipe(
+        Effect.mapError((cause) =>
+          isTypedWatchError(cause)
+            ? cause
+            : watchError("Could not update watch page scope.", { pageId: input.pageId, cause }),
+        ),
+      );
+
     const instantiateFromGallery: WatchPageService["Service"]["instantiateFromGallery"] = (input) =>
       Effect.gen(function* () {
         const template = WATCH_GALLERY_TEMPLATES.find((entry) => entry.id === input.templateId);
@@ -1232,6 +1320,8 @@ export const layer = Layer.effect(
       reorder,
       duplicate,
       delete: deletePage,
+      restore,
+      updateScope,
       instantiateFromGallery,
       archiveForProject,
       addWidget,

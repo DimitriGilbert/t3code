@@ -409,6 +409,102 @@ it.effect("archives project-scoped pages and keeps them out of the default list"
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("restores an archived page with a revision bump", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    const projectId = ProjectId.make("project:watch-restore");
+    const { page } = yield* watch.create({ name: "Scoped", scope: "project", projectId });
+    yield* watch.archiveForProject(projectId);
+
+    // Restoring a live page is an error, not a silent no-op.
+    const { page: live } = yield* createPage("Live");
+    const notArchived = yield* watch.restore({ pageId: live.id }).pipe(Effect.flip);
+    assert.equal(notArchived._tag, "WatchPageError");
+
+    const restored = yield* watch.restore({ pageId: page.id });
+    assert.isNull(restored.page.archivedAt);
+    assert.isTrue(restored.page.revision > page.revision);
+    // Scope and binding survive the archive round-trip untouched.
+    assert.equal(restored.page.scope, "project");
+    assert.equal(restored.page.projectId, projectId);
+
+    const active = yield* watch.list({});
+    assert.deepEqual(
+      active.pages.map((entry) => entry.id),
+      [page.id, live.id],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rescope writes only the page row and refuses archived pages", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    const projectA = ProjectId.make("project:watch-rescope-a");
+    const projectB = ProjectId.make("project:watch-rescope-b");
+    const { page } = yield* watch.create({ name: "Board" });
+    const { widget: unbound } = yield* watch.addWidget({
+      pageId: page.id,
+      expectedRevision: page.revision,
+      kind: "active-work",
+      config: { source: { kind: "threads" } },
+      placement: { x: 0, y: 0, w: 6, h: 4 },
+    });
+    const { widget: bound } = yield* watch.addWidget({
+      pageId: page.id,
+      expectedRevision: page.revision + 1,
+      kind: "needs-attention",
+      config: { source: { kind: "threads", binding: projectB } },
+      placement: { x: 6, y: 0, w: 6, h: 4 },
+    });
+
+    const scoped = yield* watch.updateScope({
+      pageId: page.id,
+      scope: "project",
+      projectId: projectA,
+    });
+    assert.equal(scoped.page.scope, "project");
+    assert.equal(scoped.page.projectId, projectA);
+    assert.isTrue(scoped.page.revision > page.revision + 2);
+
+    // The rescope writes no widget rows: the unbound widget still carries no
+    // binding so it now resolves against projectA, and the explicit binding
+    // to projectB is preserved.
+    const listed = yield* watch.list({});
+    const stored = (id: typeof unbound.id) => listed.widgets.find((w) => w.id === id);
+    assert.isUndefined(stored(unbound.id)?.config.source?.binding);
+    assert.equal(stored(bound.id)?.config.source?.binding, projectB);
+
+    const globalAgain = yield* watch.updateScope({ pageId: page.id, scope: "global" });
+    assert.equal(globalAgain.page.scope, "global");
+    assert.isNull(globalAgain.page.projectId);
+
+    const missingProject = yield* watch
+      .updateScope({ pageId: page.id, scope: "project" })
+      .pipe(Effect.flip);
+    assert.equal(missingProject._tag, "WatchPageError");
+
+    const { page: scopedPage } = yield* watch.updateScope({
+      pageId: page.id,
+      scope: "project",
+      projectId: projectA,
+    });
+    yield* watch.archiveForProject(projectA);
+    const archivedWrite = yield* watch
+      .updateScope({ pageId: page.id, scope: "global" })
+      .pipe(Effect.flip);
+    assert.equal(archivedWrite._tag, "WatchPageError");
+
+    // Restore-then-rescope is the recovery path for a deleted project.
+    yield* watch.restore({ pageId: scopedPage.id });
+    const rescued = yield* watch.updateScope({
+      pageId: page.id,
+      scope: "project",
+      projectId: projectB,
+    });
+    assert.equal(rescued.page.projectId, projectB);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("deleting a project soft-archives its watch pages", () =>
   Effect.gen(function* () {
     const watch = yield* WatchPageService.WatchPageService;

@@ -612,6 +612,18 @@ export const ServerConfig = Schema.Struct({
   reasoningMessages: Schema.optionalKey(Schema.Boolean),
   threadFind: Schema.optionalKey(Schema.Boolean),
   threadFindProgressive: Schema.optionalKey(Schema.Boolean),
+  /** Whether this server answers the watchPages/watchWidgets RPC surface. */
+  watchScreen: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Whether published agent-authored widgets may render on the mobile watch
+   * surface. The kill switch for the phone sandbox decision; absent means off.
+   */
+  watchAgentWidgetsMobile: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Folder behind this environment's Scratch project, for threads that need
+   * no repository. Present only on servers that answer projects.ensureScratch
+   * and whose data dir is outside a Git checkout.
+   */
   scratchWorkspaceRoot: Schema.optionalKey(TrimmedNonEmptyString),
   newProjectsRoot: Schema.optionalKey(TrimmedNonEmptyString),
   /**

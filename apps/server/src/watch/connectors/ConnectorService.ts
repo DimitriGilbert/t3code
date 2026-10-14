@@ -34,6 +34,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
@@ -93,6 +94,23 @@ export class ConnectorService extends Context.Service<
     readonly setInstanceConfig: (
       input: WatchConnectorSetInstanceConfigInput,
     ) => Effect.Effect<WatchConnectorInstanceResult, WatchConnectorError>;
+    /**
+     * Server-side only (never an RPC): the instance row, its pinned manifest,
+     * and the resolved values of its manifest-declared configured secrets —
+     * what a poll run needs. Archived or missing instances fail.
+     */
+    readonly loadRuntime: (
+      instanceId: WatchConnectorInstanceId,
+    ) => Effect.Effect<ConnectorRuntimeInfo, WatchConnectorError>;
+    /**
+     * Server-side only: the poller's health write. Updates `health_json` in
+     * place — `updated_at` is untouched so subscribers diffing instance rows
+     * see health as health, not a config change.
+     */
+    readonly recordHealth: (
+      instanceId: WatchConnectorInstanceId,
+      health: WatchConnectorHealth,
+    ) => Effect.Effect<void, WatchConnectorError>;
     readonly requestInstall: (
       input: WatchConnectorRequestInstallInput,
     ) => Effect.Effect<WatchConnectorInstallRequestResult, WatchConnectorError>;
@@ -193,6 +211,7 @@ const ManifestJson = Schema.fromJsonString(WatchConnectorPackManifest);
 const ConfigJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
 const SecretKeysJson = Schema.fromJsonString(Schema.Array(Schema.String));
 const HealthJson = Schema.fromJsonString(WatchConnectorHealth);
+const decodeHealthJsonOption = Schema.decodeUnknownOption(HealthJson);
 const UnknownJson = Schema.fromJsonString(Schema.Unknown);
 const decodePack = Schema.decodeUnknownEffect(WatchConnectorPack);
 const decodeInstance = Schema.decodeUnknownEffect(WatchConnectorInstance);
@@ -317,6 +336,17 @@ const defaultHealth = {
   lastFetchAt: null,
   consecutiveFailures: 0,
 } satisfies WatchConnectorHealth;
+
+/** What the poller loads per run: instance, pinned manifest, resolved secrets. */
+export interface ConnectorRuntimeInfo {
+  readonly instance: WatchConnectorInstance;
+  readonly manifest: WatchConnectorPackManifest;
+  /**
+   * Declared-and-configured secret values. Server-side only — never written
+   * to a row, never sent to a client.
+   */
+  readonly secrets: Readonly<Record<string, string>>;
+}
 
 /**
  * The manifest's `authSchema` is a JSON-schema-lite record: `required` lists
@@ -721,6 +751,92 @@ export const layer = Layer.effect(
         return { instance: updated };
       }).pipe(Effect.mapError(toConnectorError("Could not update connector instance config.")));
 
+    const loadRuntime: ConnectorService["Service"]["loadRuntime"] = (instanceId) =>
+      Effect.gen(function* () {
+        const instance = yield* findInstance(instanceId);
+        if (instance === null || instance.archivedAt !== null) {
+          return yield* connectorError(
+            "instanceNotFound",
+            "Connector instance not found or archived.",
+            { instanceId },
+          );
+        }
+        const packRows = yield* findPackRow(instance.packId, instance.schemaVersion);
+        const packRow = packRows[0];
+        if (packRow === undefined) {
+          return yield* connectorError(
+            "packNotFound",
+            "The pack version this instance pins is not installed.",
+            { packId: instance.packId, instanceId },
+          );
+        }
+        const manifest = yield* decodeManifestFromJson(packRow.manifest_json);
+        // Values resolve only for keys that are both declared by the pinned
+        // manifest and configured on the instance — the intersection, read
+        // fresh from the secret store at fetch time.
+        const declared = new Set(manifest.secretKeys);
+        const secretPairs = yield* Effect.forEach(
+          instance.configuredSecretKeys.filter((key) => declared.has(key)),
+          (key) =>
+            secrets.get(secretStoreName(instanceId, key)).pipe(
+              Effect.map((value) =>
+                Option.isSome(value)
+                  ? ([key, new TextDecoder().decode(value.value)] as const)
+                  : null,
+              ),
+              Effect.mapError(toConnectorError("Could not read a connector secret.")),
+            ),
+          { concurrency: 1 },
+        );
+        const resolved: Record<string, string> = {};
+        for (const pair of secretPairs) {
+          if (pair !== null) resolved[pair[0]] = pair[1];
+        }
+        return { instance, manifest, secrets: resolved } satisfies ConnectorRuntimeInfo;
+      }).pipe(Effect.mapError(toConnectorError("Could not load connector runtime.")));
+
+    /**
+     * Whether the stored health state differs from `next` in a way worth
+     * broadcasting. `lastFetchAt` ticks on every poll run, so it is excluded
+     * — notifying on it would re-push the full list to every subscriber on
+     * every tick of every instance.
+     */
+    const healthChanged = (storedJson: string, next: WatchConnectorHealth) => {
+      const previous = decodeHealthJsonOption(storedJson);
+      if (Option.isNone(previous)) return true;
+      return (
+        previous.value.status !== next.status ||
+        previous.value.lastError !== next.lastError ||
+        previous.value.consecutiveFailures !== next.consecutiveFailures
+      );
+    };
+
+    const recordHealth: ConnectorService["Service"]["recordHealth"] = (instanceId, health) =>
+      Effect.gen(function* () {
+        // The poller is the only writer of `health_json`, so the read-then-
+        // write here needs no transaction.
+        const stored = yield* sql<{ health_json: string }>`
+          SELECT health_json
+          FROM watch_connector_instances
+          WHERE instance_id = ${instanceId} AND archived_at IS NULL
+        `;
+        const row = stored[0];
+        if (row === undefined) {
+          return yield* connectorError(
+            "instanceNotFound",
+            "Connector instance not found or archived.",
+            { instanceId },
+          );
+        }
+        const changed = healthChanged(row.health_json, health);
+        yield* sql`
+          UPDATE watch_connector_instances
+          SET health_json = ${encodeHealthJson(health)}
+          WHERE instance_id = ${instanceId} AND archived_at IS NULL
+        `;
+        if (changed) yield* notifyChanged;
+      }).pipe(Effect.mapError(toConnectorError("Could not record connector health.")));
+
     const insertRequest = (request: {
       readonly id: WatchConnectorInstallRequestId;
       readonly kind: "install" | "upgrade";
@@ -1120,6 +1236,8 @@ export const layer = Layer.effect(
       updateInstance,
       deleteInstance,
       setInstanceConfig,
+      loadRuntime,
+      recordHealth,
       requestInstall,
       requestUpgrade,
       prepareInstallConfirm,

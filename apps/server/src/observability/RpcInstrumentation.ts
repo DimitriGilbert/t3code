@@ -244,6 +244,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.watchConnectorsConfirmInstall]: "watch",
   [WS_METHODS.watchConnectorsConfirmUpgrade]: "watch",
   [WS_METHODS.watchConnectorsCancelInstallRequest]: "watch",
+  [WS_METHODS.watchConnectorSubscribe]: "watch",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

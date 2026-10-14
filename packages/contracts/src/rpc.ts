@@ -357,6 +357,31 @@ import {
 } from "./scheduledTask.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
+  WatchGalleryListResult,
+  WatchLayoutCollisionError,
+  WatchPageCreateInput,
+  WatchPageDeleteInput,
+  WatchPageDeleteResult,
+  WatchPageDuplicateInput,
+  WatchPageError,
+  WatchPageInstantiateFromGalleryInput,
+  WatchPageListInput,
+  WatchPageListResult,
+  WatchPageRenameInput,
+  WatchPageReorderInput,
+  WatchPageResult,
+  WatchPageRevisionConflictError,
+  WatchPageWithWidgetsResult,
+  WatchWidgetAddInput,
+  WatchWidgetConfigureInput,
+  WatchWidgetMoveToPageInput,
+  WatchWidgetRemoveInput,
+  WatchWidgetRemoveResult,
+  WatchWidgetResult,
+  WatchWidgetSetLayoutInput,
+  WatchWidgetSetMobileProjectionInput,
+} from "./watch.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -579,6 +604,48 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+
+  // Watch screen methods (Phase 1: pages + widgets)
+  watchPagesList: "watchPages.list",
+  watchPagesSubscribe: "watchPages.subscribe",
+  watchPagesCreate: "watchPages.create",
+  watchPagesRename: "watchPages.rename",
+  watchPagesReorder: "watchPages.reorder",
+  watchPagesDuplicate: "watchPages.duplicate",
+  watchPagesDelete: "watchPages.delete",
+  watchPagesInstantiateFromGallery: "watchPages.instantiateFromGallery",
+  watchGalleryList: "watchGallery.list",
+  watchWidgetsAdd: "watchWidgets.add",
+  watchWidgetsRemove: "watchWidgets.remove",
+  watchWidgetsConfigure: "watchWidgets.configure",
+  watchWidgetsSetLayout: "watchWidgets.setLayout",
+  watchWidgetsSetMobileProjection: "watchWidgets.setMobileProjection",
+  watchWidgetsMoveToPage: "watchWidgets.moveToPage",
+  // Watch screen methods reserved for later phases (notifications, connectors,
+  // widget sources). They are declared here so the wire vocabulary is stable,
+  // but are not part of `WsRpcGroup` yet.
+  watchNotificationsSubscribe: "watchNotifications.subscribe",
+  watchNotificationsHistory: "watchNotifications.history",
+  watchNotificationsSetPrefs: "watchNotifications.setPrefs",
+  watchConnectorsListInstances: "watchConnectors.listInstances",
+  watchConnectorsSubscribeInstances: "watchConnectors.subscribeInstances",
+  watchConnectorsCreateInstance: "watchConnectors.createInstance",
+  watchConnectorsUpdateInstance: "watchConnectors.updateInstance",
+  watchConnectorsDeleteInstance: "watchConnectors.deleteInstance",
+  watchConnectorsSetInstanceConfig: "watchConnectors.setInstanceConfig",
+  watchConnectorsRequestInstall: "watchConnectors.requestInstall",
+  watchConnectorsRequestUpgrade: "watchConnectors.requestUpgrade",
+  watchConnectorsPrepareInstallConfirm: "watchConnectors.prepareInstallConfirm",
+  watchConnectorsConfirmInstall: "watchConnectors.confirmInstall",
+  watchConnectorsConfirmUpgrade: "watchConnectors.confirmUpgrade",
+  watchConnectorsCancelInstallRequest: "watchConnectors.cancelInstallRequest",
+  watchConnectorsRollback: "watchConnectors.rollback",
+  watchConnectorsUninstall: "watchConnectors.uninstall",
+  watchConnectorsPurgeInstanceData: "watchConnectors.purgeInstanceData",
+  watchConnectorSubscribe: "watchConnector.subscribe",
+  watchWidgetSourcePublish: "watchWidgetSource.publish",
+  watchWidgetSourceGet: "watchWidgetSource.get",
+  watchWidgetSourceSubscribe: "watchWidgetSource.subscribe",
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -1874,12 +1941,129 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+const WsWatchReadError = Schema.Union([
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  EnvironmentAuthorizationError,
+]);
+const WsWatchRevisionCheckedError = Schema.Union([
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  EnvironmentAuthorizationError,
+]);
+const WsWatchLayoutCheckedError = Schema.Union([
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  WatchLayoutCollisionError,
+  EnvironmentAuthorizationError,
+]);
+
+const WsWatchPagesListRpc = Rpc.make(WS_METHODS.watchPagesList, {
+  payload: WatchPageListInput,
+  success: WatchPageListResult,
+  error: WsWatchReadError,
+});
+
+/** Streams the full watch page+widget list: one snapshot on subscribe, then a fresh list after every change. */
+const WsWatchPagesSubscribeRpc = Rpc.make(WS_METHODS.watchPagesSubscribe, {
+  payload: WatchPageListInput,
+  success: WatchPageListResult,
+  error: WsWatchReadError,
+  stream: true,
+});
+
+const WsWatchGalleryListRpc = Rpc.make(WS_METHODS.watchGalleryList, {
+  payload: Schema.Struct({}),
+  success: WatchGalleryListResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesCreateRpc = Rpc.make(WS_METHODS.watchPagesCreate, {
+  payload: WatchPageCreateInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesRenameRpc = Rpc.make(WS_METHODS.watchPagesRename, {
+  payload: WatchPageRenameInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesReorderRpc = Rpc.make(WS_METHODS.watchPagesReorder, {
+  payload: WatchPageReorderInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesDuplicateRpc = Rpc.make(WS_METHODS.watchPagesDuplicate, {
+  payload: WatchPageDuplicateInput,
+  success: WatchPageWithWidgetsResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesDeleteRpc = Rpc.make(WS_METHODS.watchPagesDelete, {
+  payload: WatchPageDeleteInput,
+  success: WatchPageDeleteResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesInstantiateFromGalleryRpc = Rpc.make(
+  WS_METHODS.watchPagesInstantiateFromGallery,
+  {
+    payload: WatchPageInstantiateFromGalleryInput,
+    success: WatchPageWithWidgetsResult,
+    error: WsWatchReadError,
+  },
+);
+
+const WsWatchWidgetsAddRpc = Rpc.make(WS_METHODS.watchWidgetsAdd, {
+  payload: WatchWidgetAddInput,
+  success: WatchWidgetResult,
+  error: WsWatchLayoutCheckedError,
+});
+
+const WsWatchWidgetsRemoveRpc = Rpc.make(WS_METHODS.watchWidgetsRemove, {
+  payload: WatchWidgetRemoveInput,
+  success: WatchWidgetRemoveResult,
+  error: WsWatchRevisionCheckedError,
+});
+
+const WsWatchWidgetsConfigureRpc = Rpc.make(WS_METHODS.watchWidgetsConfigure, {
+  payload: WatchWidgetConfigureInput,
+  success: WatchWidgetResult,
+  error: WsWatchRevisionCheckedError,
+});
+
+const WsWatchWidgetsSetLayoutRpc = Rpc.make(WS_METHODS.watchWidgetsSetLayout, {
+  payload: WatchWidgetSetLayoutInput,
+  success: WatchPageWithWidgetsResult,
+  error: WsWatchLayoutCheckedError,
+});
+
+const WsWatchWidgetsSetMobileProjectionRpc = Rpc.make(WS_METHODS.watchWidgetsSetMobileProjection, {
+  payload: WatchWidgetSetMobileProjectionInput,
+  success: WatchPageWithWidgetsResult,
+  error: WsWatchRevisionCheckedError,
+});
+
+const WsWatchWidgetsMoveToPageRpc = Rpc.make(WS_METHODS.watchWidgetsMoveToPage, {
+  payload: WatchWidgetMoveToPageInput,
+  success: WatchWidgetResult,
+  error: WsWatchLayoutCheckedError,
+});
+
+/**
+ * Checks the connection's scopes against the scope each RPC declares, before
+ * the handler runs. Every RPC in `WsRpcGroup` carries it, so a handler cannot
+ * be added without authorization.
+ */
 export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthorization>()(
   "t3/contracts/RpcScopeAuthorization",
   { error: EnvironmentAuthorizationError },
 ) {}
 
-export const WsRpcGroup = RpcGroup.make(
+const WsRpcGroupCore = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -2079,3 +2263,29 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
 ).middleware(RpcScopeAuthorization);
+
+/**
+ * Watch-screen RPCs live in their own subgroup. `WsRpcGroup` merges it back in
+ * so clients see one group, but the server implements the two halves in
+ * separate handler layers — one giant `of`/`toLayer` instantiation over the
+ * whole union overflows the typechecker's instantiation budget.
+ */
+export const WsWatchRpcGroup = RpcGroup.make(
+  WsWatchPagesListRpc,
+  WsWatchPagesSubscribeRpc,
+  WsWatchGalleryListRpc,
+  WsWatchPagesCreateRpc,
+  WsWatchPagesRenameRpc,
+  WsWatchPagesReorderRpc,
+  WsWatchPagesDuplicateRpc,
+  WsWatchPagesDeleteRpc,
+  WsWatchPagesInstantiateFromGalleryRpc,
+  WsWatchWidgetsAddRpc,
+  WsWatchWidgetsRemoveRpc,
+  WsWatchWidgetsConfigureRpc,
+  WsWatchWidgetsSetLayoutRpc,
+  WsWatchWidgetsSetMobileProjectionRpc,
+  WsWatchWidgetsMoveToPageRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsRpcGroup = WsRpcGroupCore.merge(WsWatchRpcGroup);

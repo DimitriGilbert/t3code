@@ -97,6 +97,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  WsWatchRpcGroup,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -120,6 +121,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as WatchPageService from "./watch/WatchPageService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -549,11 +551,38 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 
+// Watch handlers live on their own subgroup layer. The type-level cost of a
+// single `of`/`toLayer` instantiation grows with the RPC union, and adding the
+// watch methods to the main handlers object overflows the typechecker's
+// instantiation budget. `WsRpcGroup` stays whole for clients and
+// `RpcServer.make`; the handler context is just built in pieces.
+const ServerWsWatchRpcGroup = WsWatchRpcGroup.middleware(RpcInstrumentation);
+
+const WS_WATCH_METHOD_TAGS = [
+  WS_METHODS.watchPagesList,
+  WS_METHODS.watchPagesSubscribe,
+  WS_METHODS.watchGalleryList,
+  WS_METHODS.watchPagesCreate,
+  WS_METHODS.watchPagesRename,
+  WS_METHODS.watchPagesReorder,
+  WS_METHODS.watchPagesDuplicate,
+  WS_METHODS.watchPagesDelete,
+  WS_METHODS.watchPagesInstantiateFromGallery,
+  WS_METHODS.watchWidgetsAdd,
+  WS_METHODS.watchWidgetsRemove,
+  WS_METHODS.watchWidgetsConfigure,
+  WS_METHODS.watchWidgetsSetLayout,
+  WS_METHODS.watchWidgetsSetMobileProjection,
+  WS_METHODS.watchWidgetsMoveToPage,
+] as const;
+
+const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(...WS_WATCH_METHOD_TAGS);
+
 // RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
 // crosses TypeScript's instantiation limit and the layer's requirements degrade to
-// `any`, so the handlers are registered as two disjoint, smaller groups.
-type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsRpcGroup>;
+// `any`, so the core handlers are registered as two disjoint, smaller groups.
+type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsCoreRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
 type SplitWsRpc = Extract<
   ServerWsRpc,
@@ -563,11 +592,68 @@ const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
   SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
 const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
   !isSplitWsRpc(rpc);
-const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
+const serverWsRpcs = Array.from(ServerWsCoreRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
-// Replaying each intervening event costs a shell refetch; past this gap a
-// single O(active-threads) snapshot is cheaper and bounded.
+
+const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const watchPages = yield* WatchPageService.WatchPageService;
+    return ServerWsWatchRpcGroup.of({
+      [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
+      [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
+      [WS_METHODS.watchGalleryList]: (_input) => watchPages.listGallery(),
+      [WS_METHODS.watchPagesCreate]: (input) => watchPages.create(input),
+      [WS_METHODS.watchPagesRename]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.rename(input)),
+        ),
+      [WS_METHODS.watchPagesReorder]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.reorder(input)),
+        ),
+      [WS_METHODS.watchPagesDuplicate]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.duplicate(input)),
+        ),
+      [WS_METHODS.watchPagesDelete]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.delete(input)),
+        ),
+      [WS_METHODS.watchPagesInstantiateFromGallery]: (input) =>
+        watchPages.instantiateFromGallery(input),
+      [WS_METHODS.watchWidgetsAdd]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.addWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsRemove]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.removeWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsConfigure]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
+          Effect.andThen(watchPages.configureWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsSetLayout]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.setLayout(input)),
+        ),
+      [WS_METHODS.watchWidgetsSetMobileProjection]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.setMobileProjection(input)),
+        ),
+      [WS_METHODS.watchWidgetsMoveToPage]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
+          Effect.andThen(watchPages.moveToPage(input)),
+        ),
+    });
+  }),
+);
+// When a resuming client's cursor is more than this many events behind the
+// current head, skip the per-event catch-up replay and send a fresh shell
+// snapshot instead. Replaying each intervening event costs a shell refetch;
+// past this gap a single O(active-threads) snapshot is cheaper and bounded.
+// Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
 const SHELL_RESUME_MAX_GAP = 1_000;
 // Row count alone does not bound replay memory: a few events with large tool
 // payloads can decode to gigabytes. Before replaying, sum the serialized
@@ -1731,6 +1817,8 @@ export const layerWsRpc = (
           issues: keybindingsConfig.issues,
           providers,
           ...editorConfig,
+          // Same discovery-with-timeout treatment as editors: a slow probe
+          // must not stall server.getConfig, so it degrades to no targets.
           remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
             remoteOpenTargets.resolveTargets(),
           ),
@@ -1769,6 +1857,7 @@ export const layerWsRpc = (
           threadSnapshotPagination: true,
           threadFind: true,
           threadFindProgressive: true,
+          watchScreen: true,
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -1854,7 +1943,7 @@ export const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = ServerWsCoreRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -3264,12 +3353,15 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(
-              session,
-              clientOrigin,
-              clientAnalyticsProps,
-              previewAutomationBroker,
-              serverBrowser,
+            Layer.mergeAll(
+              layerWsRpc(
+                session,
+                clientOrigin,
+                clientAnalyticsProps,
+                previewAutomationBroker,
+                serverBrowser,
+              ),
+              layerWsWatchRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

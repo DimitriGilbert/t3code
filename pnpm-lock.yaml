@@ -904,6 +904,9 @@ importers:
       effect:
         specifier: 4.0.5
         version: 4.0.5
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       jose:
         specifier: 'catalog:'
         version: 6.2.2

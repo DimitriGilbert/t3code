@@ -125,6 +125,7 @@ import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import * as WatchPageService from "./watch/WatchPageService.ts";
+import * as WidgetTranspileService from "./watch/WidgetTranspileService.ts";
 import * as ConnectorPoller from "./watch/connectors/ConnectorPoller.ts";
 import * as ConnectorService from "./watch/connectors/ConnectorService.ts";
 import * as UserNotificationService from "./notifications/UserNotificationService.ts";
@@ -601,6 +602,9 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchConnectorsConfirmUpgrade,
   WS_METHODS.watchConnectorsCancelInstallRequest,
   WS_METHODS.watchConnectorSubscribe,
+  WS_METHODS.watchWidgetSourcePublish,
+  WS_METHODS.watchWidgetSourceGet,
+  WS_METHODS.watchWidgetSourceSubscribe,
 ] as const;
 
 const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(...WS_WATCH_METHOD_TAGS);
@@ -629,6 +633,7 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
     const userNotifications = yield* UserNotificationService.UserNotificationService;
     const connectors = yield* ConnectorService.ConnectorService;
     const connectorPoller = yield* ConnectorPoller.ConnectorPoller;
+    const widgetSources = yield* WidgetTranspileService.WidgetTranspileService;
     return ServerWsWatchRpcGroup.of({
       [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
       [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
@@ -719,6 +724,12 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
           Effect.andThen(connectors.cancelInstallRequest(input)),
         ),
       [WS_METHODS.watchConnectorSubscribe]: (input) => connectorPoller.subscribe(input),
+      [WS_METHODS.watchWidgetSourcePublish]: (input) => widgetSources.publish(input),
+      [WS_METHODS.watchWidgetSourceGet]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.source_id": input.sourceId }).pipe(
+          Effect.andThen(widgetSources.get(input)),
+        ),
+      [WS_METHODS.watchWidgetSourceSubscribe]: (input) => widgetSources.subscribe(input),
     });
   }),
 );

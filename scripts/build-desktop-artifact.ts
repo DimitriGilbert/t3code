@@ -1589,9 +1589,17 @@ export function createStageWorkspaceConfig(input: {
           cpu: hostCpu,
         };
 
+  // esbuild's postinstall exists to acquire the platform binary on the
+  // installing machine — which here is the build host, not the artifact's
+  // target. Left enabled it resolves (or npm-downloads) @esbuild/<host>,
+  // polluting a cross-platform stage with a binary that cannot run there.
+  // The target's @esbuild/<os>-<arch> optional package is already pinned by
+  // supportedArchitectures, so the postinstall has nothing to do.
+  const stagedAllowBuilds = { ...allowBuilds, esbuild: false };
+
   return {
     supportedArchitectures,
-    ...(allowBuilds && Object.keys(allowBuilds).length > 0 ? { allowBuilds } : {}),
+    allowBuilds: stagedAllowBuilds,
     ...(patchedDependencies && Object.keys(patchedDependencies).length > 0
       ? { patchedDependencies }
       : {}),

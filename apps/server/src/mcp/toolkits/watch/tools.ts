@@ -15,11 +15,14 @@ import {
   WatchNotificationsHistoryInput,
   WatchNotificationsHistoryResult,
   WatchNotificationsSetPrefsResult,
+  WatchWidgetSourcePublishInput,
+  WatchWidgetSourcePublishResult,
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as UserNotificationService from "../../../notifications/UserNotificationService.ts";
+import * as WidgetTranspileService from "../../../watch/WidgetTranspileService.ts";
 import * as ConnectorService from "../../../watch/connectors/ConnectorService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -30,6 +33,7 @@ const shared = {
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     UserNotificationService.UserNotificationService,
+    WidgetTranspileService.WidgetTranspileService,
     ConnectorService.ConnectorService,
   ],
 };
@@ -112,9 +116,18 @@ const WatchConnectorRequestUpgradeTool = Tool.make("t3_watch_connector_request_u
   success: WatchConnectorInstallRequestResult,
 }).annotate(Tool.Destructive, false);
 
+const WatchWidgetSourcePublishTool = Tool.make("t3_watch_widget_source_publish", {
+  ...shared,
+  description:
+    'Publish agent-authored TS/TSX widget source. The server transpiles it into the cached single-file sandbox bundle and returns the source record; republishing identical {source, manifest} reuses the same sourceId. A bad build is returned as a status: "failed" record with transpile diagnostics — not a tool error — so check status before mounting. Sources must be one self-contained file: imports are rejected, and JSX lowers to the host-provided T3 runtime (T3.h / T3.Fragment), so do not reference React or any module. Declare every data subscription and action the widget uses in the bridge manifest.',
+  parameters: WatchWidgetSourcePublishInput,
+  success: WatchWidgetSourcePublishResult,
+}).annotate(Tool.Destructive, false);
+
 export const WatchToolkit = Toolkit.make(
   WatchNotificationsHistoryTool,
   WatchNotificationsSetPrefsTool,
+  WatchWidgetSourcePublishTool,
   WatchConnectorsListTool,
   WatchConnectorInstanceCreateTool,
   WatchConnectorInstanceUpdateTool,

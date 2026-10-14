@@ -410,6 +410,13 @@ import {
   WatchWidgetResult,
   WatchWidgetSetLayoutInput,
   WatchWidgetSetMobileProjectionInput,
+  WatchWidgetSourceError,
+  WatchWidgetSourceGetInput,
+  WatchWidgetSourceGetResult,
+  WatchWidgetSourcePublishInput,
+  WatchWidgetSourcePublishResult,
+  WatchWidgetSourceRecord,
+  WatchWidgetSourceSubscribeInput,
 } from "./watch.ts";
 import {
   ProjectCloneActionInput,
@@ -2247,6 +2254,37 @@ const WsWatchConnectorSubscribeRpc = Rpc.make(WS_METHODS.watchConnectorSubscribe
   stream: true,
 });
 
+const WsWatchWidgetSourceError = Schema.Union([
+  WatchWidgetSourceError,
+  EnvironmentAuthorizationError,
+]);
+
+/**
+ * Publishes agent-authored TS/TSX: the server transpiles it into the cached
+ * single-file artifact and returns the source record. A bad build is data —
+ * `status: "failed"` — not a call error; only manifest, size, and rate-limit
+ * violations are call rejections.
+ */
+const WsWatchWidgetSourcePublishRpc = Rpc.make(WS_METHODS.watchWidgetSourcePublish, {
+  payload: WatchWidgetSourcePublishInput,
+  success: WatchWidgetSourcePublishResult,
+  error: WsWatchWidgetSourceError,
+});
+
+const WsWatchWidgetSourceGetRpc = Rpc.make(WS_METHODS.watchWidgetSourceGet, {
+  payload: WatchWidgetSourceGetInput,
+  success: WatchWidgetSourceGetResult,
+  error: WsWatchWidgetSourceError,
+});
+
+/** Emits the source record for readiness tracking: `null` while unknown, then each publish. */
+const WsWatchWidgetSourceSubscribeRpc = Rpc.make(WS_METHODS.watchWidgetSourceSubscribe, {
+  payload: WatchWidgetSourceSubscribeInput,
+  success: Schema.NullOr(WatchWidgetSourceRecord),
+  error: WsWatchWidgetSourceError,
+  stream: true,
+});
+
 /**
  * Checks the connection's scopes against the scope each RPC declares, before
  * the handler runs. Every RPC in `WsRpcGroup` carries it, so a handler cannot
@@ -2501,6 +2539,9 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchConnectorsConfirmUpgradeRpc,
   WsWatchConnectorsCancelInstallRequestRpc,
   WsWatchConnectorSubscribeRpc,
+  WsWatchWidgetSourcePublishRpc,
+  WsWatchWidgetSourceGetRpc,
+  WsWatchWidgetSourceSubscribeRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = WsRpcGroupCore.merge(WsWatchRpcGroup);

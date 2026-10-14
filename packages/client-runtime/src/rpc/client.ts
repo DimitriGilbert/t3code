@@ -64,6 +64,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.watchNotificationsSubscribe
   | typeof WS_METHODS.watchConnectorsSubscribeInstances
   | typeof WS_METHODS.watchConnectorSubscribe
+  | typeof WS_METHODS.watchWidgetSourceSubscribe
   | typeof WS_METHODS.serverGetStorageCleanupReport
   | typeof WS_METHODS.serverGetDatabaseStorage
   | typeof WS_METHODS.subscribeTerminalEvents

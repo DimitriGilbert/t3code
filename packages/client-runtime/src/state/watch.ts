@@ -187,5 +187,14 @@ export function createWatchEnvironmentAtoms<R, E>(
       "environment-command:watch:widget-move-to-page",
       WS_METHODS.watchWidgetsMoveToPage,
     ),
+    /**
+     * Connector instance config write — also the connector-status widget's
+     * "Reconnect": the service bumps `updatedAt`, which restarts the poller
+     * runtime and forces a fresh fetch.
+     */
+    setConnectorInstanceConfig: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:connector-set-instance-config",
+      tag: WS_METHODS.watchConnectorsSetInstanceConfig,
+    }),
   };
 }

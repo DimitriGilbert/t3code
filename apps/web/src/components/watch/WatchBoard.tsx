@@ -27,7 +27,7 @@ import {
   type WatchResizeEdge,
 } from "@t3tools/client-runtime/state/watch-pages";
 import type { WatchWidget, WatchWidgetId, WatchWidgetPlacement } from "@t3tools/contracts";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
@@ -77,7 +77,11 @@ export function WatchBoard(props: {
   /** Commits a dropped/moved placement — one `setLayout` per gesture. */
   readonly onCommitLayout?: (widgetId: WatchWidgetId, placement: WatchWidgetPlacement) => void;
   readonly onConfigureWidget?: (widget: WatchWidget) => void;
+  /** Widget whose content region is swapped to its configure form. */
+  readonly configuringWidgetId?: WatchWidgetId | null;
   readonly onWidgetMenu?: (widget: WatchWidget, position: { x: number; y: number }) => void;
+  /** Live body inside each widget shell; absent keeps the placeholder copy. */
+  readonly renderBody?: (widget: WatchWidget) => ReactNode;
 }) {
   const wide = useMediaQuery({ min: WATCH_GRID_EDIT_MIN_WIDTH_PX });
   const stacked = useMediaQuery({ max: WATCH_GRID_STACK_MIN_WIDTH_PX - 1 });
@@ -280,6 +284,7 @@ export function WatchBoard(props: {
       key={widget.id}
       widget={widget}
       editing={editing}
+      configuring={props.configuringWidgetId === widget.id}
       colliding={interaction?.widgetId === widget.id && interaction.collides}
       onConfigure={props.onConfigureWidget ? () => props.onConfigureWidget?.(widget) : undefined}
       onMenu={props.onWidgetMenu ? (position) => props.onWidgetMenu?.(widget, position) : undefined}
@@ -294,7 +299,9 @@ export function WatchBoard(props: {
               gridRow: `${placement.y + 1} / span ${placement.h}`,
             }
       }
-    />
+    >
+      {props.renderBody?.(widget)}
+    </WatchWidgetShell>
   );
 
   return (
@@ -312,6 +319,7 @@ export function WatchBoard(props: {
             <WatchWidgetShell
               key={widget.id}
               widget={widget}
+              configuring={props.configuringWidgetId === widget.id}
               onConfigure={
                 props.onConfigureWidget ? () => props.onConfigureWidget?.(widget) : undefined
               }
@@ -321,7 +329,9 @@ export function WatchBoard(props: {
                   : undefined
               }
               style={{ minHeight: `calc(${ROW_UNIT_PX} * ${widget.placement.h})` }}
-            />
+            >
+              {props.renderBody?.(widget)}
+            </WatchWidgetShell>
           ))}
         </div>
       ) : (

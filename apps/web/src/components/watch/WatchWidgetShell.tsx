@@ -4,11 +4,12 @@ import {
   WATCH_RESIZE_EDGES,
   watchFirstPartyWidgetSpec,
   watchWidgetDisplayTitle,
+  watchWidgetIsConfigurable,
   watchWidgetProvenanceMarker,
   type WatchResizeEdge,
 } from "@t3tools/client-runtime/state/watch-pages";
 import type { WatchWidget, WatchWidgetId } from "@t3tools/contracts";
-import { EllipsisIcon, GripVerticalIcon, Settings2Icon } from "lucide-react";
+import { CheckIcon, EllipsisIcon, GripVerticalIcon, Settings2Icon } from "lucide-react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { useRef } from "react";
 
@@ -16,6 +17,8 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
+
+import { watchWidgetConfigFormId } from "./WatchWidgetSettingsForm";
 
 const RESIZE_HANDLE_STYLES: Record<WatchResizeEdge, string> = {
   n: "top-0 left-1/2 h-2 w-10 -translate-x-1/2 cursor-ns-resize",
@@ -83,11 +86,15 @@ function WatchProvenanceBadge(props: { readonly widget: WatchWidget }) {
  * provenance marker and title, and a content region. In edit mode the header
  * gains the configure gear, the drag grip (the only move handle), and the
  * overflow menu, and the card gains resize hit zones on every edge center
- * and both bottom corners.
+ * and both bottom corners. While `configuring`, the header swaps to the
+ * "Configure" title and a Check "Done" that submits the swapped-in settings
+ * form by id; the drag/resize affordances are suppressed for the duration.
  */
 export function WatchWidgetShell(props: {
   readonly widget: WatchWidget;
   readonly editing?: boolean | undefined;
+  /** The widget's content region is showing its configure form. */
+  readonly configuring?: boolean | undefined;
   /** True while this widget's drag/resize candidate overlaps another widget. */
   readonly colliding?: boolean | undefined;
   /** Opens the configure dialog (gear + context-menu entry share it). */
@@ -104,12 +111,15 @@ export function WatchWidgetShell(props: {
 }) {
   const spec = watchFirstPartyWidgetSpec(props.widget.kind);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const editing = props.editing === true;
+  // A stale configuring flag on a widget with nothing to edit collapses back
+  // to the normal header — the body already fell through to the live view.
+  const configuring = props.configuring === true && watchWidgetIsConfigurable(props.widget);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `move:${props.widget.id}`,
     data: { kind: "move", widgetId: props.widget.id },
-    disabled: props.editing !== true,
+    disabled: !editing || configuring,
   });
-  const editing = props.editing === true;
 
   const handleGripKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     const delta = GRIP_KEY_DELTAS[event.key];
@@ -147,30 +157,49 @@ export function WatchWidgetShell(props: {
       <div
         className={cn(
           "flex h-7 shrink-0 items-center gap-1.5 px-2",
-          editing && "border-b border-border/60",
+          (editing || configuring) && "border-b border-border/60",
         )}
       >
         <WatchProvenanceBadge widget={props.widget} />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">
-          {watchWidgetDisplayTitle(props.widget)}
+          {configuring ? "Configure" : watchWidgetDisplayTitle(props.widget)}
         </span>
-        {editing ? (
+        {configuring ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost-muted"
+                  size="icon-micro"
+                  type="submit"
+                  form={watchWidgetConfigFormId(props.widget.id)}
+                  aria-label="Done configuring"
+                >
+                  <CheckIcon />
+                </Button>
+              }
+            />
+            <TooltipPopup>Done</TooltipPopup>
+          </Tooltip>
+        ) : editing ? (
           <>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost-muted"
-                    size="icon-micro"
-                    aria-label="Configure widget"
-                    onClick={props.onConfigure}
-                  >
-                    <Settings2Icon />
-                  </Button>
-                }
-              />
-              <TooltipPopup>Configure</TooltipPopup>
-            </Tooltip>
+            {watchWidgetIsConfigurable(props.widget) ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost-muted"
+                      size="icon-micro"
+                      aria-label="Configure widget"
+                      onClick={props.onConfigure}
+                    >
+                      <Settings2Icon />
+                    </Button>
+                  }
+                />
+                <TooltipPopup>Configure</TooltipPopup>
+              </Tooltip>
+            ) : null}
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -211,14 +240,19 @@ export function WatchWidgetShell(props: {
           </>
         ) : null}
       </div>
-      <div className="flex min-h-0 flex-1 items-center px-3 py-2">
+      <div
+        className={cn(
+          "flex min-h-0 flex-1 px-3 py-2",
+          props.children === undefined ? "items-center" : "flex-col",
+        )}
+      >
         {props.children ?? (
           <p className="truncate text-xs text-muted-foreground">
             {spec?.description ?? "Runs in a sandboxed frame."}
           </p>
         )}
       </div>
-      {editing
+      {editing && !configuring
         ? WATCH_RESIZE_EDGES.map((edge) => (
             <WatchResizeHandle key={edge} widgetId={props.widget.id} edge={edge} />
           ))

@@ -7,7 +7,10 @@ import {
   WatchConnectorInstanceResult,
   WatchConnectorRequestInstallInput,
   WatchConnectorRequestUpgradeInput,
+  WatchConnectorRollbackInput,
   WatchConnectorSetInstanceConfigInput,
+  WatchConnectorUninstallInput,
+  WatchConnectorUninstallResult,
   WatchConnectorsListInput,
   WatchConnectorsListResult,
   WatchConnectorUpdateInstanceInput,
@@ -116,6 +119,22 @@ const WatchConnectorRequestUpgradeTool = Tool.make("t3_watch_connector_request_u
   success: WatchConnectorInstallRequestResult,
 }).annotate(Tool.Destructive, false);
 
+const WatchConnectorRollbackTool = Tool.make("t3_watch_connector_rollback", {
+  ...shared,
+  description:
+    "Re-pin a connector instance to a previously-approved version of its pack. Uses the version already installed on disk — nothing is fetched. Runs the target pack's migrateConfig server-side; if it fails the instance keeps its config and reports unhealthy so bound widgets render the configMismatch state. Every rollback is recorded in notification history.",
+  parameters: WatchConnectorRollbackInput,
+  success: WatchConnectorInstanceResult,
+}).annotate(Tool.Destructive, false);
+
+const WatchConnectorUninstallTool = Tool.make("t3_watch_connector_uninstall", {
+  ...shared,
+  description:
+    "Soft-archive a connector pack and all its instances: polling stops and bound widgets degrade to the connector-missing placeholder, but config, secrets, approved versions, and pack files are retained. Reinstalling an approved version revives its instances. Permanent removal is human-only — there is no purge tool.",
+  parameters: WatchConnectorUninstallInput,
+  success: WatchConnectorUninstallResult,
+}).annotate(Tool.Destructive, true);
+
 const WatchWidgetSourcePublishTool = Tool.make("t3_watch_widget_source_publish", {
   ...shared,
   description:
@@ -135,4 +154,6 @@ export const WatchToolkit = Toolkit.make(
   WatchConnectorInstanceSetConfigTool,
   WatchConnectorRequestInstallTool,
   WatchConnectorRequestUpgradeTool,
+  WatchConnectorRollbackTool,
+  WatchConnectorUninstallTool,
 );

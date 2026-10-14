@@ -128,6 +128,8 @@ interface RunFailure {
     | "connectorMissing"
     | "connectorSnapshotTooLarge";
   readonly message: string;
+  /** The config field a `configInvalid` failure names — carried to the widget state. */
+  readonly field?: string;
 }
 
 const isConnectorError = Schema.is(WatchConnectorError);
@@ -155,7 +157,12 @@ const classifyFailure = (cause: unknown): RunFailure => {
       // The pack tried an undeclared host — a policy violation by the pack's
       // own declarations, not an upstream outage.
       case "egressBlocked":
-        return { health: "unhealthy", cause: "configMismatch", message: cause.message };
+        return {
+          health: "unhealthy",
+          cause: "configMismatch",
+          message: cause.message,
+          ...(cause.field === undefined ? {} : { field: cause.field }),
+        };
       case "instanceNotFound":
       case "packNotFound":
         return { health: "unhealthy", cause: "connectorMissing", message: cause.message };
@@ -180,7 +187,11 @@ const errorState = (
     case "credentialsInvalid":
       return { cause: "credentialsInvalid", instanceId, ...shared };
     case "configMismatch":
-      return { cause: "configMismatch", ...shared };
+      return {
+        cause: "configMismatch",
+        ...(failure.field === undefined ? {} : { field: failure.field }),
+        ...shared,
+      };
     case "connectorMissing":
       return { cause: "connectorMissing", instanceId, ...shared };
     case "connectorSnapshotTooLarge":
@@ -315,6 +326,14 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         const info = yield* connectors.loadRuntime(rt.instanceId);
         yield* Ref.set(rt.floorMs, floorOf(info.instance.config));
+        // Config is re-validated against the pinned manifest every run: a
+        // re-pin without a successful migrateConfig leaves the old config in
+        // place, and that must surface as `configMismatch`, not run anyway.
+        const configError = ConnectorService.validateConfigAgainstManifest(
+          info.manifest,
+          info.instance.config,
+        );
+        if (configError !== null) return yield* configError;
         const bundle = yield* PackStore.loadInstalled(
           info.instance.packId,
           info.instance.contentHash,

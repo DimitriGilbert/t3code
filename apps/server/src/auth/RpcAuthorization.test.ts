@@ -81,12 +81,16 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.watchConnectorsRequestUpgrade,
       WS_METHODS.watchConnectorsPrepareInstallConfirm,
       WS_METHODS.watchConnectorsCancelInstallRequest,
+      WS_METHODS.watchConnectorsRollback,
+      WS_METHODS.watchConnectorsUninstall,
+      WS_METHODS.watchConnectorsPreparePurge,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }
     for (const method of [
       WS_METHODS.watchConnectorsConfirmInstall,
       WS_METHODS.watchConnectorsConfirmUpgrade,
+      WS_METHODS.watchConnectorsPurgeInstanceData,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthEnvironmentMaintainScope);
       // The client-side grant gate matches the server grant — an agent or a
@@ -99,6 +103,9 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.watchConnectorsRequestInstall,
       WS_METHODS.watchConnectorsRequestUpgrade,
       WS_METHODS.watchConnectorsPrepareInstallConfirm,
+      WS_METHODS.watchConnectorsRollback,
+      WS_METHODS.watchConnectorsUninstall,
+      WS_METHODS.watchConnectorsPreparePurge,
     ]) {
       expect(Object.hasOwn(CLIENT_GUARDED_RPC_SCOPES, method)).toBe(false);
     }

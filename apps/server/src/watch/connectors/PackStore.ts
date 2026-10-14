@@ -132,15 +132,13 @@ export const readLocalBundle = Effect.fn("ConnectorPackStore.readLocalBundle")(f
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = path.resolve(directory);
-  const realRoot = yield* fs
-    .realPath(root)
-    .pipe(
-      Effect.mapError((cause) =>
-        connectorError("invalidOrigin", `Could not resolve pack directory ${directory}.`, {
-          cause,
-        }),
-      ),
-    );
+  const realRoot = yield* fs.realPath(root).pipe(
+    Effect.mapError((cause) =>
+      connectorError("invalidOrigin", `Could not resolve pack directory ${directory}.`, {
+        cause,
+      }),
+    ),
+  );
 
   const entries = yield* fs
     .readDirectory(root, { recursive: true })
@@ -156,15 +154,13 @@ export const readLocalBundle = Effect.fn("ConnectorPackStore.readLocalBundle")(f
     const fullPath = path.join(root, entry);
     // realPath follows every symlink segment, so a link — or a linked
     // directory — reaching outside the pack dir is caught here.
-    const realEntry = yield* fs
-      .realPath(fullPath)
-      .pipe(
-        Effect.mapError((cause) =>
-          connectorError("invalidOrigin", `Could not resolve ${entry} in pack directory.`, {
-            cause,
-          }),
-        ),
-      );
+    const realEntry = yield* fs.realPath(fullPath).pipe(
+      Effect.mapError((cause) =>
+        connectorError("invalidOrigin", `Could not resolve ${entry} in pack directory.`, {
+          cause,
+        }),
+      ),
+    );
     if (realEntry !== realRoot && !realEntry.startsWith(`${realRoot}${path.sep}`)) {
       return yield* connectorError(
         "invalidOrigin",
@@ -683,4 +679,24 @@ export const loadInstalled = Effect.fn("ConnectorPackStore.loadInstalled")(funct
     );
   }
   return bundle;
+});
+
+/**
+ * Removes every installed version of a pack — `<connectorsDir>/<packId>/`.
+ * Called only by the human-confirmed purge; a missing directory is fine.
+ */
+export const removeInstalled = Effect.fn("ConnectorPackStore.removeInstalled")(function* (
+  packId: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const config = yield* ServerConfig.ServerConfig;
+  const dir = path.join(config.connectorsDir, packDirName(packId));
+  yield* fs
+    .remove(dir, { force: true, recursive: true })
+    .pipe(
+      Effect.mapError((cause) =>
+        connectorError("fetchFailed", `Could not remove pack directory ${dir}.`, { cause }),
+      ),
+    );
 });

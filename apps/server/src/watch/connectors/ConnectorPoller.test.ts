@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import { UserNotificationService } from "../../notifications/UserNotificationService.ts";
+import * as WidgetTranspileService from "../WidgetTranspileService.ts";
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as ConfirmationTokens from "./ConfirmationTokens.ts";
 import * as ConnectorPoller from "./ConnectorPoller.ts";
@@ -39,10 +40,6 @@ const layerInfra = Layer.mergeAll(
   Layer.provideMerge(NodeServices.layer),
 );
 
-const layerConnectors = ConnectorService.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(layerInfra, PackStore.layerPackFetch)),
-);
-
 const notificationsStub = (emitted: Queue.Queue<WatchNotificationEvent>) =>
   Layer.succeed(UserNotificationService, {
     subscribe: () => Stream.empty,
@@ -54,9 +51,36 @@ const notificationsStub = (emitted: Queue.Queue<WatchNotificationEvent>) =>
     awaitProcessed: () => Effect.void,
   } satisfies UserNotificationService["Service"]);
 
+/** Echo transpiler — the poller never publishes; connector confirm does. */
+const layerWidgetTranspile = WidgetTranspileService.makeLayer().pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.succeed(WidgetTranspileService.WidgetSourceTranspiler, {
+        transpile: (source) => Effect.succeed(source),
+      }),
+      ServerConfig.layerTest(process.cwd(), { prefix: "watch-poller-widget-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+      NodeServices.layer,
+    ),
+  ),
+);
+
+const layerConnectors = (emitted: Queue.Queue<WatchNotificationEvent>) =>
+  ConnectorService.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        layerInfra,
+        PackStore.layerPackFetch,
+        notificationsStub(emitted),
+        layerWidgetTranspile,
+      ),
+    ),
+  );
+
 const layerPoller = (emitted: Queue.Queue<WatchNotificationEvent>) =>
   ConnectorPoller.layer.pipe(
-    Layer.provideMerge(Layer.mergeAll(layerConnectors, notificationsStub(emitted))),
+    Layer.provideMerge(Layer.mergeAll(layerConnectors(emitted), notificationsStub(emitted))),
   );
 
 const manifest = (overrides?: Record<string, unknown>) => ({
@@ -649,4 +673,86 @@ it.effect("archiving the instance publishes connectorMissing and ends the stream
       Effect.provideService(HttpTransport.ConnectorEgressFetch, impl),
     );
   }),
+);
+
+it.effect("uninstalling the pack publishes connectorMissing and stops polling", () =>
+  Effect.gen(function* () {
+    const emitted = yield* Queue.unbounded<WatchNotificationEvent>();
+    const fetchLog = yield* Queue.unbounded<number>();
+    const { impl, calls } = stubFetch(fetchLog, () => okJson({}));
+    yield* Effect.gen(function* () {
+      const svc = yield* ConnectorService.ConnectorService;
+      const pack = yield* installPack({ "connector.js": ECHO_CONNECTOR });
+      const { instance } = yield* svc.createInstance({ packId: pack.packId, config: {} });
+      const seen = yield* drain({ instanceId: instance.id });
+      yield* Queue.take(seen); // snapshot
+      yield* svc.uninstall({ packId: pack.packId });
+      assert.equal(errorCause(yield* Queue.take(seen)), "connectorMissing");
+      assert.equal(calls.current, 1);
+      // The instance row survives, config retained, but archived.
+      const archived = yield* svc.list({ includeArchived: true });
+      assert.isNotNull(archived.instances[0]?.archivedAt ?? null);
+    }).pipe(
+      Effect.provide(layerPoller(emitted)),
+      Effect.provideService(HttpTransport.ConnectorEgressFetch, impl),
+    );
+  }),
+);
+
+it.effect(
+  "a re-pin without a successful migrateConfig degrades to configMismatch with the field",
+  () =>
+    Effect.gen(function* () {
+      const emitted = yield* Queue.unbounded<WatchNotificationEvent>();
+      const fetchLog = yield* Queue.unbounded<number>();
+      const { impl, calls } = stubFetch(fetchLog, () => okJson({}));
+      yield* Effect.gen(function* () {
+        const svc = yield* ConnectorService.ConnectorService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const pack = yield* installPack({ "connector.js": ECHO_CONNECTOR });
+        const { instance } = yield* svc.createInstance({ packId: pack.packId, config: {} });
+
+        // v2 requires a `region` config field and ships no migrator — the
+        // retained config fails the new manifest's schema at run time.
+        const dirV2 = yield* fs.makeTempDirectory({ prefix: "watch-pack-v2-" });
+        yield* fs.writeFileString(
+          path.join(dirV2, "manifest.json"),
+          JSON.stringify(
+            manifest({
+              schemaVersion: 2,
+              authSchema: {
+                required: ["region"],
+                properties: { region: { type: "string" } },
+                additionalProperties: false,
+              },
+            }),
+          ),
+        );
+        yield* fs.writeFileString(path.join(dirV2, "connector.js"), ECHO_CONNECTOR);
+        const { request } = yield* svc.requestUpgrade({
+          packId: pack.packId,
+          origin: { kind: "localPath", path: dirV2 },
+          instanceId: instance.id,
+        });
+        const { confirmationToken } = yield* svc.prepareInstallConfirm({
+          requestId: request.id,
+        });
+        yield* svc.confirmUpgrade({ requestId: request.id, confirmationToken });
+
+        const seen = yield* drain({ instanceId: instance.id });
+        const item = yield* Queue.take(seen);
+        assert.equal(item.type, "error");
+        if (item.type === "error" && item.error.cause === "configMismatch") {
+          assert.equal(item.error.field, "region");
+        } else {
+          assert.fail("expected a configMismatch error item");
+        }
+        // No upstream call happened — the run stopped at config validation.
+        assert.equal(calls.current, 0);
+      }).pipe(
+        Effect.provide(layerPoller(emitted)),
+        Effect.provideService(HttpTransport.ConnectorEgressFetch, impl),
+      );
+    }),
 );

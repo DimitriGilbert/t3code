@@ -251,3 +251,30 @@ it.effect("materializes under the pinned hash and re-verifies it on load", () =>
     ),
   ),
 );
+
+it.effect("removeInstalled deletes every pinned version directory", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const packDir = yield* fs.makeTempDirectoryScoped({ prefix: "pack-store-" });
+      yield* fs.writeFileString(path.join(packDir, "manifest.json"), JSON.stringify(manifest()));
+      yield* fs.writeFileString(path.join(packDir, "fetch.ts"), "export default 1");
+      const bundle = yield* PackStore.readLocalBundle(packDir);
+      yield* PackStore.materializeBundle(bundle);
+
+      yield* PackStore.removeInstalled(WatchConnectorPackId.make("pack.test"));
+      const gone = yield* fs.exists(path.join(config.connectorsDir, "pack.test"));
+      assert.isFalse(gone);
+      // A second call is a no-op, not an error.
+      yield* PackStore.removeInstalled(WatchConnectorPackId.make("pack.test"));
+    }),
+  ).pipe(
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "pack-store-config-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+  ),
+);

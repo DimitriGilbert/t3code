@@ -14,6 +14,8 @@ describe("watch MCP toolkit", () => {
       "t3_watch_connector_instance_config_set",
       "t3_watch_connector_request_install",
       "t3_watch_connector_request_upgrade",
+      "t3_watch_connector_rollback",
+      "t3_watch_connector_uninstall",
       "t3_watch_widget_source_publish",
     ]) {
       expect(toolNames).toContain(name);
@@ -29,5 +31,7 @@ describe("watch MCP toolkit", () => {
     expect(toolNames).not.toContain("t3_watch_connector_confirm_install");
     expect(toolNames).not.toContain("t3_watch_connector_confirm_upgrade");
     expect(toolNames).not.toContain("t3_watch_connector_prepare_confirm");
+    expect(toolNames).not.toContain("t3_watch_connector_prepare_purge");
+    expect(toolNames).not.toContain("t3_watch_connector_purge_instance_data");
   });
 });

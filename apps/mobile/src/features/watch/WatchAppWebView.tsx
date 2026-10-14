@@ -20,7 +20,9 @@ import { ActivityIndicator, Platform, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
 import { AppText as Text } from "../../components/AppText";
+import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { watchEnvironment } from "../../state/watch";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
 /**
  * The mobile twin of `WatchAppFrame`: the same generated document (prelude,
@@ -105,6 +107,19 @@ export function WatchAppWebView(props: {
   const [loaded, setLoaded] = useState(false);
   const [crashed, setCrashed] = useState(false);
   const [navigatedAway, setNavigatedAway] = useState(false);
+  const { themeId, themeAppearance, themeVariables, systemColorsActive } =
+    useAppearancePreferences();
+  const theme = useMemo(
+    () =>
+      mobileHtmlRenderTheme({
+        themeId,
+        appearance: themeAppearance,
+        variables: themeVariables,
+        systemColors: systemColorsActive,
+        platform: Platform.OS,
+      }),
+    [themeId, themeAppearance, themeVariables, systemColorsActive],
+  );
 
   // One generated document per artifact — the same bytes web puts in srcdoc.
   const html = useMemo(
@@ -112,7 +127,7 @@ export function WatchAppWebView(props: {
     [props.bundle, props.scriptHash],
   );
 
-  const live = { props };
+  const live = { props, theme };
   const latest = useRef(live);
   useEffect(() => {
     latest.current = live;
@@ -158,7 +173,13 @@ export function WatchAppWebView(props: {
         return handler(args);
       },
       onViolation: (violation) => latest.current.props.onViolation?.(violation),
-      hostContext: () => latest.current.props.hostContext?.() ?? {},
+      // The frame always contributes the live theme; the caller's hostContext
+      // extends or overrides it.
+      hostContext: () => ({
+        theme: latest.current.theme.appearance,
+        styles: { variables: latest.current.theme.variables },
+        ...latest.current.props.hostContext?.(),
+      }),
     });
     hostRef.current = next;
     setHost(next);
@@ -171,6 +192,15 @@ export function WatchAppWebView(props: {
     // A new document is a new widget session and needs a new host.
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [html]);
+
+  // The widget pulls context with T3.context(); these pushes are what re-fire
+  // its T3.onContext listeners when what the host would answer changes. A push
+  // posted before the document has loaded is simply missed — the pull covers
+  // the initial value.
+  useEffect(() => {
+    hostRef.current?.updateHostContext();
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Context changes trigger a resend.
+  }, [theme, props.hostContext]);
 
   // Anything but the generated page's own `about:blank` means the widget left
   // its page; the bridge is dead either way, so stop it and say so.
@@ -200,19 +230,24 @@ export function WatchAppWebView(props: {
           source={{ html }}
           accessibilityLabel={props.title ?? "Widget"}
           style={{ flex: 1, backgroundColor: "transparent" }}
-          // Pinned to the inline document's scheme — never a wildcard.
-          originWhitelist={["about:*"]}
+          // A wildcard on purpose: originWhitelist's *rejection* path hands
+          // the URL to `Linking.openURL` on Android — an OS-browser exfil
+          // channel the web sandbox does not have. Routing every request
+          // through the JS callback below keeps the deny in our hands.
+          originWhitelist={["*"]}
           setSupportMultipleWindows={false}
           domStorageEnabled={false}
           allowFileAccess={false}
           allowUniversalAccessFromFileURLs={false}
           allowsBackForwardNavigationGestures={false}
-          // The generated page loads exactly once, as about:blank; every other
-          // request is a navigation the sandbox equivalent would forbid. Its
-          // CSP already denies subframes (`default-src 'none'`).
-          onShouldStartLoadWithRequest={(request) =>
-            Platform.OS === "android" || request.url === "about:blank"
-          }
+          // The JS gate, not the whitelist, is the enforcement point on both
+          // platforms — the same contract as web: the generated page loads
+          // exactly once, as about:blank, and every other request is denied.
+          // Its CSP already denies subframes (`default-src 'none'`).
+          // Residual: Android fails open if the callback never answers within
+          // the native timeout; that platform limitation is covered by the
+          // `watchAgentWidgetsMobile` kill switch.
+          onShouldStartLoadWithRequest={(request) => request.url === "about:blank"}
           onNavigationStateChange={(navState) => stopIfNavigated(navState.url)}
           onContentProcessDidTerminate={() => setCrashed(true)}
           onRenderProcessGone={() => setCrashed(true)}

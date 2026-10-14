@@ -16,19 +16,22 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import { useAtomValue } from "@effect/atom-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { useHtmlRenderTheme } from "~/hooks/useHtmlRenderTheme";
 import { cn } from "~/lib/utils";
 import { watchEnvironment } from "~/state/watch";
 
 /**
  * A published agent-authored (or pack-shipped) watch widget in its hardened
  * sandbox. This deliberately does NOT reuse `McpAppFrame`: that host loads
- * documents by server-minted `src=` URL under a permissive CSP
- * (`sandbox allow-scripts allow-forms allow-popups allow-downloads`, no
- * `default-src 'none'`, no `connect-src 'none'`, no script-hash authorization)
- * which permits network access. Watch widgets get a `srcdoc` frame,
- * `sandbox="allow-scripts"` only (no `allow-same-origin`, no forms), and a
- * generated document whose CSP hash-authorizes exactly the prelude and the
- * artifact — zero network, no credential-entry UI.
+ * documents by server-minted `src=` URL whose served document CSP
+ * (`apps/server/src/http.ts` HTML_CONTENT_SECURITY_POLICY: `sandbox
+ * allow-scripts allow-forms allow-popups allow-downloads`, no
+ * `default-src 'none'`, no `connect-src 'none'`, no script-hash
+ * authorization) permits popups, downloads and network access. Watch widgets
+ * get a `srcdoc` frame, `sandbox="allow-scripts"` only (no
+ * `allow-same-origin`, no forms), and a generated document whose CSP
+ * hash-authorizes exactly the prelude and the artifact — zero network, no
+ * credential-entry UI.
  */
 
 export interface WatchAppFeedSubscription {
@@ -105,6 +108,8 @@ export function WatchAppFrame(props: {
   const hostRef = useRef<WatchAppHost | null>(null);
   const [host, setHost] = useState<WatchAppHost | null>(null);
   const [subscriptions, setSubscriptions] = useState<ReadonlyArray<WatchAppFeedSubscription>>([]);
+  const [navigatedAway, setNavigatedAway] = useState(false);
+  const theme = useHtmlRenderTheme();
 
   // One generated document per artifact — srcdoc identity is the artifact hash.
   const srcdoc = useMemo(
@@ -112,23 +117,36 @@ export function WatchAppFrame(props: {
     [props.bundle, props.scriptHash],
   );
 
+  // A new document is a new session and resets the lifecycle flags — the
+  // sanctioned "adjust state during render" pattern, no cascading effect.
+  const [sessionDocument, setSessionDocument] = useState(srcdoc);
+  if (sessionDocument !== srcdoc) {
+    setSessionDocument(srcdoc);
+    setNavigatedAway(false);
+  }
+
   // Read by the host on every message, so it always sees current props
   // without being rebuilt (which would drop the widget's session).
-  const live = { props };
+  const live = { props, theme };
   const latest = useRef(live);
   useEffect(() => {
     latest.current = live;
   });
 
   // The bridge belongs to the generated document. A frame that navigates
-  // keeps its window, so a second load disposes the host rather than letting
-  // a page T3 never generated pose as the widget.
+  // keeps its window, so a second load stops the widget and unmounts the
+  // frame rather than letting a page T3 never generated pose as the widget.
+  // Enforcement lands on `load`: from the moment navigation starts until the
+  // load fires, the departing document can still post to this host and receive
+  // its posts — a bounded window no frame API closes earlier. Unmounting the
+  // iframe is what ends it for real.
   const loads = useRef({ document: "", count: 0 });
   const onFrameLoad = () => {
     if (loads.current.document !== srcdoc) loads.current = { document: srcdoc, count: 0 };
     loads.current.count += 1;
     if (loads.current.count > 1) {
       hostRef.current?.dispose();
+      setNavigatedAway(true);
       latest.current.props.onViolation?.({
         code: "navigatedAway",
         message: "The widget document navigated away and was stopped.",
@@ -165,7 +183,13 @@ export function WatchAppFrame(props: {
         return handler(args);
       },
       onViolation: (violation) => latest.current.props.onViolation?.(violation),
-      hostContext: () => latest.current.props.hostContext?.() ?? {},
+      // The frame always contributes the live theme; the caller's hostContext
+      // extends or overrides it.
+      hostContext: () => ({
+        theme: latest.current.theme.appearance,
+        styles: { variables: latest.current.theme.variables },
+        ...latest.current.props.hostContext?.(),
+      }),
     });
     hostRef.current = next;
     setHost(next);
@@ -185,21 +209,36 @@ export function WatchAppFrame(props: {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [srcdoc]);
 
+  // The widget pulls context with T3.context(); these pushes are what re-fire
+  // its T3.onContext listeners when what the host would answer changes. A push
+  // posted before the document has loaded is simply missed — the pull covers
+  // the initial value.
+  useEffect(() => {
+    hostRef.current?.updateHostContext();
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Context changes trigger a resend.
+  }, [theme, props.hostContext]);
+
   const renderFeed =
     props.renderFeed ?? ((feed: WatchAppFeedProps) => <WatchAppConnectorFeed {...feed} />);
 
   return (
     <div className={cn("relative size-full overflow-hidden", props.className)}>
-      <iframe
-        ref={frameRef}
-        title={props.title ?? "Widget"}
-        sandbox="allow-scripts"
-        srcDoc={srcdoc}
-        referrerPolicy="no-referrer"
-        onLoad={onFrameLoad}
-        className="size-full border-0 bg-transparent"
-      />
-      {host === null
+      {navigatedAway ? (
+        <p className="flex size-full items-center justify-center text-muted-foreground text-xs">
+          The widget left its page and was stopped
+        </p>
+      ) : (
+        <iframe
+          ref={frameRef}
+          title={props.title ?? "Widget"}
+          sandbox="allow-scripts"
+          srcDoc={srcdoc}
+          referrerPolicy="no-referrer"
+          onLoad={onFrameLoad}
+          className="size-full border-0 bg-transparent"
+        />
+      )}
+      {navigatedAway || host === null
         ? null
         : subscriptions.map((feed) => (
             <Fragment key={feed.name}>

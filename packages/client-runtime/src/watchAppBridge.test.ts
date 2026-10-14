@@ -236,6 +236,27 @@ describe("makeWatchAppHost", () => {
     expect(posted).toEqual([]);
   });
 
+  it("closes a feed that was unsubscribed while its open was still resolving", async () => {
+    let resolveOpen: (() => void) | undefined;
+    const { host, posted, closed } = makeTestHost({
+      openSubscription: () =>
+        new Promise<void>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    });
+    host.receive(request(1, WATCH_APP_METHODS.subscribe, { name: "status" }));
+    // The widget releases before the platform feed comes up.
+    host.receive(request(2, WATCH_APP_METHODS.unsubscribe, { name: "status" }));
+    await flushAsync();
+    resolveOpen?.();
+    await flushAsync();
+    // The late-resolving feed is closed back, not tracked as open — a later
+    // deliver must not reach the document.
+    expect(closed).toEqual(["status"]);
+    host.deliver("status", { ok: true });
+    expect(posted.filter((m) => m.method === WATCH_APP_NOTIFICATIONS.data)).toEqual([]);
+  });
+
   it("unsubscribes through the request and stops delivery", async () => {
     const { host, posted, closed } = makeTestHost();
     host.receive(request(1, WATCH_APP_METHODS.subscribe, { name: "status" }));

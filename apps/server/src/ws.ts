@@ -122,6 +122,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as WatchPageService from "./watch/WatchPageService.ts";
+import * as ConnectorPoller from "./watch/connectors/ConnectorPoller.ts";
 import * as ConnectorService from "./watch/connectors/ConnectorService.ts";
 import * as UserNotificationService from "./notifications/UserNotificationService.ts";
 import {
@@ -591,6 +592,7 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchConnectorsConfirmInstall,
   WS_METHODS.watchConnectorsConfirmUpgrade,
   WS_METHODS.watchConnectorsCancelInstallRequest,
+  WS_METHODS.watchConnectorSubscribe,
 ] as const;
 
 const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(...WS_WATCH_METHOD_TAGS);
@@ -618,6 +620,7 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
     const watchPages = yield* WatchPageService.WatchPageService;
     const userNotifications = yield* UserNotificationService.UserNotificationService;
     const connectors = yield* ConnectorService.ConnectorService;
+    const connectorPoller = yield* ConnectorPoller.ConnectorPoller;
     return ServerWsWatchRpcGroup.of({
       [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
       [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
@@ -707,6 +710,7 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
         Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
           Effect.andThen(connectors.cancelInstallRequest(input)),
         ),
+      [WS_METHODS.watchConnectorSubscribe]: (input) => connectorPoller.subscribe(input),
     });
   }),
 );

@@ -372,6 +372,8 @@ import {
   WatchConnectorRequestInstallInput,
   WatchConnectorRequestUpgradeInput,
   WatchConnectorSetInstanceConfigInput,
+  WatchConnectorStreamItem,
+  WatchConnectorSubscribeInput,
   WatchConnectorUpdateInstanceInput,
   WatchConnectorsListInput,
   WatchConnectorsListResult,
@@ -2199,6 +2201,18 @@ const WsWatchConnectorsCancelInstallRequestRpc = Rpc.make(
 );
 
 /**
+ * Widget-facing connector data stream: transformed snapshots (shared fetch —
+ * N widgets on one instance share one poll) and typed error states. The
+ * payload's `refreshPolicy` feeds the instance's min-of-subscribers interval.
+ */
+const WsWatchConnectorSubscribeRpc = Rpc.make(WS_METHODS.watchConnectorSubscribe, {
+  payload: WatchConnectorSubscribeInput,
+  success: WatchConnectorStreamItem,
+  error: WsWatchConnectorError,
+  stream: true,
+});
+
+/**
  * Checks the connection's scopes against the scope each RPC declares, before
  * the handler runs. Every RPC in `WsRpcGroup` carries it, so a handler cannot
  * be added without authorization.
@@ -2446,6 +2460,7 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchConnectorsConfirmInstallRpc,
   WsWatchConnectorsConfirmUpgradeRpc,
   WsWatchConnectorsCancelInstallRequestRpc,
+  WsWatchConnectorSubscribeRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = WsRpcGroupCore.merge(WsWatchRpcGroup);

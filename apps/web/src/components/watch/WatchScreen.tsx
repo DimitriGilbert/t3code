@@ -7,6 +7,7 @@ import {
 import { isWatchPageRevisionConflict } from "@t3tools/client-runtime/state/watch";
 import {
   buildWatchWidgetAddInput,
+  buildWatchWidgetAddPackInput,
   buildWatchWidgetConfigureInput,
   buildWatchWidgetDuplicateInput,
   buildWatchWidgetMoveToPageInput,
@@ -21,22 +22,27 @@ import {
   WATCH_GRID_EDIT_MIN_WIDTH_PX,
   type WatchFirstPartyWidgetSpec,
 } from "@t3tools/client-runtime/state/watch-pages";
+import { watchAgentSourceId } from "@t3tools/client-runtime/state/watch-mounts";
+import { watchConnectorOriginLabel } from "@t3tools/client-runtime/state/watch-connectors";
 import type {
   EnvironmentId,
   ProjectId,
   ScopedThreadRef,
   WatchConnectorInstance,
+  WatchConnectorInstallRequest,
   WatchGalleryTemplate,
+  WatchPackWidgetSource,
   WatchPage,
   WatchPageId,
   WatchWidget,
   WatchWidgetConfig,
   WatchWidgetId,
   WatchWidgetPlacement,
+  WatchWidgetSourceRecord,
 } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { CheckIcon, LayoutDashboardIcon, PencilIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
@@ -50,6 +56,7 @@ import {
   EmptyTitle,
 } from "~/components/ui/empty";
 import { Kbd } from "~/components/ui/kbd";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -75,19 +82,30 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { watchEnvironment } from "~/state/watch";
 
+import { WatchAppSourceDialog } from "./WatchAppSourceDialog";
 import { WatchBoard } from "./WatchBoard";
+import { WatchConnectorInstallConfirmDialog } from "./WatchConnectorInstallConfirmDialog";
 import { WatchGalleryDialog } from "./WatchGalleryDialog";
+import { WatchNotificationBell } from "./WatchNotificationBell";
 import { WatchPageTabs } from "./WatchPageTabs";
+import { WatchThresholdAlertBadge } from "./WatchThresholdAlertBadge";
 import { WatchWidgetBody } from "./WatchWidgetBody";
 import { WatchWidgetPickerDialog } from "./WatchWidgetPickerDialog";
 import { WatchConnectorSecretDialog } from "./widgets/WatchConnectorSecretDialog";
+import { useWatchAppMounts } from "./useWatchAppMounts";
 import { onWatchUiAction, type WatchUiAction } from "./watchUiBus";
 
 const NEVER_NEEDS_RELOAD_ATOM = Atom.make(false).pipe(
   Atom.withLabel("watch-screen:never-needs-reload"),
 );
 
-type WidgetMenuAction = "configure" | "duplicate" | "move-to" | `move-to:${number}` | "remove";
+type WidgetMenuAction =
+  | "configure"
+  | "view-source"
+  | "duplicate"
+  | "move-to"
+  | `move-to:${number}`
+  | "remove";
 
 /**
  * The live side of the board: subscribes to thread shells, server config,
@@ -108,6 +126,14 @@ function WatchLiveBoard(props: {
   readonly onAddWidget?: () => void;
   readonly onCommitLayout?: (widgetId: WatchWidgetId, placement: WatchWidgetPlacement) => void;
   readonly onWidgetMenu?: (widget: WatchWidget, position: { x: number; y: number }) => void;
+  /**
+   * Agent widgets report their resolved source record here so the screen's
+   * context menu can offer "View source".
+   */
+  readonly onAppSourceRecord?: (
+    widgetId: WatchWidgetId,
+    record: WatchWidgetSourceRecord | null,
+  ) => void;
 }) {
   const router = useRouter();
   const settings = useEnvironmentSettings(props.environmentId);
@@ -122,26 +148,46 @@ function WatchLiveBoard(props: {
   );
 
   // Connector state feeds connector-source widgets, the connector-status
-  // kind, and the binding picker inside the configure form.
+  // kind, the binding picker inside the configure form, pack widget
+  // registrations, and the pending install/upgrade requests a human rules on.
   const needsConnectors =
     props.configuringWidgetId !== null ||
     props.widgets.some(
-      (widget) => widget.kind === "connector-status" || widget.config.source?.kind === "connector",
+      (widget) =>
+        widget.kind === "connector-status" ||
+        widget.config.source?.kind === "connector" ||
+        widget.provenance.startsWith("pack:"),
     );
+  // Always subscribed: pending install requests must surface even on a board
+  // whose widgets are all first-party.
   const connectorsQuery = useEnvironmentQuery(
-    needsConnectors
-      ? watchEnvironment.connectorsLive({ environmentId: props.environmentId, input: {} })
-      : null,
+    watchEnvironment.connectorsLive({ environmentId: props.environmentId, input: {} }),
   );
   const connectorInstances = (connectorsQuery.data?.instances ?? []).filter(
     (instance) => instance.archivedAt === null,
   );
   const connectorPacks = connectorsQuery.data?.packs ?? [];
+  const packWidgetSources = connectorsQuery.data?.widgetSources ?? [];
+  const pendingInstallRequests = (connectorsQuery.data?.installRequests ?? []).filter(
+    (request) => request.status === "pending",
+  );
   // Ready once data exists (stale data still counts — it resolved). When
   // nothing consumes connector state the query never ran; connector-free
   // widgets must not wait on a skipped fetch.
   const connectorsReady = !needsConnectors || connectorsQuery.data !== null;
   const connectorsError = needsConnectors ? connectorsQuery.error : null;
+
+  // ≤6 agent frames at once: the registry (one per environment+page) plus the
+  // states its change lists produce.
+  const appMounts = useWatchAppMounts({
+    registryKey: `${props.environmentId}:${props.page.id}`,
+    widgets: props.widgets,
+  });
+  const [reviewRequest, setReviewRequest] = useState<WatchConnectorInstallRequest | null>(null);
+  // The dialog reviews the live request — a request cancelled elsewhere or
+  // confirmed in-flight drops out of the pending list and closes it.
+  const reviewTarget =
+    pendingInstallRequests.find((request) => request.id === reviewRequest?.id) ?? null;
 
   // Same guarded command the connector-status widget rows use.
   const setConnectorInstanceConfig = useOrchestrationCommand(
@@ -204,6 +250,13 @@ function WatchLiveBoard(props: {
         timestampFormat={settings.timestampFormat}
         connectorInstances={connectorInstances}
         connectorPacks={connectorPacks}
+        packWidgetSources={packWidgetSources}
+        appMounts={appMounts}
+        {...(props.onAppSourceRecord === undefined
+          ? {}
+          : { onAppSourceRecord: props.onAppSourceRecord })}
+        installRequests={pendingInstallRequests}
+        onReviewInstallRequest={setReviewRequest}
         connectorsReady={connectorsReady}
         connectorsError={connectorsError}
         configuring={props.configuringWidgetId === widget.id}
@@ -222,6 +275,7 @@ function WatchLiveBoard(props: {
       props.onConfigureSubmit,
       props.onConfigureOpen,
       props.onConfigureClose,
+      props.onAppSourceRecord,
       projects,
       threads,
       providers,
@@ -229,16 +283,60 @@ function WatchLiveBoard(props: {
       settings.timestampFormat,
       connectorInstances,
       connectorPacks,
+      packWidgetSources,
+      pendingInstallRequests,
+      appMounts,
       connectorsReady,
       connectorsError,
       reconnectConnector,
       openThread,
       setSecretInstanceId,
+      setReviewRequest,
     ],
   );
 
   return (
     <>
+      {pendingInstallRequests.length === 0 ? null : (
+        <Alert variant="info" className="mb-4">
+          <AlertTitle>
+            {pendingInstallRequests.length === 1
+              ? "A connector pack change awaits approval."
+              : `${pendingInstallRequests.length} connector pack changes await approval.`}
+          </AlertTitle>
+          <AlertAction>
+            {pendingInstallRequests.length === 1 ? (
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  const first = pendingInstallRequests[0];
+                  if (first !== undefined) setReviewRequest(first);
+                }}
+              >
+                Review
+              </Button>
+            ) : (
+              // Every pending request must be individually resolvable — with
+              // several queued, Review lists them instead of picking one.
+              <Menu>
+                <MenuTrigger
+                  render={<Button size="xs" variant="outline" aria-label="Review requests" />}
+                >
+                  Review
+                </MenuTrigger>
+                <MenuPopup align="end">
+                  {pendingInstallRequests.map((request) => (
+                    <MenuItem key={request.id} onClick={() => setReviewRequest(request)}>
+                      {`${request.packId ?? watchConnectorOriginLabel(request.origin)} (${request.kind})`}
+                    </MenuItem>
+                  ))}
+                </MenuPopup>
+              </Menu>
+            )}
+          </AlertAction>
+        </Alert>
+      )}
       <WatchBoard
         widgets={props.widgets}
         editing={props.editing}
@@ -250,6 +348,14 @@ function WatchLiveBoard(props: {
           : { onConfigureWidget: props.onConfigureOpen })}
         {...(props.onWidgetMenu === undefined ? {} : { onWidgetMenu: props.onWidgetMenu })}
         renderBody={renderBody}
+        renderHeaderAlert={(widget) => (
+          <WatchThresholdAlertBadge environmentId={props.environmentId} widgetId={widget.id} />
+        )}
+      />
+      <WatchConnectorInstallConfirmDialog
+        environmentId={props.environmentId}
+        request={reviewTarget}
+        onClose={() => setReviewRequest(null)}
       />
       {secretInstance !== null ? (
         <WatchConnectorSecretDialog
@@ -322,6 +428,20 @@ export function WatchScreen() {
   const [editingPageId, setEditingPageId] = useState<WatchPageId | null>(null);
   const [renamingPageId, setRenamingPageId] = useState<WatchPageId | null>(null);
   const [configuringWidgetId, setConfiguringWidgetId] = useState<WatchWidgetId | null>(null);
+  // Resolved agent-widget source records, keyed by widget id — the context
+  // menu reads it imperatively, so a ref keeps it out of render churn.
+  const appSourceRecordsRef = useRef(new Map<WatchWidgetId, WatchWidgetSourceRecord>());
+  const [viewSourceRecord, setViewSourceRecord] = useState<WatchWidgetSourceRecord | null>(null);
+  const handleAppSourceRecord = useCallback(
+    (widgetId: WatchWidgetId, record: WatchWidgetSourceRecord | null) => {
+      if (record === null) {
+        appSourceRecordsRef.current.delete(widgetId);
+      } else {
+        appSourceRecordsRef.current.set(widgetId, record);
+      }
+    },
+    [],
+  );
   const canEditLayout = useMediaQuery({ min: WATCH_GRID_EDIT_MIN_WIDTH_PX });
 
   const { active, archived } = partitionWatchPages(pagesQuery.data?.pages ?? []);
@@ -348,6 +468,16 @@ export function WatchScreen() {
   const projects = useProjects().filter(
     (project) => project.environmentId === environmentId && project.isScratch !== true,
   );
+
+  // The picker lists pack-registered widget sources; subscribe only while it
+  // is open — the board's own subscription already covers mounted widgets.
+  const pickerConnectorsQuery = useEnvironmentQuery(
+    pickerOpen && environmentId !== null
+      ? watchEnvironment.connectorsLive({ environmentId, input: {} })
+      : null,
+  );
+  const pickerPackSources = pickerConnectorsQuery.data?.widgetSources ?? [];
+  const pickerInstances = pickerConnectorsQuery.data?.instances ?? [];
 
   // The empty state previews the gallery, so it is fetched ahead of the dialog.
   const galleryQuery = useEnvironmentQuery(
@@ -445,6 +575,29 @@ export function WatchScreen() {
     [addWidget, environmentId, selectedPage, selectedWidgets],
   );
 
+  const handlePickPackSource = useCallback(
+    (source: WatchPackWidgetSource) => {
+      setPickerOpen(false);
+      if (environmentId === null || selectedPage === null) return;
+      // One live instance of the pack binds it directly; zero or several
+      // leaves the binding for the widget's configure form.
+      const instances = pickerInstances.filter(
+        (instance) => instance.packId === source.packId && instance.archivedAt === null,
+      );
+      const instanceId = instances.length === 1 ? instances[0]?.id : undefined;
+      void addWidget({
+        environmentId,
+        input: buildWatchWidgetAddPackInput(
+          selectedPage,
+          selectedWidgets,
+          source,
+          instanceId === undefined ? {} : { instanceId },
+        ),
+      }).then(reportWatchWriteConflict);
+    },
+    [addWidget, environmentId, pickerInstances, selectedPage, selectedWidgets],
+  );
+
   // One committed placement per gesture — the board only calls this for
   // non-colliding candidates, and the same check runs here so a stale read
   // can never send an overlapping write.
@@ -487,9 +640,16 @@ export function WatchScreen() {
         watchWidgetIsConfigurable(widget)
           ? [{ id: "configure", label: "Configure", icon: "settings" }]
           : [];
+      // Agent/pack kinds get "View source" once the record resolves — the
+      // published TSX is reviewable host-side, never inside the frame.
+      const sourceItems: ReadonlyArray<{ id: WidgetMenuAction; label: string }> =
+        watchAgentSourceId(widget.kind) !== undefined && appSourceRecordsRef.current.has(widget.id)
+          ? [{ id: "view-source", label: "View source" }]
+          : [];
       const action = await api.contextMenu.show<WidgetMenuAction>(
         [
           ...configureItems,
+          ...sourceItems,
           { id: "duplicate", label: "Duplicate", icon: "copy" },
           {
             id: "move-to",
@@ -514,6 +674,11 @@ export function WatchScreen() {
       if (action === null) return;
       if (action === "configure") {
         setConfiguringWidgetId(widget.id);
+        return;
+      }
+      if (action === "view-source") {
+        const record = appSourceRecordsRef.current.get(widget.id);
+        if (record !== undefined) setViewSourceRecord(record);
         return;
       }
       if (action === "duplicate") {
@@ -716,6 +881,7 @@ export function WatchScreen() {
               </Tooltip>
             ) : null}
           </div>
+          {environmentId === null ? null : <WatchNotificationBell environmentId={environmentId} />}
         </WorkspacePageHeader>
 
         <ScrollArea className="min-h-0 flex-1">
@@ -855,11 +1021,21 @@ export function WatchScreen() {
                 onAddWidget={() => setPickerOpen(true)}
                 onCommitLayout={handleCommitLayout}
                 onWidgetMenu={(widget, position) => void handleWidgetMenu(widget, position)}
+                onAppSourceRecord={handleAppSourceRecord}
               />
             )}
           </div>
         </ScrollArea>
 
+        {viewSourceRecord === null ? null : (
+          <WatchAppSourceDialog
+            record={viewSourceRecord}
+            open
+            onOpenChange={(open) => {
+              if (!open) setViewSourceRecord(null);
+            }}
+          />
+        )}
         <WatchGalleryDialog
           open={galleryOpen}
           onOpenChange={setGalleryOpen}
@@ -870,6 +1046,8 @@ export function WatchScreen() {
           open={pickerOpen}
           onOpenChange={setPickerOpen}
           onPick={handlePickWidget}
+          packSources={pickerPackSources}
+          onPickPackSource={handlePickPackSource}
         />
       </div>
     </SidebarInset>

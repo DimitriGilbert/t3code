@@ -343,9 +343,17 @@
       "types": "./src/state/watch.ts",
       "default": "./src/state/watch.ts"
     },
+    "./state/watch-connectors": {
+      "types": "./src/state/watchConnectors.ts",
+      "default": "./src/state/watchConnectors.ts"
+    },
     "./state/watch-mounts": {
       "types": "./src/state/watchMounts.ts",
       "default": "./src/state/watchMounts.ts"
+    },
+    "./state/watch-notifications": {
+      "types": "./src/state/watchNotifications.ts",
+      "default": "./src/state/watchNotifications.ts"
     },
     "./state/watch-pages": {
       "types": "./src/state/watchPages.ts",

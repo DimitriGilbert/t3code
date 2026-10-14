@@ -12,6 +12,7 @@ import {
 
 import {
   isWatchNotificationDeliverable,
+  resolveWatchNotificationDelivery,
   shouldDeliverWatchNotification,
   WATCH_NOTIFICATION_DESKTOP_NATIVE_CHANNEL,
   watchNotificationDedupeKey,
@@ -189,5 +190,109 @@ describe("shouldDeliverWatchNotification", () => {
     });
     expect(first).toBe(true);
     expect(second).toBe(false);
+  });
+});
+
+describe("resolveWatchNotificationDelivery", () => {
+  const now = Date.parse("2026-01-01T12:00:00.000Z");
+  const base = {
+    notification: completed,
+    prefs: defaultPrefs,
+    now,
+    inAppChannelId: "session:a",
+    nativeChannelId: WATCH_NOTIFICATION_DESKTOP_NATIVE_CHANNEL,
+  };
+
+  it("routes to the in-app channel while the window is attended", () => {
+    const delivery = resolveWatchNotificationDelivery({
+      ...base,
+      inAppDelivered: new Set(),
+      nativeDelivered: new Set(),
+      viewingThreadId: undefined,
+      windowAttended: true,
+    });
+    expect(delivery).toEqual({ inApp: true, desktopNative: false });
+  });
+
+  it("routes to the device-native channel while the window is unattended", () => {
+    const delivery = resolveWatchNotificationDelivery({
+      ...base,
+      inAppDelivered: new Set(),
+      nativeDelivered: new Set(),
+      viewingThreadId: undefined,
+      windowAttended: false,
+    });
+    expect(delivery).toEqual({ inApp: false, desktopNative: true });
+  });
+
+  it("suppresses both channels while the client views the notification's thread", () => {
+    for (const windowAttended of [true, false]) {
+      const delivery = resolveWatchNotificationDelivery({
+        ...base,
+        inAppDelivered: new Set(),
+        nativeDelivered: new Set(),
+        viewingThreadId: completed.threadId,
+        windowAttended,
+      });
+      expect(delivery).toEqual({ inApp: false, desktopNative: false });
+    }
+    // A different thread still delivers.
+    expect(
+      resolveWatchNotificationDelivery({
+        ...base,
+        inAppDelivered: new Set(),
+        nativeDelivered: new Set(),
+        viewingThreadId: ThreadId.make("thread:other"),
+        windowAttended: false,
+      }).desktopNative,
+    ).toBe(true);
+    // Connector and threshold events carry no threadId — never suppressed.
+    expect(
+      resolveWatchNotificationDelivery({
+        ...base,
+        notification: threshold,
+        inAppDelivered: new Set(),
+        nativeDelivered: new Set(),
+        viewingThreadId: completed.threadId,
+        windowAttended: false,
+      }).desktopNative,
+    ).toBe(true);
+  });
+
+  it("prefs filter before routing: a muted type delivers on no channel", () => {
+    const delivery = resolveWatchNotificationDelivery({
+      ...base,
+      prefs: { ...defaultPrefs, mutedEventTypes: ["thread.completed"] },
+      inAppDelivered: new Set(),
+      nativeDelivered: new Set(),
+      viewingThreadId: undefined,
+      windowAttended: false,
+    });
+    expect(delivery).toEqual({ inApp: false, desktopNative: false });
+  });
+
+  it("records dedupe per channel: a delivered channel stays delivered", () => {
+    const inAppDelivered = new Set([
+      watchNotificationDedupeKey(completed.notificationId, "session:a"),
+    ]);
+    expect(
+      resolveWatchNotificationDelivery({
+        ...base,
+        inAppDelivered,
+        nativeDelivered: new Set(),
+        viewingThreadId: undefined,
+        windowAttended: true,
+      }).inApp,
+    ).toBe(false);
+    // The native channel has its own set — an in-app delivery never blocks it.
+    expect(
+      resolveWatchNotificationDelivery({
+        ...base,
+        inAppDelivered,
+        nativeDelivered: new Set(),
+        viewingThreadId: undefined,
+        windowAttended: false,
+      }).desktopNative,
+    ).toBe(true);
   });
 });

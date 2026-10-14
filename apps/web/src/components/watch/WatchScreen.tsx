@@ -904,7 +904,7 @@ export function WatchScreen() {
                       );
                     }}
                   >
-                    Reload
+                    Dismiss
                   </Button>
                 </AlertAction>
               </Alert>

@@ -15,6 +15,7 @@ import {
   buildWatchWidgetDuplicateInput,
   buildWatchWidgetMoveToPageInput,
   buildWatchWidgetSetLayoutInput,
+  buildWatchWidgetSetMobileProjectionInput,
   canonicalWatchWidgetOrder,
   firstFreeWatchPlacement,
   nextWatchPageName,
@@ -30,6 +31,7 @@ import {
   watchLayoutEditableAt,
   watchMoveCandidate,
   watchPageAmbientProjectId,
+  watchPageMobileWidgets,
   watchPageReorderBefore,
   watchPageReorderForDrop,
   watchPageShowsProjectBadge,
@@ -567,5 +569,191 @@ describe("buildWatchWidgetMoveToPageInput", () => {
       destinationExpectedRevision: 11,
       placement: { x: 0, y: 1, w: 7, h: 4 },
     });
+  });
+});
+
+// ── Mobile projection ─────────────────────────────────────────────────
+
+describe("watchPageMobileWidgets", () => {
+  it("filters hidden widgets and applies mobileOrder over canonical order", () => {
+    const widgets = [
+      widget("a", "p", { x: 0, y: 0, w: 4, h: 2 }, { mobileOrder: 2 }),
+      widget("b", "p", { x: 4, y: 0, w: 4, h: 2 }, { mobileOrder: 0 }),
+      widget("c", "p", { x: 0, y: 1, w: 4, h: 2 }, { mobileOrder: 1, mobileHidden: true }),
+      widget("d", "p", { x: 4, y: 1, w: 4, h: 2 }, { mobileOrder: 3 }),
+    ];
+    expect(watchPageMobileWidgets(widgets, pageId("p")).map((w) => w.id)).toEqual([
+      widgetId("b"),
+      widgetId("a"),
+      widgetId("d"),
+    ]);
+  });
+
+  it("falls back to canonical (y, x) order for equal mobileOrder slots", () => {
+    const widgets = [
+      widget("a", "p", { x: 4, y: 0, w: 4, h: 2 }, { mobileOrder: 0 }),
+      widget("b", "p", { x: 0, y: 0, w: 4, h: 2 }, { mobileOrder: 0 }),
+    ];
+    expect(watchPageMobileWidgets(widgets, pageId("p")).map((w) => w.id)).toEqual([
+      widgetId("b"),
+      widgetId("a"),
+    ]);
+  });
+});
+
+describe("buildWatchWidgetSetMobileProjectionInput", () => {
+  const p = page("p", { mobileRevision: 7 });
+  const three = () => [
+    widget("a", "p", { x: 0, y: 0, w: 4, h: 2 }, { mobileOrder: 0 }),
+    widget("b", "p", { x: 4, y: 0, w: 4, h: 2 }, { mobileOrder: 1 }),
+    widget("c", "p", { x: 0, y: 1, w: 4, h: 2 }, { mobileOrder: 2 }),
+  ];
+
+  it("moves a widget down, renumbering only the swapped pair", () => {
+    const input = buildWatchWidgetSetMobileProjectionInput({
+      page: p,
+      widgets: three(),
+      edit: { type: "move", widgetId: widgetId("a"), direction: "down" },
+    });
+    expect(input).toEqual({
+      pageId: pageId("p"),
+      expectedMobileRevision: 7,
+      widgets: [
+        { widgetId: widgetId("b"), mobileOrder: 0, mobileHidden: false },
+        { widgetId: widgetId("a"), mobileOrder: 1, mobileHidden: false },
+      ],
+    });
+  });
+
+  it("skips over hidden widgets when moving", () => {
+    const widgets = [
+      widget("a", "p", { x: 0, y: 0, w: 4, h: 2 }, { mobileOrder: 0 }),
+      widget("h", "p", { x: 4, y: 0, w: 4, h: 2 }, { mobileOrder: 1, mobileHidden: true }),
+      widget("b", "p", { x: 0, y: 1, w: 4, h: 2 }, { mobileOrder: 2 }),
+    ];
+    const input = buildWatchWidgetSetMobileProjectionInput({
+      page: p,
+      widgets,
+      edit: { type: "move", widgetId: widgetId("a"), direction: "down" },
+    });
+    // `a` swaps with `b`; the hidden row keeps its slot.
+    expect(input?.widgets).toEqual([
+      { widgetId: widgetId("b"), mobileOrder: 0, mobileHidden: false },
+      { widgetId: widgetId("a"), mobileOrder: 2, mobileHidden: false },
+    ]);
+  });
+
+  it("treats agent widgets as inert move targets while the mobile kill switch is off", () => {
+    const widgets = [
+      widget("a", "p", { x: 0, y: 0, w: 4, h: 2 }, { mobileOrder: 0 }),
+      widget(
+        "h",
+        "p",
+        { x: 4, y: 0, w: 4, h: 2 },
+        { mobileOrder: 1, kind: "agent:source-1", provenance: "agentPublished" },
+      ),
+      widget("b", "p", { x: 0, y: 1, w: 4, h: 2 }, { mobileOrder: 2 }),
+    ];
+    const input = buildWatchWidgetSetMobileProjectionInput({
+      page: p,
+      widgets,
+      edit: { type: "move", widgetId: widgetId("a"), direction: "down" },
+      agentWidgetsEnabled: false,
+    });
+    // `a` swaps with `b`; the capability-hidden agent row keeps its slot.
+    expect(input?.widgets).toEqual([
+      { widgetId: widgetId("b"), mobileOrder: 0, mobileHidden: false },
+      { widgetId: widgetId("a"), mobileOrder: 2, mobileHidden: false },
+    ]);
+    // Moving the capability-hidden widget itself is a no-op.
+    expect(
+      buildWatchWidgetSetMobileProjectionInput({
+        page: p,
+        widgets,
+        edit: { type: "move", widgetId: widgetId("h"), direction: "down" },
+        agentWidgetsEnabled: false,
+      }),
+    ).toBeNull();
+    // With the switch on the agent widget is an ordinary neighbour.
+    const enabled = buildWatchWidgetSetMobileProjectionInput({
+      page: p,
+      widgets,
+      edit: { type: "move", widgetId: widgetId("a"), direction: "down" },
+      agentWidgetsEnabled: true,
+    });
+    expect(enabled?.widgets).toEqual([
+      { widgetId: widgetId("h"), mobileOrder: 0, mobileHidden: false },
+      { widgetId: widgetId("a"), mobileOrder: 1, mobileHidden: false },
+    ]);
+  });
+
+  it("hides a widget in place without renumbering", () => {
+    const input = buildWatchWidgetSetMobileProjectionInput({
+      page: p,
+      widgets: three(),
+      edit: { type: "setHidden", widgetId: widgetId("b"), hidden: true },
+    });
+    expect(input).toEqual({
+      pageId: pageId("p"),
+      expectedMobileRevision: 7,
+      widgets: [{ widgetId: widgetId("b"), mobileOrder: 1, mobileHidden: true }],
+    });
+  });
+
+  it("returns null for no-op edits", () => {
+    const widgets = three();
+    expect(
+      buildWatchWidgetSetMobileProjectionInput({
+        page: p,
+        widgets,
+        edit: { type: "move", widgetId: widgetId("a"), direction: "up" },
+      }),
+    ).toBeNull();
+    expect(
+      buildWatchWidgetSetMobileProjectionInput({
+        page: p,
+        widgets,
+        edit: { type: "setHidden", widgetId: widgetId("a"), hidden: false },
+      }),
+    ).toBeNull();
+    expect(
+      buildWatchWidgetSetMobileProjectionInput({
+        page: p,
+        widgets,
+        edit: { type: "move", widgetId: widgetId("missing"), direction: "down" },
+      }),
+    ).toBeNull();
+  });
+
+  // Projection isolation: mobile move/hide writes travel through
+  // `setMobileProjection`, which carries no desktop placement and is gated on
+  // `mobileRevision` — the grid layout (`revision`) is out of scope.
+  it("carries only mobile projection fields — never desktop placements or page revision", () => {
+    const widgets = three();
+    for (const edit of [
+      { type: "move", widgetId: widgetId("a"), direction: "down" },
+      { type: "setHidden", widgetId: widgetId("b"), hidden: true },
+    ] as const) {
+      const input = buildWatchWidgetSetMobileProjectionInput({ page: p, widgets, edit });
+      expect(input).not.toBeNull();
+      expect(Object.keys(input!).sort()).toEqual(["expectedMobileRevision", "pageId", "widgets"]);
+      expect(input!.expectedMobileRevision).toBe(p.mobileRevision);
+      expect("expectedRevision" in (input as object)).toBe(false);
+      for (const entry of input!.widgets) {
+        expect(Object.keys(entry).sort()).toEqual(["mobileHidden", "mobileOrder", "widgetId"]);
+        expect("placement" in (entry as object)).toBe(false);
+      }
+    }
+  });
+
+  it("leaves the widget records untouched — a pure read, not a mutation", () => {
+    const widgets = three();
+    const before = widgets.map((entry) => ({ ...entry }));
+    buildWatchWidgetSetMobileProjectionInput({
+      page: p,
+      widgets,
+      edit: { type: "move", widgetId: widgetId("a"), direction: "down" },
+    });
+    expect(widgets).toEqual(before);
   });
 });

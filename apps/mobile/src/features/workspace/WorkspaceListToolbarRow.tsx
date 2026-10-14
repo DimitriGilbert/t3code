@@ -19,6 +19,8 @@ export function WorkspaceListToolbarRow(props: {
   readonly searchAccessibilityLabel: string;
   readonly titleAccessibilityLabel: string;
   readonly onOpenEnvironments: () => void;
+  /** Present only when an environment advertises the watch-screen capability. */
+  readonly watch?: ReactNode;
   /** Stays trailing while searching, so it never moves and still narrows the results. */
   readonly filter: ReactNode;
 }) {
@@ -50,6 +52,7 @@ export function WorkspaceListToolbarRow(props: {
               }
             />
           </View>
+          {props.watch}
           <AndroidHeaderIconButton
             accessibilityLabel={props.searchAccessibilityLabel}
             icon="magnifyingglass"

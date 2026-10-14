@@ -31,6 +31,7 @@ import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
 import { getConnectionAwareBrandHeaderOptions } from "./WorkspaceConnectionTitle";
+import { useWatchEntryEnvironmentId } from "../watch/useWatchEntryEnvironmentId";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { openSettings } from "../settings/settings-navigation";
 import { useSelectWorkspaceTab } from "../workspace/useSelectWorkspaceTab";
@@ -137,6 +138,11 @@ export function HomeRouteScreen() {
     setSelectedProjectKey,
   } = useHomeListOptions(availableEnvironmentIds);
   const selectedEnvironmentId = listOptions.selectedEnvironmentId;
+  const watchEntryEnvironmentId = useWatchEntryEnvironmentId(selectedEnvironmentId);
+  const openWatch = useCallback(() => {
+    if (watchEntryEnvironmentId === null) return;
+    navigation.navigate("Watch", { environmentId: watchEntryEnvironmentId });
+  }, [navigation, watchEntryEnvironmentId]);
   const projectScopeKey = listOptions.selectedProjectKey;
   const resolvedProjectKey = resolveScratchProjectScopeKey(projectScopeKey, projects, {
     sidebarProjectGroupingMode: listOptions.projectGroupingMode,
@@ -238,6 +244,7 @@ export function HomeRouteScreen() {
           onOpenSettings={() => selectTab("settings")}
           onSearchQueryChange={setSearchQuery}
           onStartNewTask={startNewTask}
+          {...(watchEntryEnvironmentId === null ? {} : { onOpenWatch: openWatch })}
         />
 
         <HomeScreen

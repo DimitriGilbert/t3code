@@ -6,10 +6,14 @@ import type {
   WatchPageInstantiateFromGalleryInput,
   WatchWidget,
   WatchWidgetAddInput,
+  WatchWidgetConfig,
+  WatchWidgetConfigureInput,
   WatchWidgetId,
   WatchWidgetKind,
+  WatchWidgetMoveToPageInput,
   WatchWidgetPlacement,
   WatchWidgetProvenance,
+  WatchWidgetSetLayoutInput,
 } from "@t3tools/contracts";
 
 /**
@@ -218,6 +222,125 @@ export function reflowWatchPlacements(
   return result;
 }
 
+// ── Layout editing ──────────────────────────────────────────────────────
+
+/** Column count the board renders at a given viewport width. */
+export function watchBoardColumns(viewportWidthPx: number): number {
+  if (viewportWidthPx >= WATCH_GRID_EDIT_MIN_WIDTH_PX) return WATCH_GRID_COLUMNS;
+  if (viewportWidthPx >= WATCH_GRID_STACK_MIN_WIDTH_PX) return WATCH_GRID_MEDIUM_COLUMNS;
+  return 1;
+}
+
+/**
+ * Layout editing exists only at or above the edit width — below it the board
+ * is a derived view and `setLayout` must not be reachable from the UI.
+ */
+export function watchLayoutEditableAt(viewportWidthPx: number): boolean {
+  return viewportWidthPx >= WATCH_GRID_EDIT_MIN_WIDTH_PX;
+}
+
+/**
+ * The pixel distance between the start of one cell and the next, recovered
+ * from a rendered element spanning `span` cells: `spanPx = span * pitch -
+ * gap`. One measurement per gesture, then all math runs in cell units.
+ */
+export function watchGridPitch(spanPx: number, span: number, gapPx: number): number {
+  if (span <= 0) return 0;
+  return (spanPx + gapPx) / span;
+}
+
+/** Whole-cell distance for a pointer delta; snaps at half a cell. */
+export function watchCellDelta(deltaPx: number, pitchPx: number): number {
+  if (pitchPx <= 0) return 0;
+  return Math.round(deltaPx / pitchPx);
+}
+
+/**
+ * Whether a placement is legal on a `columns`-wide board holding `others`:
+ * inside the grid, at least one row tall, at or above its `minCols` floor,
+ * and overlapping nothing. Overlap is forbidden — a colliding drop is a
+ * no-op, never a shove.
+ */
+export function watchPlacementFits(
+  placement: WatchWidgetPlacement,
+  others: ReadonlyArray<WatchWidgetPlacement>,
+  columns: number = WATCH_GRID_COLUMNS,
+): boolean {
+  return (
+    placement.x >= 0 &&
+    placement.y >= 0 &&
+    placement.w >= Math.max(1, placement.minCols ?? 1) &&
+    placement.h >= 1 &&
+    placement.x + placement.w <= columns &&
+    !others.some((other) => watchPlacementsOverlap(placement, other))
+  );
+}
+
+/** Two placements are the same rect (per-gesture no-change guard). */
+export function watchPlacementsEqual(a: WatchWidgetPlacement, b: WatchWidgetPlacement): boolean {
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
+/**
+ * Where a dragged widget would land: the start placement shifted by whole
+ * cells, clamped inside the grid and to the top edge.
+ */
+export function watchMoveCandidate(
+  start: WatchWidgetPlacement,
+  deltaColumns: number,
+  deltaRows: number,
+  columns: number = WATCH_GRID_COLUMNS,
+): WatchWidgetPlacement {
+  return {
+    ...start,
+    x: Math.min(Math.max(0, start.x + deltaColumns), Math.max(0, columns - start.w)),
+    y: Math.max(0, start.y + deltaRows),
+  };
+}
+
+/**
+ * The resize handles a widget offers: a hit zone on each edge center plus
+ * both bottom corners (bottom corners only — top corners would fight the
+ * header row's controls).
+ */
+export type WatchResizeEdge = "n" | "s" | "e" | "w" | "se" | "sw";
+
+export const WATCH_RESIZE_EDGES: ReadonlyArray<WatchResizeEdge> = ["n", "s", "e", "w", "se", "sw"];
+
+/**
+ * The placement a resize gesture is proposing. Width never drops below
+ * `minCols` (floor 1), height never below one row, and the board's right
+ * edge clamps eastward growth — the candidate is always legal geometry, so
+ * collision alone decides whether a drop is refused.
+ */
+export function watchResizeCandidate(
+  start: WatchWidgetPlacement,
+  edge: WatchResizeEdge,
+  deltaColumns: number,
+  deltaRows: number,
+  columns: number = WATCH_GRID_COLUMNS,
+): WatchWidgetPlacement {
+  const minWidth = Math.max(1, start.minCols ?? 1);
+  let { x, y, w, h } = start;
+  if (edge === "w" || edge === "sw") {
+    const nextX = Math.min(Math.max(0, start.x + deltaColumns), start.x + start.w - minWidth);
+    w = start.w + (start.x - nextX);
+    x = nextX;
+  }
+  if (edge === "e" || edge === "se") {
+    w = Math.min(Math.max(minWidth, start.w + deltaColumns), Math.max(minWidth, columns - start.x));
+  }
+  if (edge === "n") {
+    const nextY = Math.min(Math.max(0, start.y + deltaRows), start.y + start.h - 1);
+    h = start.h + (start.y - nextY);
+    y = nextY;
+  }
+  if (edge === "s" || edge === "se" || edge === "sw") {
+    h = Math.max(1, start.h + deltaRows);
+  }
+  return { ...start, x, y, w, h };
+}
+
 // ── Widget identity ───────────────────────────────────────────────────
 
 export interface WatchFirstPartyWidgetSpec {
@@ -347,4 +470,77 @@ export function watchGalleryInstantiateInput(
   return projectId === undefined
     ? { templateId: template.id }
     : { templateId: template.id, projectId };
+}
+
+/**
+ * The `setLayout` payload for one widget's committed placement, checked
+ * against the page revision — a concurrent change fails the write and the
+ * client prompts a reload instead of writing last-writer-wins.
+ */
+export function buildWatchWidgetSetLayoutInput(
+  page: WatchPage,
+  widgetId: WatchWidgetId,
+  placement: WatchWidgetPlacement,
+): WatchWidgetSetLayoutInput {
+  return {
+    pageId: page.id,
+    expectedRevision: page.revision,
+    layouts: [{ widgetId, placement }],
+  };
+}
+
+/**
+ * The `configure` payload for a config-only edit, checked against the
+ * widget's own revision so it can never collide with a layout drag.
+ */
+export function buildWatchWidgetConfigureInput(
+  widget: Pick<WatchWidget, "id" | "revision">,
+  config: WatchWidgetConfig,
+): WatchWidgetConfigureInput {
+  return { widgetId: widget.id, expectedRevision: widget.revision, config };
+}
+
+/**
+ * The `addWidget` payload duplicating `source` onto the same page: kind,
+ * config, and pack provenance ride along; placement lands at the first free
+ * slot sized like the source.
+ */
+export function buildWatchWidgetDuplicateInput(
+  page: WatchPage,
+  pageWidgets: ReadonlyArray<WatchWidget>,
+  source: WatchWidget,
+): WatchWidgetAddInput {
+  const provenance =
+    source.provenance === "firstParty" || source.provenance === "agentPublished"
+      ? undefined
+      : source.provenance;
+  return {
+    pageId: page.id,
+    expectedRevision: page.revision,
+    kind: source.kind,
+    config: source.config,
+    placement: firstFreeWatchPlacement(pageWidgets, source.placement),
+    ...(provenance === undefined ? {} : { provenance }),
+  };
+}
+
+/**
+ * The `moveToPage` payload: both pages' revisions guard the move — a stale
+ * revision on either side rejects the whole thing. The widget lands at the
+ * destination's first free slot sized like its current placement.
+ */
+export function buildWatchWidgetMoveToPageInput(
+  widget: WatchWidget,
+  sourcePage: WatchPage,
+  destinationPage: WatchPage,
+  destinationPageWidgets: ReadonlyArray<WatchWidget>,
+): WatchWidgetMoveToPageInput {
+  return {
+    widgetId: widget.id,
+    sourcePageId: sourcePage.id,
+    sourceExpectedRevision: sourcePage.revision,
+    destinationPageId: destinationPage.id,
+    destinationExpectedRevision: destinationPage.revision,
+    placement: firstFreeWatchPlacement(destinationPageWidgets, widget.placement),
+  };
 }

@@ -11,6 +11,10 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   buildWatchWidgetAddInput,
+  buildWatchWidgetConfigureInput,
+  buildWatchWidgetDuplicateInput,
+  buildWatchWidgetMoveToPageInput,
+  buildWatchWidgetSetLayoutInput,
   canonicalWatchWidgetOrder,
   firstFreeWatchPlacement,
   nextWatchPageName,
@@ -19,12 +23,19 @@ import {
   resolveWatchThreadsProjectBinding,
   sortWatchPages,
   WATCH_GRID_COLUMNS,
+  watchBoardColumns,
+  watchCellDelta,
   watchGalleryInstantiateInput,
+  watchGridPitch,
+  watchLayoutEditableAt,
+  watchMoveCandidate,
   watchPageAmbientProjectId,
   watchPageReorderBefore,
   watchPageReorderForDrop,
   watchPageShowsProjectBadge,
+  watchPlacementFits,
   watchPlacementsOverlap,
+  watchResizeCandidate,
   watchWidgetDisplayTitle,
   watchWidgetProvenanceMarker,
 } from "./watchPages.ts";
@@ -342,5 +353,211 @@ describe("watchGalleryInstantiateInput", () => {
 describe("WATCH_GRID_COLUMNS", () => {
   it("is the 12-column contract shared by the contract placements", () => {
     expect(WATCH_GRID_COLUMNS).toBe(12);
+  });
+});
+
+describe("watchBoardColumns / watchLayoutEditableAt", () => {
+  it("maps viewport width to the board's column contract", () => {
+    expect(watchBoardColumns(1600)).toBe(12);
+    expect(watchBoardColumns(1200)).toBe(12);
+    expect(watchBoardColumns(1199)).toBe(6);
+    expect(watchBoardColumns(768)).toBe(6);
+    expect(watchBoardColumns(767)).toBe(1);
+    expect(watchBoardColumns(320)).toBe(1);
+  });
+
+  it("gates layout editing at 1200px exactly", () => {
+    expect(watchLayoutEditableAt(1200)).toBe(true);
+    expect(watchLayoutEditableAt(1199)).toBe(false);
+    expect(watchLayoutEditableAt(768)).toBe(false);
+    expect(watchLayoutEditableAt(0)).toBe(false);
+  });
+});
+
+describe("watchGridPitch / watchCellDelta", () => {
+  it("recovers cell pitch from a rendered span including its gaps", () => {
+    // A 4-column widget at 12px gaps: 4*72 + 3*12 = 324 → pitch 72 + 12 = 84.
+    expect(watchGridPitch(324, 4, 12)).toBe(84);
+    expect(watchGridPitch(128, 2, 12)).toBe(70);
+    expect(watchGridPitch(100, 0, 12)).toBe(0);
+  });
+
+  it("snaps pointer deltas to whole cells at the half-cell boundary", () => {
+    expect(watchCellDelta(0, 80)).toBe(0);
+    expect(watchCellDelta(39, 80)).toBe(0);
+    expect(watchCellDelta(41, 80)).toBe(1);
+    expect(watchCellDelta(-41, 80)).toBe(-1);
+    expect(watchCellDelta(167, 80)).toBe(2);
+    expect(watchCellDelta(100, 0)).toBe(0);
+  });
+});
+
+describe("watchPlacementFits", () => {
+  const others = [{ x: 4, y: 0, w: 4, h: 2 }];
+
+  it("accepts a free in-bounds placement and rejects overlap", () => {
+    expect(watchPlacementFits({ x: 0, y: 0, w: 4, h: 2 }, others)).toBe(true);
+    expect(watchPlacementFits({ x: 5, y: 1, w: 4, h: 2 }, others)).toBe(false);
+    // Edge contact is free.
+    expect(watchPlacementFits({ x: 8, y: 0, w: 4, h: 2 }, others)).toBe(true);
+    expect(watchPlacementFits({ x: 4, y: 2, w: 4, h: 2 }, others)).toBe(true);
+  });
+
+  it("rejects out-of-grid and below-floor geometry", () => {
+    expect(watchPlacementFits({ x: -1, y: 0, w: 4, h: 2 }, [])).toBe(false);
+    expect(watchPlacementFits({ x: 0, y: -1, w: 4, h: 2 }, [])).toBe(false);
+    expect(watchPlacementFits({ x: 9, y: 0, w: 4, h: 2 }, [])).toBe(false);
+    expect(watchPlacementFits({ x: 0, y: 0, w: 0, h: 2 }, [])).toBe(false);
+    expect(watchPlacementFits({ x: 0, y: 0, w: 4, h: 0 }, [])).toBe(false);
+    expect(watchPlacementFits({ x: 0, y: 0, w: 2, h: 2, minCols: 3 }, [])).toBe(false);
+    expect(watchPlacementFits({ x: 0, y: 0, w: 3, h: 2, minCols: 3 }, [])).toBe(true);
+  });
+});
+
+describe("watchMoveCandidate", () => {
+  const start = { x: 4, y: 2, w: 4, h: 2 };
+
+  it("shifts by whole cells and clamps to the grid edges", () => {
+    expect(watchMoveCandidate(start, 2, 1)).toEqual({ x: 6, y: 3, w: 4, h: 2 });
+    expect(watchMoveCandidate(start, -10, -10)).toEqual({ x: 0, y: 0, w: 4, h: 2 });
+    expect(watchMoveCandidate(start, 20, 0)).toEqual({ x: 8, y: 2, w: 4, h: 2 });
+  });
+
+  it("keeps minCols through the move", () => {
+    expect(watchMoveCandidate({ ...start, minCols: 3 }, 1, 0).minCols).toBe(3);
+  });
+});
+
+describe("watchResizeCandidate", () => {
+  const start = { x: 4, y: 2, w: 4, h: 2 };
+
+  it("grows and shrinks each edge independently", () => {
+    expect(watchResizeCandidate(start, "e", 2, 0)).toEqual({ x: 4, y: 2, w: 6, h: 2 });
+    expect(watchResizeCandidate(start, "s", 0, 2)).toEqual({ x: 4, y: 2, w: 4, h: 4 });
+    expect(watchResizeCandidate(start, "w", -2, 0)).toEqual({ x: 2, y: 2, w: 6, h: 2 });
+    expect(watchResizeCandidate(start, "n", 0, -2)).toEqual({ x: 4, y: 0, w: 4, h: 4 });
+    expect(watchResizeCandidate(start, "se", 1, 1)).toEqual({ x: 4, y: 2, w: 5, h: 3 });
+    expect(watchResizeCandidate(start, "sw", -1, 1)).toEqual({ x: 3, y: 2, w: 5, h: 3 });
+  });
+
+  it("shrinking west/north moves the origin, never below zero", () => {
+    expect(watchResizeCandidate(start, "w", 2, 0)).toEqual({ x: 6, y: 2, w: 2, h: 2 });
+    expect(watchResizeCandidate(start, "w", -10, 0)).toEqual({ x: 0, y: 2, w: 8, h: 2 });
+    // Northward growth can claim at most the rows above the widget.
+    expect(watchResizeCandidate(start, "n", 0, -10)).toEqual({ x: 4, y: 0, w: 4, h: 4 });
+  });
+
+  it("clamps width at minCols and height at one row", () => {
+    const withMin = { ...start, minCols: 3 };
+    expect(watchResizeCandidate(withMin, "e", -10, 0)).toEqual({
+      x: 4,
+      y: 2,
+      w: 3,
+      h: 2,
+      minCols: 3,
+    });
+    // West edge shrink also stops at minCols, origin parked at x + w - minCols.
+    expect(watchResizeCandidate(withMin, "w", 10, 0)).toEqual({
+      x: 5,
+      y: 2,
+      w: 3,
+      h: 2,
+      minCols: 3,
+    });
+    expect(watchResizeCandidate(start, "s", 0, -10)).toEqual({ x: 4, y: 2, w: 4, h: 1 });
+    expect(watchResizeCandidate(start, "e", -10, 0).w).toBe(1);
+  });
+
+  it("clamps east growth at the board edge and never escapes the grid", () => {
+    expect(watchResizeCandidate(start, "e", 20, 0).w).toBe(8);
+    const resized = watchResizeCandidate({ x: 10, y: 0, w: 2, h: 1 }, "se", 10, 10);
+    expect(resized.x + resized.w).toBeLessThanOrEqual(WATCH_GRID_COLUMNS);
+    expect(resized.h).toBe(11);
+  });
+});
+
+describe("buildWatchWidgetSetLayoutInput", () => {
+  it("carries the page revision alongside the single placement patch", () => {
+    const target = page("p", { revision: 9 });
+    const placement = { x: 2, y: 1, w: 4, h: 2 };
+    expect(buildWatchWidgetSetLayoutInput(target, widgetId("w"), placement)).toEqual({
+      pageId: target.id,
+      expectedRevision: 9,
+      layouts: [{ widgetId: widgetId("w"), placement }],
+    });
+  });
+});
+
+describe("buildWatchWidgetConfigureInput", () => {
+  it("is checked against the widget revision, not the page's", () => {
+    const source = widget("w", "p", { x: 0, y: 0, w: 4, h: 2 }, { revision: 4 });
+    const config = { source: { kind: "threads" as const, binding: projectA } };
+    expect(buildWatchWidgetConfigureInput(source, config)).toEqual({
+      widgetId: widgetId("w"),
+      expectedRevision: 4,
+      config,
+    });
+  });
+});
+
+describe("buildWatchWidgetDuplicateInput", () => {
+  it("copies kind and config, lands at the first free slot at source size", () => {
+    const target = page("p", { revision: 3 });
+    const source = widget(
+      "a",
+      "p",
+      { x: 0, y: 0, w: 7, h: 4 },
+      { config: { source: { kind: "threads", binding: projectA } } },
+    );
+    expect(buildWatchWidgetDuplicateInput(target, [source], source)).toEqual({
+      pageId: target.id,
+      expectedRevision: 3,
+      kind: "active-work",
+      config: { source: { kind: "threads", binding: projectA } },
+      // A 7-wide copy can't share the source's row; it wraps to the row below.
+      placement: { x: 0, y: 4, w: 7, h: 4 },
+    });
+  });
+
+  it("carries pack provenance but never first-party or agent markers", () => {
+    const target = page("p");
+    const packed = widget(
+      "a",
+      "p",
+      { x: 0, y: 0, w: 4, h: 2 },
+      {
+        kind: "agent:src-9",
+        provenance: "pack:pack-7",
+      },
+    );
+    expect(buildWatchWidgetDuplicateInput(target, [], packed).provenance).toBe("pack:pack-7");
+    expect(
+      buildWatchWidgetDuplicateInput(
+        target,
+        [],
+        widget("b", "p", { x: 0, y: 0, w: 4, h: 2 }, { provenance: "agentPublished" }),
+      ).provenance,
+    ).toBeUndefined();
+    expect(
+      buildWatchWidgetDuplicateInput(target, [], widget("c", "p", { x: 0, y: 0, w: 4, h: 2 }))
+        .provenance,
+    ).toBeUndefined();
+  });
+});
+
+describe("buildWatchWidgetMoveToPageInput", () => {
+  it("guards both page revisions and lands at the destination's first free slot", () => {
+    const source = page("s", { revision: 2 });
+    const destination = page("d", { revision: 11 });
+    const moving = widget("m", "s", { x: 0, y: 0, w: 7, h: 4 });
+    const destPlaced = [widget("x", "d", { x: 0, y: 0, w: 12, h: 1 })];
+    expect(buildWatchWidgetMoveToPageInput(moving, source, destination, destPlaced)).toEqual({
+      widgetId: widgetId("m"),
+      sourcePageId: source.id,
+      sourceExpectedRevision: 2,
+      destinationPageId: destination.id,
+      destinationExpectedRevision: 11,
+      placement: { x: 0, y: 1, w: 7, h: 4 },
+    });
   });
 });

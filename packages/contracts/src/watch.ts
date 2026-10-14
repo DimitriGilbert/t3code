@@ -389,7 +389,12 @@ export const WatchConnectorOrigin = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("httpsUrl"),
     url: TrimmedNonEmptyString,
-    /** Explicitly confirmed by the user for loopback/private-range URLs. */
+    /**
+     * Records that a human acknowledged this URL may resolve to a
+     * loopback/private address. The server sets it on a stored origin only
+     * after the prepare step's `allowLocalUrl` acknowledgement — the flag as
+     * supplied on a request is never honoured on its own.
+     */
     allowLocalUrl: Schema.optionalKey(Schema.Boolean),
   }),
 ]);
@@ -411,6 +416,8 @@ export const WatchConnectorInstance = Schema.Struct({
   name: Schema.optionalKey(TrimmedNonEmptyString),
   /** User/agent-written instance config (no secrets — those live in the secret store by key). */
   config: Schema.Record(Schema.String, Schema.Unknown),
+  /** Which declared secret keys have a stored value; the values themselves never leave the server. */
+  configuredSecretKeys: Schema.Array(TrimmedNonEmptyString),
   origin: WatchConnectorOrigin,
   /** SHA-256 of the pack bundle the instance was approved against. */
   contentHash: TrimmedNonEmptyString,
@@ -422,16 +429,43 @@ export const WatchConnectorInstance = Schema.Struct({
 });
 export type WatchConnectorInstance = typeof WatchConnectorInstance.Type;
 
+/**
+ * One approved pack version. Rows accumulate per `schemaVersion`, which is the
+ * approved-manifest history a rollback pins back to.
+ */
+export const WatchConnectorPack = Schema.Struct({
+  packId: WatchConnectorPackId,
+  schemaVersion: PositiveInt,
+  manifest: WatchConnectorPackManifest,
+  origin: WatchConnectorOrigin,
+  contentHash: TrimmedNonEmptyString,
+  approvedAt: IsoDateTime,
+  /** Soft-archived on uninstall: pack code stays on disk, polling stops. */
+  archivedAt: Schema.NullOr(IsoDateTime),
+});
+export type WatchConnectorPack = typeof WatchConnectorPack.Type;
+
 /** A pending install/upgrade a human must confirm; neither leg is agent-completable. */
 export const WatchConnectorInstallRequest = Schema.Struct({
   id: WatchConnectorInstallRequestId,
   kind: Schema.Literals(["install", "upgrade"]),
   status: Schema.Literals(["pending", "confirmed", "cancelled"]),
-  packId: WatchConnectorPackId,
+  /**
+   * Null while a `localUrl` request is unfetched — the pack id is only known
+   * once the human-acked prepare step fetches the manifest.
+   */
+  packId: Schema.NullOr(WatchConnectorPackId),
   origin: WatchConnectorOrigin,
-  contentHash: TrimmedNonEmptyString,
-  /** The manifest as fetched; the confirm token is bound to its hash. */
-  manifest: WatchConnectorPackManifest,
+  /** SHA-256 of the fetched pack bundle; null while a `localUrl` request is unfetched. */
+  contentHash: Schema.NullOr(TrimmedNonEmptyString),
+  /** The manifest as fetched; the confirm token is bound to its hash. Null while a `localUrl` request is unfetched. */
+  manifest: Schema.NullOr(WatchConnectorPackManifest),
+  /**
+   * The recorded https origin resolves to a loopback/link-local/private
+   * address: the request was recorded without a fetch, and only the human
+   * prepare step (with its `allowLocalUrl` acknowledgement) may fetch it.
+   */
+  localUrl: Schema.Boolean,
   /** Present on upgrades: what the user is diffed against. */
   upgrade: Schema.optionalKey(
     Schema.Struct({
@@ -442,6 +476,170 @@ export const WatchConnectorInstallRequest = Schema.Struct({
   createdAt: IsoDateTime,
 });
 export type WatchConnectorInstallRequest = typeof WatchConnectorInstallRequest.Type;
+
+// ── Connector RPC payloads ───────────────────────────────────────────────
+
+/** Why a connector call failed; `cause` stays server-side detail. */
+export const WatchConnectorErrorReason = Schema.Literals([
+  "packNotFound",
+  "instanceNotFound",
+  "requestNotFound",
+  "requestNotPending",
+  "invalidOrigin",
+  "urlBlocked",
+  "fetchFailed",
+  "manifestInvalid",
+  "packIdMismatch",
+  "downgradeRejected",
+  "hashMismatch",
+  "confirmationInvalid",
+  "confirmationExpired",
+  "secretKeyUndeclared",
+  "configInvalid",
+]);
+export type WatchConnectorErrorReason = typeof WatchConnectorErrorReason.Type;
+
+export class WatchConnectorError extends Schema.TaggedError<WatchConnectorError>()(
+  "WatchConnectorError",
+  {
+    message: Schema.String,
+    reason: Schema.optionalKey(WatchConnectorErrorReason),
+    packId: Schema.optionalKey(WatchConnectorPackId),
+    instanceId: Schema.optionalKey(WatchConnectorInstanceId),
+    requestId: Schema.optionalKey(WatchConnectorInstallRequestId),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {}
+
+export const WatchConnectorsListInput = Schema.Struct({
+  includeArchived: Schema.optionalKey(Schema.Boolean),
+});
+export type WatchConnectorsListInput = typeof WatchConnectorsListInput.Type;
+
+/** Instances plus the pending requests a human still has to rule on. */
+export const WatchConnectorsListResult = Schema.Struct({
+  packs: ForwardCompatibleArray(WatchConnectorPack),
+  instances: ForwardCompatibleArray(WatchConnectorInstance),
+  installRequests: ForwardCompatibleArray(WatchConnectorInstallRequest),
+});
+export type WatchConnectorsListResult = typeof WatchConnectorsListResult.Type;
+
+export const WatchConnectorCreateInstanceInput = Schema.Struct({
+  packId: WatchConnectorPackId,
+  name: Schema.optionalKey(TrimmedNonEmptyString),
+  config: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  /**
+   * Secret values by manifest-declared key. Stored in the server secret store
+   * under the instance, never in the instance row, never sent to clients.
+   */
+  secrets: Schema.optionalKey(Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString)),
+});
+export type WatchConnectorCreateInstanceInput = typeof WatchConnectorCreateInstanceInput.Type;
+
+export const WatchConnectorUpdateInstanceInput = Schema.Struct({
+  instanceId: WatchConnectorInstanceId,
+  /** Null clears the instance name. */
+  name: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type WatchConnectorUpdateInstanceInput = typeof WatchConnectorUpdateInstanceInput.Type;
+
+export const WatchConnectorDeleteInstanceInput = Schema.Struct({
+  instanceId: WatchConnectorInstanceId,
+});
+export type WatchConnectorDeleteInstanceInput = typeof WatchConnectorDeleteInstanceInput.Type;
+
+export const WatchConnectorSetInstanceConfigInput = Schema.Struct({
+  instanceId: WatchConnectorInstanceId,
+  config: Schema.Record(Schema.String, Schema.Unknown),
+  secrets: Schema.optionalKey(Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString)),
+  /** Declared keys whose stored secret values are removed. */
+  clearSecretKeys: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+});
+export type WatchConnectorSetInstanceConfigInput = typeof WatchConnectorSetInstanceConfigInput.Type;
+
+export const WatchConnectorInstanceResult = Schema.Struct({
+  instance: WatchConnectorInstance,
+});
+export type WatchConnectorInstanceResult = typeof WatchConnectorInstanceResult.Type;
+
+export const WatchConnectorDeleteInstanceResult = Schema.Struct({
+  id: WatchConnectorInstanceId,
+});
+export type WatchConnectorDeleteInstanceResult = typeof WatchConnectorDeleteInstanceResult.Type;
+
+/**
+ * Requests a pack install: a local-path or public https origin is fetched now
+ * and the pending request records the manifest and pinned content hash. An
+ * https origin resolving to a loopback/private address is recorded unfetched
+ * (`localUrl`) — only the human prepare step may ever fetch it. Nothing runs
+ * until a human confirms.
+ */
+export const WatchConnectorRequestInstallInput = Schema.Struct({
+  origin: WatchConnectorOrigin,
+});
+export type WatchConnectorRequestInstallInput = typeof WatchConnectorRequestInstallInput.Type;
+
+/** Requests an upgrade to a newer manifest for an installed pack. */
+export const WatchConnectorRequestUpgradeInput = Schema.Struct({
+  packId: WatchConnectorPackId,
+  origin: WatchConnectorOrigin,
+  /** When set, the confirmed upgrade re-pins this instance to the new version. */
+  instanceId: Schema.optionalKey(WatchConnectorInstanceId),
+});
+export type WatchConnectorRequestUpgradeInput = typeof WatchConnectorRequestUpgradeInput.Type;
+
+export const WatchConnectorInstallRequestResult = Schema.Struct({
+  request: WatchConnectorInstallRequest,
+});
+export type WatchConnectorInstallRequestResult = typeof WatchConnectorInstallRequestResult.Type;
+
+/**
+ * Minted by the UI only: returns the request with a single-use
+ * `confirmationToken` bound to (requestId, declared manifest hash). This
+ * method is deliberately absent from the MCP toolkit — an agent can never
+ * obtain a token. For a `localUrl` request it also performs the deferred
+ * fetch, gated on the `allowLocalUrl` acknowledgement.
+ */
+export const WatchConnectorPrepareInstallConfirmInput = Schema.Struct({
+  requestId: WatchConnectorInstallRequestId,
+  /**
+   * Required to prepare a `localUrl` request: acknowledges the origin may
+   * resolve to a loopback/private address and permits the deferred fetch.
+   */
+  allowLocalUrl: Schema.optionalKey(Schema.Boolean),
+});
+export type WatchConnectorPrepareInstallConfirmInput =
+  typeof WatchConnectorPrepareInstallConfirmInput.Type;
+
+export const WatchConnectorPrepareInstallConfirmResult = Schema.Struct({
+  request: WatchConnectorInstallRequest,
+  confirmationToken: TrimmedNonEmptyString,
+});
+export type WatchConnectorPrepareInstallConfirmResult =
+  typeof WatchConnectorPrepareInstallConfirmResult.Type;
+
+export const WatchConnectorConfirmInstallInput = Schema.Struct({
+  requestId: WatchConnectorInstallRequestId,
+  confirmationToken: TrimmedNonEmptyString,
+});
+export type WatchConnectorConfirmInstallInput = typeof WatchConnectorConfirmInstallInput.Type;
+
+export const WatchConnectorConfirmUpgradeInput = Schema.Struct({
+  requestId: WatchConnectorInstallRequestId,
+  confirmationToken: TrimmedNonEmptyString,
+});
+export type WatchConnectorConfirmUpgradeInput = typeof WatchConnectorConfirmUpgradeInput.Type;
+
+export const WatchConnectorConfirmResult = Schema.Struct({
+  pack: WatchConnectorPack,
+});
+export type WatchConnectorConfirmResult = typeof WatchConnectorConfirmResult.Type;
+
+export const WatchConnectorCancelInstallRequestInput = Schema.Struct({
+  requestId: WatchConnectorInstallRequestId,
+});
+export type WatchConnectorCancelInstallRequestInput =
+  typeof WatchConnectorCancelInstallRequestInput.Type;
 
 // ── Notifications (contracts only; the service lands in a later phase) ───
 

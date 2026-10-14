@@ -1,0 +1,452 @@
+import type {
+  WatchConnectorInstance,
+  WatchPage,
+  WatchWidget,
+  WatchWidgetErrorState,
+} from "@t3tools/contracts";
+import { ProjectId, WatchConnectorInstanceId } from "@t3tools/contracts";
+
+import {
+  resolveThreadWorkingStartedAt,
+  threadRuntimeIsActive,
+  type EnvironmentProject,
+  type EnvironmentThreadShell,
+} from "./models.ts";
+import {
+  isThreadWorking,
+  sortInboxThreadsByReturn,
+  sortWorkingThreadsBySend,
+} from "./threadInbox.ts";
+import { effectiveSnoozed } from "./threadSettled.ts";
+import { resolveWatchThreadsProjectBinding } from "./watchPages.ts";
+
+/**
+ * Pure derivation for the first-party watch widgets — the shared shell
+ * subscriptions carry every field these helpers read, so widgets never add
+ * wire traffic of their own. Web and mobile render the same lists.
+ */
+
+// ── Settings readers ──────────────────────────────────────────────────
+
+type WidgetSettings = Readonly<Record<string, unknown>> | undefined;
+
+function settingsOf(widget: Pick<WatchWidget, "config">): WidgetSettings {
+  return widget.config.settings;
+}
+
+/** Integer-valued setting within `min`/`max`, falling back on any malformed value. */
+export function watchWidgetSettingNumber(
+  widget: Pick<WatchWidget, "config">,
+  key: string,
+  fallback: number,
+  options: { readonly min?: number; readonly max?: number } = {},
+): number {
+  const raw = settingsOf(widget)?.[key];
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isFinite(value)) return fallback;
+  const clamped = Math.trunc(value);
+  if (options.min !== undefined && clamped < options.min) return fallback;
+  if (options.max !== undefined && clamped > options.max) return fallback;
+  return clamped;
+}
+
+export function watchWidgetSettingString(
+  widget: Pick<WatchWidget, "config">,
+  key: string,
+  fallback: string,
+): string {
+  const raw = settingsOf(widget)?.[key];
+  return typeof raw === "string" && raw.length > 0 ? raw : fallback;
+}
+
+/** One entry per non-empty line — the `stringList` control's stored shape. */
+export function watchWidgetSettingStringList(
+  widget: Pick<WatchWidget, "config">,
+  key: string,
+): ReadonlyArray<string> {
+  const raw = settingsOf(widget)?.[key];
+  if (Array.isArray(raw)) {
+    return raw.filter((entry): entry is string => typeof entry === "string" && entry !== "");
+  }
+  if (typeof raw === "string") {
+    return raw
+      .split("\n")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== "");
+  }
+  return [];
+}
+
+/**
+ * Boolean setting with a descriptor-driven default: `true` inverts only on an
+ * explicit `false`, so a "persist"-cleared key and an absent one agree.
+ */
+export function watchWidgetSettingBoolean(
+  widget: Pick<WatchWidget, "config">,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const raw = settingsOf(widget)?.[key];
+  return typeof raw === "boolean" ? raw : fallback;
+}
+
+// ── Error presentation ────────────────────────────────────────────────
+
+/** The recovery actions a typed error can offer; the host wires each id to a real callback. */
+export type WatchWidgetErrorActionId =
+  | "reconnect"
+  | "update-secret"
+  | "configure"
+  | "repoint"
+  | "view-source"
+  | "remove";
+
+export interface WatchWidgetErrorPresentation {
+  /** The one-line cause the error body renders. */
+  readonly line: string;
+  readonly variant: "default" | "error" | "warning";
+  /** Primary recovery action, when the cause has one the host can perform. */
+  readonly action?: {
+    readonly id: WatchWidgetErrorActionId;
+    readonly label: string;
+    /** Per-cause button variant from the design's severity table. */
+    readonly button: "outline" | "secondary" | "warning-outline";
+  };
+  /** Secondary affordance rendered beside the primary action when present. */
+  readonly secondaryAction?: {
+    readonly id: WatchWidgetErrorActionId;
+    readonly label: string;
+  };
+}
+
+/**
+ * The copy table for `WatchWidgetErrorState` — one line and one primary
+ * recovery per cause, per the watch-screen design's severity table.
+ * Returns `action` only when the cause has an in-widget fix; the caller
+ * suppresses actions it cannot perform (e.g. no connector binding to
+ * reconnect, or a read-only page where the configure form never opens).
+ */
+export function watchWidgetErrorPresentation(
+  error: WatchWidgetErrorState,
+): WatchWidgetErrorPresentation {
+  switch (error.cause) {
+    case "connectorDown":
+      return {
+        line: "Connector unreachable",
+        variant: "warning",
+        action: { id: "reconnect", label: "Reconnect", button: "secondary" },
+        secondaryAction: { id: "configure", label: "Connector settings" },
+      };
+    case "credentialsInvalid":
+      return {
+        line: "Credentials rejected",
+        variant: "error",
+        action: { id: "update-secret", label: "Update secret", button: "warning-outline" },
+      };
+    case "configMismatch":
+      return {
+        line:
+          error.field === undefined
+            ? "Config needs attention"
+            : `Config needs attention — ${error.field}`,
+        variant: "warning",
+        action: { id: "configure", label: "Fix configuration", button: "secondary" },
+      };
+    case "connectorMissing":
+      // Placeholder, not an alarm — the widget's config stays editable.
+      return {
+        line: "Connector pack not installed",
+        variant: "default",
+        action: { id: "configure", label: "Repoint source", button: "outline" },
+      };
+    case "connectorSnapshotTooLarge":
+      return {
+        line: "Data too large to show",
+        variant: "warning",
+        action: { id: "configure", label: "Open connector settings", button: "secondary" },
+      };
+    case "projectMissing":
+      return {
+        line: "Project was removed",
+        variant: "default",
+        action: { id: "repoint", label: "Repoint source", button: "outline" },
+      };
+    case "transpileFailed":
+      return {
+        line: "Widget failed to build",
+        variant: "error",
+        action: { id: "view-source", label: "View source", button: "outline" },
+      };
+  }
+}
+
+// ── Source-resolution errors ──────────────────────────────────────────
+
+/**
+ * The threads binding names a project that no longer exists on this
+ * environment — `projectMissing`, with the shell kept chrome-visible so the
+ * widget stays repointable.
+ */
+export function resolveWatchThreadsProjectError(
+  page: Pick<WatchPage, "scope" | "projectId">,
+  widget: Pick<WatchWidget, "config">,
+  projects: ReadonlyArray<EnvironmentProject>,
+): WatchWidgetErrorState | null {
+  const binding = resolveWatchThreadsProjectBinding(page, widget);
+  // null means "all projects" — unbound bindings can't go stale.
+  if (binding === null) return null;
+  return projects.some((project) => project.id === binding)
+    ? null
+    : { cause: "projectMissing", projectId: ProjectId.make(binding) };
+}
+
+/**
+ * A connector-bound widget's instance health mapped onto the widget error
+ * vocabulary. `archivedAt` or an absent row is `connectorMissing`; a reported
+ * failure is `connectorDown`/`credentialsInvalid` with the last successful
+ * fetch carried as `lastGoodDataAt`.
+ */
+export function resolveWatchConnectorSourceError(
+  widget: Pick<WatchWidget, "config">,
+  instances: ReadonlyArray<WatchConnectorInstance>,
+): WatchWidgetErrorState | null {
+  const source = widget.config.source;
+  if (source?.kind !== "connector" || source.binding === undefined) return null;
+  const instance = instances.find((entry) => entry.id === source.binding);
+  if (instance === undefined || instance.archivedAt !== null) {
+    return {
+      cause: "connectorMissing",
+      instanceId: WatchConnectorInstanceId.make(source.binding),
+    };
+  }
+  return watchConnectorHealthErrorState(instance);
+}
+
+/** Instance health as a widget error state, or null when the instance is fine. */
+export function watchConnectorHealthErrorState(
+  instance: WatchConnectorInstance,
+): WatchWidgetErrorState | null {
+  const health = instance.health;
+  if (health.status === "healthy" || health.status === "unknown") return null;
+  const lastGoodDataAt = health.lastFetchAt === null ? {} : { lastGoodDataAt: health.lastFetchAt };
+  if (health.status === "authExpired") {
+    return { cause: "credentialsInvalid", instanceId: instance.id, ...lastGoodDataAt };
+  }
+  return { cause: "connectorDown", instanceId: instance.id, ...lastGoodDataAt };
+}
+
+// ── Active work ───────────────────────────────────────────────────────
+
+export type WatchActiveWorkKind = "awaiting-input" | "awaiting-approval" | "plan-ready" | "running";
+
+export interface WatchActiveWorkItem {
+  readonly thread: EnvironmentThreadShell;
+  readonly kind: WatchActiveWorkKind;
+  /** When the current activity began, for the elapsed readout. */
+  readonly startedAt: string | null;
+}
+
+function watchActiveWorkKind(thread: EnvironmentThreadShell): WatchActiveWorkKind {
+  if (thread.hasPendingApprovals) return "awaiting-approval";
+  if (thread.hasPendingUserInput) return "awaiting-input";
+  if (
+    thread.interactionMode === "plan" &&
+    thread.hasActionableProposedPlan &&
+    !threadRuntimeIsActive(thread.runtime)
+  ) {
+    return "plan-ready";
+  }
+  return "running";
+}
+
+/**
+ * Threads in flight on the bound projects: running runs plus threads parked
+ * on a user decision (input, approval, plan) — the watch surface shows them
+ * because intervening is the point. Blocked threads lead; both groups keep
+ * the Working-section ordering (most recent user message first).
+ */
+export function watchActiveWorkItems(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  options: { readonly projectId: string | null; readonly maxItems?: number },
+): ReadonlyArray<WatchActiveWorkItem> {
+  const scoped = threads.filter(
+    (thread) =>
+      thread.deletedAt === null &&
+      thread.archivedAt === null &&
+      (options.projectId === null || thread.projectId === options.projectId),
+  );
+  const blocked = scoped.filter(
+    (thread) => thread.hasPendingUserInput || thread.hasPendingApprovals,
+  );
+  const planReady = scoped.filter(
+    (thread) =>
+      !thread.hasPendingUserInput &&
+      !thread.hasPendingApprovals &&
+      watchActiveWorkKind(thread) === "plan-ready",
+  );
+  const working = scoped.filter(
+    (thread) =>
+      !thread.hasPendingUserInput &&
+      !thread.hasPendingApprovals &&
+      watchActiveWorkKind(thread) === "running" &&
+      isThreadWorking(thread),
+  );
+  const ordered = [
+    ...sortInboxThreadsByReturn(blocked),
+    ...sortInboxThreadsByReturn(planReady),
+    ...sortWorkingThreadsBySend(working),
+  ];
+  return ordered.slice(0, options.maxItems ?? 8).map((thread) => ({
+    thread,
+    kind: watchActiveWorkKind(thread),
+    startedAt: resolveThreadWorkingStartedAt(thread),
+  }));
+}
+
+// ── Needs attention ───────────────────────────────────────────────────
+
+export type WatchAttentionReason = "failed" | "approval" | "input" | "plan" | "unread" | "stale";
+
+export interface WatchAttentionItem {
+  readonly thread: EnvironmentThreadShell;
+  /** Every active reason, most severe first — the row badges the first two. */
+  readonly reasons: ReadonlyArray<WatchAttentionReason>;
+}
+
+const THREAD_RUNTIME_FAILED = new Set(["failed", "error"]);
+
+/**
+ * One completed run the user never saw: the thread's latest run finished
+ * after the visited watermark. Mirrors `hasUnseenCompletion` — a thread that
+ * was never opened reads as fresh, not unread.
+ */
+function watchThreadHasUnseenCompletion(
+  thread: EnvironmentThreadShell,
+  lastVisitedAt: string | undefined,
+): boolean {
+  const completedAt =
+    thread.latestRun?.completedAt === null || thread.latestRun?.completedAt === undefined
+      ? null
+      : Date.parse(thread.latestRun.completedAt);
+  if (completedAt === null || Number.isNaN(completedAt)) return false;
+  if (lastVisitedAt === undefined || lastVisitedAt === null) return false;
+  const visitedAt = Date.parse(lastVisitedAt);
+  if (Number.isNaN(visitedAt)) return true;
+  return completedAt > visitedAt;
+}
+
+function watchAttentionReasons(
+  thread: EnvironmentThreadShell,
+  options: {
+    readonly now: string;
+    readonly staleAfterMs: number;
+    readonly lastVisitedAt?: (thread: EnvironmentThreadShell) => string | undefined;
+  },
+): ReadonlyArray<WatchAttentionReason> {
+  const reasons: WatchAttentionReason[] = [];
+  const runtime = thread.runtime;
+  const runtimeFailed = runtime !== null && THREAD_RUNTIME_FAILED.has(runtime.status);
+  // A fresh run outranks the stale failure — a recovered thread isn't failed.
+  if (runtimeFailed || (thread.latestRun?.status === "failed" && !isThreadWorking(thread))) {
+    reasons.push("failed");
+  }
+  if (thread.hasPendingApprovals) reasons.push("approval");
+  if (thread.hasPendingUserInput) reasons.push("input");
+  if (thread.hasActionableProposedPlan) reasons.push("plan");
+  const lastVisitedAt =
+    options.lastVisitedAt === undefined
+      ? (thread.lastVisitedAt ?? undefined)
+      : options.lastVisitedAt(thread);
+  if (watchThreadHasUnseenCompletion(thread, lastVisitedAt)) reasons.push("unread");
+  const updatedAtMs = runtime === null ? NaN : Date.parse(runtime.updatedAt);
+  if (
+    threadRuntimeIsActive(runtime) &&
+    Number.isFinite(updatedAtMs) &&
+    Date.parse(options.now) - updatedAtMs > options.staleAfterMs
+  ) {
+    reasons.push("stale");
+  }
+  return reasons;
+}
+
+/**
+ * The attention list: failed, blocked, unread, and stalled threads on the
+ * bound projects, newest-returned first. Settled threads are out — settling
+ * is the "I handled it" signal — except when the agent is blocked on the
+ * user, which always outranks settle. Snoozed threads with no raised hand
+ * collect under `snoozed` so the widget can show wake times without noise.
+ */
+export function watchAttentionItems(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  options: {
+    readonly projectId: string | null;
+    readonly now: string;
+    readonly staleAfterMs: number;
+    readonly maxItems?: number;
+    readonly lastVisitedAt?: (thread: EnvironmentThreadShell) => string | undefined;
+  },
+): {
+  readonly items: ReadonlyArray<WatchAttentionItem>;
+  readonly snoozed: ReadonlyArray<WatchAttentionItem>;
+} {
+  const items: WatchAttentionItem[] = [];
+  const snoozed: WatchAttentionItem[] = [];
+  for (const thread of threads) {
+    if (thread.deletedAt !== null || thread.archivedAt !== null) continue;
+    if (options.projectId !== null && thread.projectId !== options.projectId) continue;
+    const reasons = watchAttentionReasons(thread, options);
+    if (reasons.length === 0) continue;
+    const blocked = thread.hasPendingApprovals || thread.hasPendingUserInput;
+    // Settled threads only resurface for a genuine block.
+    if (thread.settledOverride === "settled" && !blocked) continue;
+    const item: WatchAttentionItem = { thread, reasons };
+    if (effectiveSnoozed(thread, { now: options.now })) {
+      snoozed.push(item);
+    } else {
+      items.push(item);
+    }
+  }
+  const maxItems = options.maxItems ?? 8;
+  return {
+    items: sortInboxThreadsByReturn(items.map((item) => item.thread))
+      .slice(0, maxItems)
+      .map((thread) => items.find((item) => item.thread === thread)!),
+    snoozed: sortInboxThreadsByReturn(snoozed.map((item) => item.thread)).map((thread) =>
+      snoozed.find((item) => item.thread === thread)!,
+    ),
+  };
+}
+
+// ── Recent activity ───────────────────────────────────────────────────
+
+/**
+ * Threads whose latest run reached a terminal state, newest completion
+ * first. Checkpoint/diff detail for each row derives from the shared thread
+ * projection (`deriveThreadCheckpointSummaries`) in the client.
+ */
+export function watchRecentActivityThreads(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  options: { readonly projectId: string | null; readonly maxItems?: number },
+): ReadonlyArray<EnvironmentThreadShell> {
+  const completedAtMs = (thread: EnvironmentThreadShell): number => {
+    const completedAt = thread.latestRun?.completedAt;
+    const parsed =
+      completedAt === null || completedAt === undefined ? NaN : Date.parse(completedAt);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  return threads
+    .filter(
+      (thread) =>
+        thread.deletedAt === null &&
+        thread.archivedAt === null &&
+        (options.projectId === null || thread.projectId === options.projectId) &&
+        completedAtMs(thread) > 0,
+    )
+    .sort(
+      (a, b) =>
+        completedAtMs(b) - completedAtMs(a) ||
+        a.id.localeCompare(b.id) ||
+        a.environmentId.localeCompare(b.environmentId),
+    )
+    .slice(0, options.maxItems ?? 8);
+}

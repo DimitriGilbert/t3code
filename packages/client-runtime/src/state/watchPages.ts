@@ -343,13 +343,52 @@ export function watchResizeCandidate(
 
 // ── Widget identity ───────────────────────────────────────────────────
 
+export interface WatchWidgetSettingsSelectOption {
+  readonly value: string;
+  readonly label: string;
+}
+
+/**
+ * One generated configure-form row for a first-party widget. Mirrors the
+ * provider-settings descriptor shape (`deriveProviderSettingsFields`) but is
+ * authored per widget kind — these settings live in `config.settings`, which
+ * the server stores opaquely, so validation and defaults are the client's.
+ */
+export interface WatchWidgetSettingsField {
+  readonly key: string;
+  readonly control: "text" | "number" | "textarea" | "stringList" | "select" | "switch";
+  readonly label: string;
+  readonly description?: string;
+  readonly placeholder?: string;
+  /** "omit" drops the key from `settings` when empty/false; "persist" writes it. */
+  readonly clearWhenEmpty?: "omit" | "persist";
+  /** Options for a `select` control; the first entry is the fallback. */
+  readonly options?: ReadonlyArray<WatchWidgetSettingsSelectOption>;
+  /** Number bounds, applied client-side at save time. */
+  readonly min?: number;
+  readonly max?: number;
+  readonly defaultValue?: unknown;
+}
+
 export interface WatchFirstPartyWidgetSpec {
   readonly kind: WatchWidgetKind;
   readonly title: string;
   readonly description: string;
   readonly section: "threads" | "connectors";
   readonly defaultSize: PlacementSize;
+  /** Generated configure-form rows for `config.settings`; empty for binding-only widgets. */
+  readonly settingsFields: ReadonlyArray<WatchWidgetSettingsField>;
 }
+
+/** Shared "rows shown" number descriptor used by the list widgets. */
+const maxItemsField = (label = "Maximum items"): WatchWidgetSettingsField => ({
+  key: "maxItems",
+  control: "number",
+  label,
+  min: 1,
+  max: 20,
+  defaultValue: 8,
+});
 
 /** The first-party registry the add-widget picker lists. */
 export const WATCH_FIRST_PARTY_WIDGETS: ReadonlyArray<WatchFirstPartyWidgetSpec> = [
@@ -359,6 +398,17 @@ export const WATCH_FIRST_PARTY_WIDGETS: ReadonlyArray<WatchFirstPartyWidgetSpec>
     description: "Running threads across this page's projects.",
     section: "threads",
     defaultSize: { w: 7, h: 4 },
+    settingsFields: [
+      maxItemsField(),
+      {
+        key: "showStop",
+        control: "switch",
+        label: "Show stop button",
+        description: "Offer an inline interrupt on running threads.",
+        defaultValue: true,
+        clearWhenEmpty: "persist",
+      },
+    ],
   },
   {
     kind: "needs-attention",
@@ -366,6 +416,26 @@ export const WATCH_FIRST_PARTY_WIDGETS: ReadonlyArray<WatchFirstPartyWidgetSpec>
     description: "Threads waiting on an answer or approval.",
     section: "threads",
     defaultSize: { w: 5, h: 4 },
+    settingsFields: [
+      maxItemsField(),
+      {
+        key: "staleAfterHours",
+        control: "number",
+        label: "Stale after (hours)",
+        description: "Flag working threads with no update for this long.",
+        min: 1,
+        max: 24 * 30,
+        defaultValue: 24,
+      },
+      {
+        key: "showSnoozed",
+        control: "switch",
+        label: "Show snoozed threads",
+        description: "List snoozed threads dimmed after the attention rows.",
+        defaultValue: true,
+        clearWhenEmpty: "persist",
+      },
+    ],
   },
   {
     kind: "task-starter",
@@ -373,6 +443,27 @@ export const WATCH_FIRST_PARTY_WIDGETS: ReadonlyArray<WatchFirstPartyWidgetSpec>
     description: "Start a new thread from this page.",
     section: "threads",
     defaultSize: { w: 4, h: 3 },
+    settingsFields: [
+      {
+        key: "templates",
+        control: "stringList",
+        label: "Prompt templates",
+        description: "One template per line; they render as quick-start chips.",
+        placeholder: "e.g. Review the latest diff for regressions",
+      },
+      {
+        key: "runtimeMode",
+        control: "select",
+        label: "Runtime mode",
+        options: [
+          { value: "full-access", label: "Full access" },
+          { value: "auto-accept-edits", label: "Auto-accept edits" },
+          { value: "auto", label: "Auto" },
+          { value: "approval-required", label: "Approval required" },
+        ],
+        defaultValue: "full-access",
+      },
+    ],
   },
   {
     kind: "recent-activity",
@@ -380,6 +471,17 @@ export const WATCH_FIRST_PARTY_WIDGETS: ReadonlyArray<WatchFirstPartyWidgetSpec>
     description: "Finished turns and checkpoints.",
     section: "threads",
     defaultSize: { w: 8, h: 3 },
+    settingsFields: [
+      maxItemsField("Maximum threads"),
+      {
+        key: "showDiffs",
+        control: "switch",
+        label: "Show diff stats",
+        description: "Load turn checkpoints for file counts and +/- lines.",
+        defaultValue: true,
+        clearWhenEmpty: "persist",
+      },
+    ],
   },
   {
     kind: "connector-status",
@@ -387,6 +489,7 @@ export const WATCH_FIRST_PARTY_WIDGETS: ReadonlyArray<WatchFirstPartyWidgetSpec>
     description: "Connector instances, health, and last fetch.",
     section: "connectors",
     defaultSize: { w: 12, h: 2 },
+    settingsFields: [],
   },
 ];
 
@@ -394,6 +497,21 @@ export function watchFirstPartyWidgetSpec(
   kind: WatchWidgetKind,
 ): WatchFirstPartyWidgetSpec | undefined {
   return WATCH_FIRST_PARTY_WIDGETS.find((spec) => spec.kind === kind);
+}
+
+/**
+ * Whether the in-place configure form would render at least one control: a
+ * bindable `threads`/`connector` source or a declared settings field.
+ * Widgets with neither (e.g. connector-status) suppress the Configure
+ * affordance rather than swapping in an empty card. Non-first-party kinds
+ * have no generated form at all.
+ */
+export function watchWidgetIsConfigurable(widget: Pick<WatchWidget, "kind" | "config">): boolean {
+  const spec = watchFirstPartyWidgetSpec(widget.kind);
+  if (spec === undefined) return false;
+  if (spec.settingsFields.length > 0) return true;
+  const source = widget.config.source;
+  return source?.kind === "threads" || source?.kind === "connector";
 }
 
 /** Header title for a shell: the registry title, a generic agent label, or the kind itself. */
@@ -447,14 +565,22 @@ export function buildWatchWidgetAddInput(
   kind: WatchWidgetKind,
   size?: PlacementSize,
 ): WatchWidgetAddInput {
+  const spec = watchFirstPartyWidgetSpec(kind);
+  // First-party widgets land with the same default source the gallery
+  // templates carry — a `threads` widget reads the page's ambient scope and
+  // stays repointable; connectors-section widgets are `static`.
+  const config =
+    spec === undefined
+      ? undefined
+      : {
+          source: { kind: spec.section === "threads" ? ("threads" as const) : ("static" as const) },
+        };
   return {
     pageId: page.id,
     expectedRevision: page.revision,
     kind,
-    placement: firstFreeWatchPlacement(
-      pageWidgets,
-      size ?? watchFirstPartyWidgetSpec(kind)?.defaultSize ?? { w: 4, h: 3 },
-    ),
+    ...(config === undefined ? {} : { config }),
+    placement: firstFreeWatchPlacement(pageWidgets, size ?? spec?.defaultSize ?? { w: 4, h: 3 }),
   };
 }
 

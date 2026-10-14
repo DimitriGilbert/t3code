@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { useRouter } from "@tanstack/react-router";
 import {
   type AtomCommandResult,
   squashAtomCommandFailure,
@@ -16,13 +17,17 @@ import {
   watchPageAmbientProjectId,
   watchPageWidgets,
   watchPlacementFits,
+  watchWidgetIsConfigurable,
   WATCH_GRID_EDIT_MIN_WIDTH_PX,
   type WatchFirstPartyWidgetSpec,
 } from "@t3tools/client-runtime/state/watch-pages";
 import type {
   EnvironmentId,
   ProjectId,
+  ScopedThreadRef,
+  WatchConnectorInstance,
   WatchGalleryTemplate,
+  WatchPage,
   WatchPageId,
   WatchWidget,
   WatchWidgetConfig,
@@ -56,17 +61,26 @@ import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { useEscapeToGoBack } from "~/hooks/useNavigateBack";
 import { readLocalApi } from "~/localApi";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
-import { useActiveEnvironmentId, useProjects } from "~/state/entities";
+import {
+  useActiveEnvironmentId,
+  useProjects,
+  useServerConfigs,
+  useThreadShells,
+} from "~/state/entities";
+import { useEnvironmentSettings } from "~/hooks/useSettings";
+import { buildThreadRouteParams } from "~/threadRoutes";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { watchEnvironment } from "~/state/watch";
 
 import { WatchBoard } from "./WatchBoard";
 import { WatchGalleryDialog } from "./WatchGalleryDialog";
 import { WatchPageTabs } from "./WatchPageTabs";
-import { WatchWidgetConfigureDialog } from "./WatchWidgetConfigureDialog";
+import { WatchWidgetBody } from "./WatchWidgetBody";
 import { WatchWidgetPickerDialog } from "./WatchWidgetPickerDialog";
+import { WatchConnectorSecretDialog } from "./widgets/WatchConnectorSecretDialog";
 import { onWatchUiAction, type WatchUiAction } from "./watchUiBus";
 
 const NEVER_NEEDS_RELOAD_ATOM = Atom.make(false).pipe(
@@ -74,6 +88,190 @@ const NEVER_NEEDS_RELOAD_ATOM = Atom.make(false).pipe(
 );
 
 type WidgetMenuAction = "configure" | "duplicate" | "move-to" | `move-to:${number}` | "remove";
+
+/**
+ * The live side of the board: subscribes to thread shells, server config,
+ * and connector state, then hands `WatchWidgetBody` everything it needs per
+ * widget. Kept separate so none of the subscriptions attach while Watch is
+ * gated off or no environment is selected.
+ */
+function WatchLiveBoard(props: {
+  readonly environmentId: EnvironmentId;
+  readonly page: WatchPage;
+  readonly widgets: ReadonlyArray<WatchWidget>;
+  readonly editing: boolean;
+  readonly configuringWidgetId: WatchWidgetId | null;
+  /** Absent on the archived page's read-only path — configure stays shut. */
+  readonly onConfigureOpen?: (widget: WatchWidget) => void;
+  readonly onConfigureClose: () => void;
+  readonly onConfigureSubmit: (widget: WatchWidget, config: WatchWidgetConfig) => void;
+  readonly onAddWidget?: () => void;
+  readonly onCommitLayout?: (widgetId: WatchWidgetId, placement: WatchWidgetPlacement) => void;
+  readonly onWidgetMenu?: (widget: WatchWidget, position: { x: number; y: number }) => void;
+}) {
+  const router = useRouter();
+  const settings = useEnvironmentSettings(props.environmentId);
+  const serverConfig = useServerConfigs().get(props.environmentId);
+  const snoozeSupported = serverConfig?.environment.capabilities?.threadSnooze === true;
+  const providers = serverConfig?.providers ?? [];
+  const threads = useThreadShells().filter(
+    (thread) => thread.environmentId === props.environmentId,
+  );
+  const projects = useProjects().filter(
+    (project) => project.environmentId === props.environmentId && project.isScratch !== true,
+  );
+
+  // Connector state feeds connector-source widgets, the connector-status
+  // kind, and the binding picker inside the configure form.
+  const needsConnectors =
+    props.configuringWidgetId !== null ||
+    props.widgets.some(
+      (widget) => widget.kind === "connector-status" || widget.config.source?.kind === "connector",
+    );
+  const connectorsQuery = useEnvironmentQuery(
+    needsConnectors
+      ? watchEnvironment.connectorsLive({ environmentId: props.environmentId, input: {} })
+      : null,
+  );
+  const connectorInstances = (connectorsQuery.data?.instances ?? []).filter(
+    (instance) => instance.archivedAt === null,
+  );
+  const connectorPacks = connectorsQuery.data?.packs ?? [];
+  // Ready once data exists (stale data still counts — it resolved). When
+  // nothing consumes connector state the query never ran; connector-free
+  // widgets must not wait on a skipped fetch.
+  const connectorsReady = !needsConnectors || connectorsQuery.data !== null;
+  const connectorsError = needsConnectors ? connectorsQuery.error : null;
+
+  // Same guarded command the connector-status widget rows use.
+  const setConnectorInstanceConfig = useOrchestrationCommand(
+    watchEnvironment.setConnectorInstanceConfig,
+    { reportFailure: false },
+  );
+  const [secretInstanceId, setSecretInstanceId] = useState<string | null>(null);
+  const secretInstance =
+    connectorInstances.find((instance) => instance.id === secretInstanceId) ?? null;
+  const secretPack =
+    secretInstance === null
+      ? undefined
+      : connectorPacks.find((pack) => pack.packId === secretInstance.packId);
+
+  const openThread = useCallback(
+    (ref: ScopedThreadRef) => {
+      void router.navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(ref),
+      });
+    },
+    [router],
+  );
+
+  const reportConnectorConfigFailure = useCallback(
+    (result: AtomCommandResult<unknown, unknown>, title: string) => {
+      if (AsyncResult.isSuccess(result)) return;
+      const failure = squashAtomCommandFailure(result);
+      toastManager.add({
+        type: "error",
+        title,
+        description: failure instanceof Error ? failure.message : "The connector request failed.",
+      });
+    },
+    [],
+  );
+
+  const reconnectConnector = useCallback(
+    (instance: WatchConnectorInstance) => {
+      // Resending the stored config bumps updatedAt; the poller restarts and
+      // forces a fresh fetch — the wire-level "reconnect".
+      void setConnectorInstanceConfig({
+        environmentId: props.environmentId,
+        input: { instanceId: instance.id, config: instance.config },
+      }).then((result) => reportConnectorConfigFailure(result, "Could not reconnect"));
+    },
+    [props.environmentId, setConnectorInstanceConfig, reportConnectorConfigFailure],
+  );
+
+  const renderBody = useCallback(
+    (widget: WatchWidget) => (
+      <WatchWidgetBody
+        environmentId={props.environmentId}
+        page={props.page}
+        widget={widget}
+        projects={projects}
+        threads={threads}
+        providers={providers}
+        snoozeSupported={snoozeSupported}
+        timestampFormat={settings.timestampFormat}
+        connectorInstances={connectorInstances}
+        connectorPacks={connectorPacks}
+        connectorsReady={connectorsReady}
+        connectorsError={connectorsError}
+        configuring={props.configuringWidgetId === widget.id}
+        onConfigureSubmit={props.onConfigureSubmit}
+        onConfigureOpen={props.onConfigureOpen}
+        onConfigureClose={props.onConfigureClose}
+        onReconnectConnector={reconnectConnector}
+        onUpdateConnectorSecret={(instance) => setSecretInstanceId(instance.id)}
+        onOpenThread={openThread}
+      />
+    ),
+    [
+      props.environmentId,
+      props.page,
+      props.configuringWidgetId,
+      props.onConfigureSubmit,
+      props.onConfigureOpen,
+      props.onConfigureClose,
+      projects,
+      threads,
+      providers,
+      snoozeSupported,
+      settings.timestampFormat,
+      connectorInstances,
+      connectorPacks,
+      connectorsReady,
+      connectorsError,
+      reconnectConnector,
+      openThread,
+      setSecretInstanceId,
+    ],
+  );
+
+  return (
+    <>
+      <WatchBoard
+        widgets={props.widgets}
+        editing={props.editing}
+        configuringWidgetId={props.configuringWidgetId}
+        {...(props.onAddWidget === undefined ? {} : { onAddWidget: props.onAddWidget })}
+        {...(props.onCommitLayout === undefined ? {} : { onCommitLayout: props.onCommitLayout })}
+        {...(props.onConfigureOpen === undefined
+          ? {}
+          : { onConfigureWidget: props.onConfigureOpen })}
+        {...(props.onWidgetMenu === undefined ? {} : { onWidgetMenu: props.onWidgetMenu })}
+        renderBody={renderBody}
+      />
+      {secretInstance !== null ? (
+        <WatchConnectorSecretDialog
+          instance={secretInstance}
+          secretKeys={secretPack?.manifest.secretKeys ?? []}
+          onSubmit={(secrets) => {
+            setSecretInstanceId(null);
+            void setConnectorInstanceConfig({
+              environmentId: props.environmentId,
+              input: {
+                instanceId: secretInstance.id,
+                config: secretInstance.config,
+                secrets,
+              },
+            }).then((result) => reportConnectorConfigFailure(result, "Could not update secrets"));
+          }}
+          onClose={() => setSecretInstanceId(null)}
+        />
+      ) : null}
+    </>
+  );
+}
 
 function WatchBoardSkeleton() {
   return (
@@ -135,11 +333,6 @@ export function WatchScreen() {
     null;
   const selectedWidgets =
     selectedPage === null ? [] : watchPageWidgets(pagesQuery.data?.widgets ?? [], selectedPage.id);
-  const configuringWidget =
-    configuringWidgetId === null
-      ? null
-      : ((pagesQuery.data?.widgets ?? []).find((widget) => widget.id === configuringWidgetId) ??
-        null);
   const needsReload = useAtomValue(
     environmentId !== null && selectedPage !== null
       ? watchEnvironment.needsReload({ environmentId, pageId: selectedPage.id })
@@ -163,17 +356,6 @@ export function WatchScreen() {
       : null,
   );
   const templates = galleryQuery.data?.templates ?? [];
-
-  // Connector instances feed the configure dialog's binding picker; the
-  // subscription only attaches while a connector-source widget is open.
-  const connectorsQuery = useEnvironmentQuery(
-    environmentId !== null && configuringWidget?.config.source?.kind === "connector"
-      ? watchEnvironment.connectorsLive({ environmentId, input: {} })
-      : null,
-  );
-  const connectorInstances = (connectorsQuery.data?.instances ?? []).filter(
-    (instance) => instance.archivedAt === null,
-  );
 
   const createPage = useAtomCommand(watchEnvironment.createPage);
   const renamePage = useAtomCommand(watchEnvironment.renamePage);
@@ -299,9 +481,15 @@ export function WatchScreen() {
       const page = selectedPage;
       if (api === undefined || page === null || environmentId === null) return;
       const destinations = active.filter((entry) => entry.id !== page.id);
+      // Configure leads the menu only when the generated form has something
+      // to edit — a zero-field widget offers nothing to configure.
+      const configureItems: ReadonlyArray<{ id: WidgetMenuAction; label: string; icon: string }> =
+        watchWidgetIsConfigurable(widget)
+          ? [{ id: "configure", label: "Configure", icon: "settings" }]
+          : [];
       const action = await api.contextMenu.show<WidgetMenuAction>(
         [
-          { id: "configure", label: "Configure", icon: "settings" },
+          ...configureItems,
           { id: "duplicate", label: "Duplicate", icon: "copy" },
           {
             id: "move-to",
@@ -384,6 +572,8 @@ export function WatchScreen() {
       // flag would otherwise land on whatever page happened to be selected.
       setSelectedPageId(target.id);
       setEditingPageId((current) => (current === target.id ? null : target.id));
+      // An open configure form belongs to the edit session that opened it.
+      setConfiguringWidgetId(null);
     },
     [allPages, canEditLayout, selectedPage],
   );
@@ -415,7 +605,14 @@ export function WatchScreen() {
 
   useEffect(() => onWatchUiAction(handleUiAction), [handleUiAction]);
 
-  useEscapeToGoBack(editing ? () => setEditingPageId(null) : undefined);
+  useEscapeToGoBack(
+    editing
+      ? () => {
+          setEditingPageId(null);
+          setConfiguringWidgetId(null);
+        }
+      : undefined,
+  );
 
   if (!watchSupported) {
     return (
@@ -457,7 +654,10 @@ export function WatchScreen() {
               projects={projects}
               pagesMenuOpen={pagesMenuOpen}
               onPagesMenuOpenChange={setPagesMenuOpen}
-              onSelectPage={(pageId) => setSelectedPageId(pageId)}
+              onSelectPage={(pageId) => {
+                setSelectedPageId(pageId);
+                setConfiguringWidgetId(null);
+              }}
               onCreatePage={handleCreatePage}
               onRenameCommit={handleRenameCommit}
               onRenameCancel={() => setRenamingPageId(null)}
@@ -611,7 +811,19 @@ export function WatchScreen() {
                     </Button>
                   </AlertAction>
                 </Alert>
-                <WatchBoard widgets={selectedWidgets} editing={false} />
+                {environmentId === null ? (
+                  <WatchBoard widgets={selectedWidgets} editing={false} />
+                ) : (
+                  <WatchLiveBoard
+                    environmentId={environmentId}
+                    page={selectedPage}
+                    widgets={selectedWidgets}
+                    editing={false}
+                    configuringWidgetId={null}
+                    onConfigureClose={() => setConfiguringWidgetId(null)}
+                    onConfigureSubmit={handleConfigureSave}
+                  />
+                )}
               </div>
             ) : selectedPage === null ? null : selectedWidgets.length === 0 ? (
               <Empty size="default" className="flex-1">
@@ -630,13 +842,18 @@ export function WatchScreen() {
                   ) : null}
                 </EmptyContent>
               </Empty>
-            ) : (
-              <WatchBoard
+            ) : environmentId === null ? null : (
+              <WatchLiveBoard
+                environmentId={environmentId}
+                page={selectedPage}
                 widgets={selectedWidgets}
                 editing={editing}
+                configuringWidgetId={configuringWidgetId}
+                onConfigureOpen={(widget) => setConfiguringWidgetId(widget.id)}
+                onConfigureClose={() => setConfiguringWidgetId(null)}
+                onConfigureSubmit={handleConfigureSave}
                 onAddWidget={() => setPickerOpen(true)}
                 onCommitLayout={handleCommitLayout}
-                onConfigureWidget={(widget) => setConfiguringWidgetId(widget.id)}
                 onWidgetMenu={(widget, position) => void handleWidgetMenu(widget, position)}
               />
             )}
@@ -654,19 +871,6 @@ export function WatchScreen() {
           onOpenChange={setPickerOpen}
           onPick={handlePickWidget}
         />
-        {configuringWidget !== null ? (
-          <WatchWidgetConfigureDialog
-            key={configuringWidget.id}
-            widget={configuringWidget}
-            open
-            onOpenChange={(open) => {
-              if (!open) setConfiguringWidgetId(null);
-            }}
-            projects={projects}
-            connectorInstances={connectorInstances}
-            onSave={(config) => handleConfigureSave(configuringWidget, config)}
-          />
-        ) : null}
       </div>
     </SidebarInset>
   );

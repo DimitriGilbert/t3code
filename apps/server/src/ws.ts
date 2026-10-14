@@ -122,6 +122,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as WatchPageService from "./watch/WatchPageService.ts";
+import * as UserNotificationService from "./notifications/UserNotificationService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -574,6 +575,9 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchWidgetsSetLayout,
   WS_METHODS.watchWidgetsSetMobileProjection,
   WS_METHODS.watchWidgetsMoveToPage,
+  WS_METHODS.watchNotificationsSubscribe,
+  WS_METHODS.watchNotificationsHistory,
+  WS_METHODS.watchNotificationsSetPrefs,
 ] as const;
 
 const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(...WS_WATCH_METHOD_TAGS);
@@ -599,6 +603,7 @@ const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
 const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
   Effect.gen(function* () {
     const watchPages = yield* WatchPageService.WatchPageService;
+    const userNotifications = yield* UserNotificationService.UserNotificationService;
     return ServerWsWatchRpcGroup.of({
       [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
       [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
@@ -646,6 +651,9 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
         Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
           Effect.andThen(watchPages.moveToPage(input)),
         ),
+      [WS_METHODS.watchNotificationsSubscribe]: (_input) => userNotifications.subscribe(),
+      [WS_METHODS.watchNotificationsHistory]: (input) => userNotifications.history(input),
+      [WS_METHODS.watchNotificationsSetPrefs]: (input) => userNotifications.setPrefs(input),
     });
   }),
 );

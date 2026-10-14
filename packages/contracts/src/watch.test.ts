@@ -5,6 +5,8 @@ import { UnknownUnionMember } from "./baseSchemas.ts";
 import {
   WatchNotificationEvent,
   WatchNotificationPrefs,
+  WatchNotificationStreamItem,
+  WatchNotificationsHistoryResult,
   WatchPage,
   WatchPageRevisionConflictError,
   WatchWidget,
@@ -23,6 +25,8 @@ const decodeRevisionConflict = Schema.decodeUnknownSync(WatchPageRevisionConflic
 const decodeNotificationEvent = Schema.decodeUnknownSync(WatchNotificationEvent);
 const decodeNotificationPrefs = Schema.decodeUnknownSync(WatchNotificationPrefs);
 const encodeNotificationPrefs = Schema.encodeSync(WatchNotificationPrefs);
+const decodeNotificationStreamItem = Schema.decodeUnknownSync(WatchNotificationStreamItem);
+const decodeNotificationHistoryResult = Schema.decodeUnknownSync(WatchNotificationsHistoryResult);
 const decodeWidgetErrorState = Schema.decodeUnknownSync(WatchWidgetErrorState);
 
 const pageFixture = {
@@ -156,6 +160,48 @@ describe("WatchNotificationPrefs", () => {
     });
     expect(decoded.mutedEventTypes).toEqual(["widget.threshold"]);
     expect(encodeNotificationPrefs(decoded).snoozedUntil).toBe(NOW);
+  });
+});
+
+describe("WatchNotificationStreamItem", () => {
+  it("decodes prefs and notification items", () => {
+    const prefs = decodeNotificationStreamItem({
+      type: "prefs",
+      prefs: { mutedEventTypes: [], mutedPageIds: [], snoozedUntil: null },
+    });
+    expect(prefs.type).toBe("prefs");
+    const notification = decodeNotificationStreamItem({
+      type: "notification",
+      notification: {
+        type: "thread.awaitingInput",
+        notificationId: "watch-notification:3",
+        createdAt: NOW,
+        threadId: "thread:1",
+        projectId: "project:1",
+      },
+    });
+    expect(notification.type).toBe("notification");
+  });
+});
+
+describe("WatchNotificationsHistoryResult", () => {
+  it("decodes recorded entries newest-first", () => {
+    const decoded = decodeNotificationHistoryResult({
+      entries: [
+        {
+          notification: {
+            type: "thread.failed",
+            notificationId: "watch-notification:4",
+            createdAt: NOW,
+            threadId: "thread:1",
+            projectId: "project:1",
+          },
+          recordedAt: NOW,
+        },
+      ],
+    });
+    expect(decoded.entries).toHaveLength(1);
+    expect(decoded.entries[0]?.recordedAt).toBe(NOW);
   });
 });
 

@@ -432,7 +432,7 @@ render:function(component){
 if(root===null){root=document.getElementById("root");}
 if(root===null){return;}
 var node=typeof component==="function"?component():component;
-root.replaceChildren(node===null||node===undefined?[]:[node]);
+root.replaceChildren.apply(root,node===null||node===undefined?[]:[node]);
 },
 subscribe:function(name,onData,onError){
 if(dataHandlers[name]){dataHandlers[name].push(onData);}
@@ -482,7 +482,7 @@ if(index>=0){contextListeners.splice(index,1);}
  * script-src lists alongside the artifact hash. Verified against the prelude
  * text by test — a prelude edit without a hash bump breaks every widget.
  */
-export const WATCH_APP_PRELUDE_SCRIPT_HASH = "YzneTOG5R4kZXO5N/Vw3LXx5uE/c/spQYKCrn+/GvDs=";
+export const WATCH_APP_PRELUDE_SCRIPT_HASH = "CdagwFeT2zrnJ9at5dJL8lYKhbHhY/ebVKkG++FDvdg=";
 
 const SCRIPT_HASH_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 

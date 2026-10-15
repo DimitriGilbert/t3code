@@ -6,12 +6,14 @@ import {
   ProjectId,
   ProviderInstanceId,
   WatchLayoutCollisionError,
+  WatchPageId,
   WatchPageRevisionConflictError,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
@@ -68,6 +70,37 @@ const layerProjectDelete = RuntimeLayer.layerProjectService.pipe(
 const createPage = (name: string) =>
   Effect.flatMap(WatchPageService.WatchPageService, (watch) => watch.create({ name }));
 
+/** Direct row insert for tests that need order keys the API never mints. */
+const insertPageRow = (row: {
+  readonly pageId: string;
+  readonly orderKey: string;
+  readonly archivedAt?: string;
+}) =>
+  Effect.flatMap(
+    SqlClient.SqlClient,
+    (sql) =>
+      sql`
+      INSERT INTO watch_pages ${sql.insert({
+        page_id: row.pageId,
+        name: row.pageId,
+        scope: "global",
+        project_id: null,
+        order_key: row.orderKey,
+        revision: 1,
+        mobile_revision: 1,
+        archived_at: row.archivedAt ?? null,
+        created_at: "2025-01-01T00:00:00.000Z",
+        updated_at: "2025-01-01T00:00:00.000Z",
+      })}
+    `,
+  );
+
+const allOrderKeys = Effect.flatMap(SqlClient.SqlClient, (sql) =>
+  sql<{ order_key: string }>`SELECT order_key FROM watch_pages`.pipe(
+    Effect.map((rows) => rows.map((row) => row.order_key)),
+  ),
+);
+
 it.effect("creates, lists, renames, reorders, duplicates, and deletes pages", () =>
   Effect.gen(function* () {
     const watch = yield* WatchPageService.WatchPageService;
@@ -98,6 +131,102 @@ it.effect("creates, lists, renames, reorders, duplicates, and deletes pages", ()
     assert.equal((yield* watch.list({})).pages.length, 2);
     const missing = yield* watch.delete({ pageId: first.id }).pipe(Effect.flip);
     assert.equal(missing._tag, "WatchPageError");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("concurrent creates mint distinct order keys", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    const [first, second] = yield* Effect.all(
+      [watch.create({ name: "One" }), watch.create({ name: "Two" })],
+      { concurrency: 2 },
+    );
+    // Without the transaction around the max-key read, both creates can read
+    // the same lastKey and mint the identical successor key.
+    assert.notEqual(first.page.orderKey, second.page.orderKey);
+    const keys = yield* allOrderKeys;
+    assert.equal(new Set(keys).size, keys.length);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("mints reorder and duplicate keys past keys archived rows still hold", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    // Live "m"/"n"/"o" sit around archived rows holding "mk" and the
+    // midpoint of "m" and "n" ("mn") — minting between the live neighbors
+    // without reserving those keys collides with the parked rows.
+    yield* insertPageRow({ pageId: "watch-page:left", orderKey: "m" });
+    yield* insertPageRow({ pageId: "watch-page:right", orderKey: "n" });
+    yield* insertPageRow({ pageId: "watch-page:tail", orderKey: "o" });
+    yield* insertPageRow({
+      pageId: "watch-page:archived-mid",
+      orderKey: "mn",
+      archivedAt: "2025-01-02T00:00:00.000Z",
+    });
+    yield* insertPageRow({
+      pageId: "watch-page:archived-lo",
+      orderKey: "mk",
+      archivedAt: "2025-01-02T00:00:00.000Z",
+    });
+
+    const leftId = WatchPageId.make("watch-page:left");
+    const rightId = WatchPageId.make("watch-page:right");
+    const tailId = WatchPageId.make("watch-page:tail");
+
+    // Moving "o" between live "m" and "n" mints midpoint "mn" — reserved —
+    // so the write must step past the parked key instead of reusing it.
+    yield* watch.reorder({ pageId: tailId, beforePageId: rightId });
+    const tailNow = (yield* watch.list({})).pages.find((page) => page.id === tailId)!;
+    assert.notEqual(tailNow.orderKey, "mn");
+    assert.isTrue(tailNow.orderKey > "m" && tailNow.orderKey < "n");
+
+    // Duplicating "m" mints midpoint("m", tail) = "mk" — also reserved.
+    const copy = yield* watch.duplicate({ pageId: leftId });
+    assert.notEqual(copy.page.orderKey, "mk");
+    assert.notEqual(copy.page.orderKey, "mn");
+    assert.isTrue(copy.page.orderKey > "m" && copy.page.orderKey < tailNow.orderKey);
+
+    const keys = yield* allOrderKeys;
+    assert.equal(new Set(keys).size, keys.length);
+
+    // Restoring the parked page slots it back between live neighbors on its
+    // own key — nothing collides.
+    yield* watch.restore({ pageId: WatchPageId.make("watch-page:archived-mid") });
+    const live = yield* watch.list({});
+    assert.deepEqual(
+      live.pages.map((page) => page.id),
+      [leftId, WatchPageId.make("watch-page:archived-mid"), copy.page.id, tailId, rightId],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("respread order keys skip keys archived rows still hold", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    // "za" is corrupt — a trailing "a" is not a valid key — so minting next
+    // to it falls back to a full respread of the live rows.
+    yield* insertPageRow({ pageId: "watch-page:mover", orderKey: "m" });
+    yield* insertPageRow({ pageId: "watch-page:corrupt", orderKey: "za" });
+    // "ir" is the first key a two-row spread generates; an archived row
+    // holds it, so the respread must generate extras and skip reserved keys.
+    yield* insertPageRow({
+      pageId: "watch-page:archived",
+      orderKey: "ir",
+      archivedAt: "2025-01-02T00:00:00.000Z",
+    });
+
+    const moverId = WatchPageId.make("watch-page:mover");
+    const corruptId = WatchPageId.make("watch-page:corrupt");
+    yield* watch.reorder({ pageId: moverId, beforePageId: corruptId });
+
+    const live = yield* watch.list({});
+    assert.deepEqual(
+      live.pages.map((page) => page.id),
+      [moverId, corruptId],
+    );
+    assert.isFalse(live.pages.some((page) => page.orderKey === "ir"));
+    const keys = yield* allOrderKeys;
+    assert.equal(new Set(keys).size, keys.length);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -263,6 +392,38 @@ it.effect("moveToPage checks and bumps both page revisions", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("moveToPage onto the same page is a no-op", () =>
+  Effect.gen(function* () {
+    const watch = yield* WatchPageService.WatchPageService;
+    const { page } = yield* createPage("Page");
+    const { widget } = yield* watch.addWidget({
+      pageId: page.id,
+      expectedRevision: page.revision,
+      kind: "active-work",
+      placement: { x: 0, y: 0, w: 6, h: 4 },
+    });
+    const before = (yield* watch.list({})).pages[0]!;
+
+    // Without the early return the two revision bumps both hit this one row
+    // and the second reports a phantom conflict on a revision that never
+    // committed.
+    const moved = yield* watch.moveToPage({
+      widgetId: widget.id,
+      sourcePageId: page.id,
+      sourceExpectedRevision: before.revision,
+      destinationPageId: page.id,
+      destinationExpectedRevision: before.revision,
+      placement: { x: 6, y: 0, w: 6, h: 4 },
+    });
+    assert.equal(moved.widget.pageId, page.id);
+    assert.equal(moved.widget.placement.x, 0);
+
+    const after = (yield* watch.list({})).pages[0]!;
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.mobileRevision, before.mobileRevision);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("widget config edits check the widget revision, not the page's", () =>
   Effect.gen(function* () {
     const watch = yield* WatchPageService.WatchPageService;
@@ -294,15 +455,64 @@ it.effect("widget config edits check the widget revision, not the page's", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("pack provenance sticks to agent: kinds and is rejected elsewhere", () =>
+it.effect("pack provenance requires a live pack-registered widget source", () =>
   Effect.gen(function* () {
     const watch = yield* WatchPageService.WatchPageService;
+    const sql = yield* SqlClient.SqlClient;
     const { page } = yield* createPage("Page");
+
+    // Registration the install flow writes: one live pack version and the
+    // `agent:<sourceId>` kind its bundled widget transpiled into.
+    yield* sql`
+      INSERT INTO watch_connector_packs ${sql.insert({
+        pack_id: "pack.test",
+        schema_version: 1,
+        manifest_json: "{}",
+        manifest_hash: "manifest-hash",
+        origin_json: "{}",
+        content_hash: "content-hash",
+        approved_at: "2025-01-01T00:00:00.000Z",
+        archived_at: null,
+      })}
+    `;
+    yield* sql`
+      INSERT INTO watch_pack_widget_sources ${sql.insert({
+        pack_id: "pack.test",
+        schema_version: 1,
+        name: "pack-chart",
+        file: "widgets/chart.tsx",
+        source_id: "watch-widget-source:abc",
+        created_at: "2025-01-01T00:00:00.000Z",
+      })}
+    `;
+    // A soft-archived pack keeps its registrations on record but mounts nothing.
+    yield* sql`
+      INSERT INTO watch_connector_packs ${sql.insert({
+        pack_id: "pack.gone",
+        schema_version: 1,
+        manifest_json: "{}",
+        manifest_hash: "manifest-hash",
+        origin_json: "{}",
+        content_hash: "content-hash",
+        approved_at: "2025-01-01T00:00:00.000Z",
+        archived_at: "2025-01-02T00:00:00.000Z",
+      })}
+    `;
+    yield* sql`
+      INSERT INTO watch_pack_widget_sources ${sql.insert({
+        pack_id: "pack.gone",
+        schema_version: 1,
+        name: "gone-chart",
+        file: "widgets/gone.tsx",
+        source_id: "watch-widget-source:gone",
+        created_at: "2025-01-01T00:00:00.000Z",
+      })}
+    `;
 
     const { widget } = yield* watch.addWidget({
       pageId: page.id,
       expectedRevision: page.revision,
-      kind: "agent:pack-chart",
+      kind: "agent:watch-widget-source:abc",
       provenance: "pack:pack.test",
       placement: { x: 0, y: 0, w: 6, h: 4 },
     });
@@ -317,13 +527,51 @@ it.effect("pack provenance sticks to agent: kinds and is rejected elsewhere", ()
     assert.equal(agentDefault.widget.provenance, "agentPublished");
 
     const pageNow = (yield* watch.list({})).pages[0]!;
+
+    // A forged marker — the pack never registered this source id — is refused.
+    const forgedSource = yield* watch
+      .addWidget({
+        pageId: page.id,
+        expectedRevision: pageNow.revision,
+        kind: "agent:watch-widget-source:forged",
+        provenance: "pack:pack.test",
+        placement: { x: 0, y: 4, w: 4, h: 4 },
+      })
+      .pipe(Effect.flip);
+    assert.equal(forgedSource._tag, "WatchPageError");
+
+    // So is a registered source claimed under a pack that did not ship it.
+    const forgedPack = yield* watch
+      .addWidget({
+        pageId: page.id,
+        expectedRevision: pageNow.revision,
+        kind: "agent:watch-widget-source:abc",
+        provenance: "pack:pack.other",
+        placement: { x: 4, y: 4, w: 4, h: 4 },
+      })
+      .pipe(Effect.flip);
+    assert.equal(forgedPack._tag, "WatchPageError");
+
+    // An uninstalled pack's sources cannot be freshly mounted either.
+    const archivedPack = yield* watch
+      .addWidget({
+        pageId: page.id,
+        expectedRevision: pageNow.revision,
+        kind: "agent:watch-widget-source:gone",
+        provenance: "pack:pack.gone",
+        placement: { x: 8, y: 4, w: 4, h: 4 },
+      })
+      .pipe(Effect.flip);
+    assert.equal(archivedPack._tag, "WatchPageError");
+
+    // pack: provenance on a first-party kind is still rejected outright.
     const rejected = yield* watch
       .addWidget({
         pageId: page.id,
         expectedRevision: pageNow.revision,
         kind: "active-work",
         provenance: "pack:pack.test",
-        placement: { x: 0, y: 4, w: 4, h: 4 },
+        placement: { x: 0, y: 8, w: 4, h: 4 },
       })
       .pipe(Effect.flip);
     assert.equal(rejected._tag, "WatchPageError");
@@ -384,6 +632,13 @@ it.effect("archives project-scoped pages and keeps them out of the default list"
       scope: "project",
       projectId,
     });
+    const { widget } = yield* watch.addWidget({
+      pageId: page.id,
+      expectedRevision: page.revision,
+      kind: "active-work",
+      config: { source: { kind: "threads" } },
+      placement: { x: 0, y: 0, w: 6, h: 4 },
+    });
     yield* watch.archiveForProject(projectId);
 
     const active = yield* watch.list({});
@@ -402,6 +657,21 @@ it.effect("archives project-scoped pages and keeps them out of the default list"
       })
       .pipe(Effect.flip);
     assert.equal(write._tag, "WatchPageError");
+
+    // Config writes are gated the same way — a queued write cannot land on a
+    // parked page and resurrect with it on restore.
+    const configWrite = yield* watch
+      .configureWidget({
+        widgetId: widget.id,
+        expectedRevision: widget.revision,
+        config: { source: { kind: "static" } },
+      })
+      .pipe(Effect.flip);
+    assert.equal(configWrite._tag, "WatchPageError");
+    const restoredWidget = (yield* watch.list({ includeArchived: true })).widgets.find(
+      (entry) => entry.id === widget.id,
+    );
+    assert.equal(restoredWidget?.config.source?.kind, "threads");
 
     // Archiving is idempotent and scoped to the project.
     yield* watch.archiveForProject(projectId);
@@ -424,6 +694,17 @@ it.effect("restores an archived page with a revision bump", () =>
     const restored = yield* watch.restore({ pageId: page.id });
     assert.isNull(restored.page.archivedAt);
     assert.isTrue(restored.page.revision > page.revision);
+    // Both revisions bump: a mobile projection writer holding the
+    // pre-archive revision invalidates the same way a stale layout write does.
+    assert.isTrue(restored.page.mobileRevision > page.mobileRevision);
+    const staleMobile = yield* watch
+      .setMobileProjection({
+        pageId: page.id,
+        expectedMobileRevision: page.mobileRevision,
+        widgets: [],
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(staleMobile, WatchPageRevisionConflictError);
     // Scope and binding survive the archive round-trip untouched.
     assert.equal(restored.page.scope, "project");
     assert.equal(restored.page.projectId, projectId);

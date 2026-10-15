@@ -25,9 +25,10 @@ export const WatchPageScope = Schema.Literals(["global", "project"]);
 export type WatchPageScope = typeof WatchPageScope.Type;
 
 /**
- * A user-composed watch page. `revision` guards page-level writes (layout,
- * membership, rename/reorder); `mobileRevision` guards only the mobile
- * projection so a phone reorder can never collide with a desktop layout write.
+ * A user-composed watch page. `revision` guards layout and membership writes;
+ * rename/reorder take no expected revision and are last-writer-wins (rename
+ * still bumps `revision`). `mobileRevision` guards only the mobile projection
+ * so a phone reorder can never collide with a desktop layout write.
  */
 export const WatchPage = Schema.Struct({
   id: WatchPageId,
@@ -457,10 +458,11 @@ export const WatchConnectorOrigin = Schema.Union([
     kind: Schema.Literal("httpsUrl"),
     url: TrimmedNonEmptyString,
     /**
-     * Records that a human acknowledged this URL may resolve to a
-     * loopback/private address. The server sets it on a stored origin only
-     * after the prepare step's `allowLocalUrl` acknowledgement — the flag as
-     * supplied on a request is never honoured on its own.
+     * Records that the caller acknowledged this URL may resolve to a
+     * loopback/private address. The flag is caller-asserted — the server
+     * stores it only after the prepare step's `allowLocalUrl`
+     * acknowledgement, and the human review at confirm is what makes the
+     * assertion meaningful.
      */
     allowLocalUrl: Schema.optionalKey(Schema.Boolean),
   }),
@@ -539,8 +541,9 @@ export const WatchConnectorInstallRequest = Schema.Struct({
   manifest: Schema.NullOr(WatchConnectorPackManifest),
   /**
    * The recorded https origin resolves to a loopback/link-local/private
-   * address: the request was recorded without a fetch, and only the human
-   * prepare step (with its `allowLocalUrl` acknowledgement) may fetch it.
+   * address: the request was recorded without a fetch, and only the prepare
+   * step (with its caller-asserted `allowLocalUrl` acknowledgement) may
+   * fetch it.
    */
   localUrl: Schema.Boolean,
   /** Present on upgrades: what the user is diffed against. */
@@ -580,6 +583,8 @@ export const WatchConnectorErrorReason = Schema.Literals([
   "packCodeInvalid",
   /** A rollback target that was never human-approved (or no longer installed). */
   "versionNotApproved",
+  /** The (pack, version) pin already exists with different bytes — pins are immutable; bump schemaVersion. */
+  "versionAlreadyApproved",
   /** A rollback naming the version the instance already pins — a no-op, not a rollback. */
   "sameVersionRollback",
   /** Purge refused because the pack still has live (non-archived) rows — uninstall first. */
@@ -590,6 +595,9 @@ export type WatchConnectorErrorReason = typeof WatchConnectorErrorReason.Type;
 /**
  * A widget-declared threshold checked server-side against each new connector
  * snapshot; a false→true crossing emits a `widget.threshold` notification.
+ * Rules live in the widget row's stored `config.settings.thresholds` — they
+ * are widget config, never subscription input, so no client or agent RPC can
+ * raise an alert the widget's owner never configured.
  */
 export const WatchConnectorThresholdRule = Schema.Struct({
   /** Dotted path into the snapshot data (e.g. `"runs.0.status"`). */
@@ -609,10 +617,13 @@ export const WatchConnectorSubscribeInput = Schema.Struct({
    * clamped up to the instance's configured floor.
    */
   refreshPolicy: Schema.optionalKey(WatchWidgetRefreshPolicy),
-  /** Widget this subscription serves; needed to attribute threshold alerts. */
+  /**
+   * Widget this subscription serves; needed to attribute threshold alerts.
+   * The named widget row must exist and bind this instance — the evaluated
+   * rules are that row's stored `config.settings.thresholds`, never wire
+   * input.
+   */
   widgetId: Schema.optionalKey(WatchWidgetId),
-  /** Threshold rules evaluated against each new snapshot for this widget. */
-  thresholds: Schema.optionalKey(Schema.Array(WatchConnectorThresholdRule)),
 });
 export type WatchConnectorSubscribeInput = typeof WatchConnectorSubscribeInput.Type;
 
@@ -742,11 +753,14 @@ export const WatchConnectorInstallRequestResult = Schema.Struct({
 export type WatchConnectorInstallRequestResult = typeof WatchConnectorInstallRequestResult.Type;
 
 /**
- * Minted by the UI only: returns the request with a single-use
- * `confirmationToken` bound to (requestId, declared manifest hash). This
- * method is deliberately absent from the MCP toolkit — an agent can never
- * obtain a token. For a `localUrl` request it also performs the deferred
- * fetch, gated on the `allowLocalUrl` acknowledgement.
+ * Returns the request with a single-use `confirmationToken` bound to
+ * (requestId, declared manifest hash). Minting needs only operate scope —
+ * any operate-scope session can call it; the enforced boundary is
+ * `environment:maintain` on the confirm calls plus this method's absence
+ * from the MCP toolkit, so an agent can open a request but never rule on
+ * it. For a `localUrl` request it also performs the deferred fetch, gated
+ * on the `allowLocalUrl` acknowledgement — a caller-asserted flag: the
+ * confirm step's human review is the gate that makes it honest.
  */
 export const WatchConnectorPrepareInstallConfirmInput = Schema.Struct({
   requestId: WatchConnectorInstallRequestId,
@@ -819,9 +833,10 @@ export const WatchConnectorUninstallResult = Schema.Struct({
 export type WatchConnectorUninstallResult = typeof WatchConnectorUninstallResult.Type;
 
 /**
- * Minted only for a UI client: describes what purging a fully-archived pack
- * destroys and returns a single-use token bound to that exact descriptor.
- * Not in the MCP toolkit — an agent can never obtain the token.
+ * Describes what purging a fully-archived pack destroys and returns a
+ * single-use token bound to that exact descriptor. Minting needs only
+ * operate scope — the purge itself is `environment:maintain` and
+ * client-guarded, and neither leg is in the MCP toolkit.
  */
 export const WatchConnectorPreparePurgeInput = Schema.Struct({
   packId: WatchConnectorPackId,
@@ -981,18 +996,24 @@ export class WatchNotificationError extends Schema.TaggedError<WatchNotification
 
 /**
  * One item on the notification subscription: the client's current prefs first
- * (and again after every `setPrefs`), then each notification the server emits.
+ * (and again after every `setPrefs`), then each notification the server
+ * emits. Forward-compatible — an envelope kind a newer server adds decodes
+ * as {@link UnknownUnionMember}, which consumers skip rather than letting
+ * one item kill the subscription.
  */
-export const WatchNotificationStreamItem = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("prefs"),
-    prefs: WatchNotificationPrefs,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("notification"),
-    notification: WatchNotificationEvent,
-  }),
-]);
+export const WatchNotificationStreamItem = ForwardCompatibleUnion(
+  [
+    Schema.Struct({
+      type: Schema.Literal("prefs"),
+      prefs: WatchNotificationPrefs,
+    }),
+    Schema.Struct({
+      type: Schema.Literal("notification"),
+      notification: WatchNotificationEvent,
+    }),
+  ],
+  "type",
+);
 export type WatchNotificationStreamItem = typeof WatchNotificationStreamItem.Type;
 
 export const WatchNotificationsHistoryInput = Schema.Struct({
@@ -1108,55 +1129,71 @@ const watchWidgetErrorFields = {
   lastGoodDataAt: Schema.optionalKey(IsoDateTime),
 };
 
-/** Typed widget-shell error: one-line cause plus a primary recovery action per cause. */
-export const WatchWidgetErrorState = Schema.Union([
-  Schema.Struct({
-    cause: Schema.Literal("connectorDown"),
-    instanceId: Schema.optionalKey(WatchConnectorInstanceId),
-    ...watchWidgetErrorFields,
-  }),
-  Schema.Struct({
-    cause: Schema.Literal("credentialsInvalid"),
-    instanceId: Schema.optionalKey(WatchConnectorInstanceId),
-    ...watchWidgetErrorFields,
-  }),
-  Schema.Struct({
-    cause: Schema.Literal("configMismatch"),
-    /** The config field that failed validation, when known. */
-    field: Schema.optionalKey(TrimmedNonEmptyString),
-    ...watchWidgetErrorFields,
-  }),
-  Schema.Struct({
-    cause: Schema.Literal("connectorMissing"),
-    instanceId: Schema.optionalKey(WatchConnectorInstanceId),
-    ...watchWidgetErrorFields,
-  }),
-  Schema.Struct({
-    cause: Schema.Literal("connectorSnapshotTooLarge"),
-    instanceId: Schema.optionalKey(WatchConnectorInstanceId),
-    ...watchWidgetErrorFields,
-  }),
-  Schema.Struct({
-    cause: Schema.Literal("projectMissing"),
-    projectId: Schema.optionalKey(ProjectId),
-    ...watchWidgetErrorFields,
-  }),
-  Schema.Struct({
-    cause: Schema.Literal("transpileFailed"),
-    ...watchWidgetErrorFields,
-  }),
-]);
+/**
+ * Typed widget-shell error: one-line cause plus a primary recovery action
+ * per cause. Forward-compatible — a cause a newer server adds decodes as
+ * {@link UnknownUnionMember}, which clients render as a generic error rather
+ * than letting one item kill the whole connector stream.
+ */
+export const WatchWidgetErrorState = ForwardCompatibleUnion(
+  [
+    Schema.Struct({
+      cause: Schema.Literal("connectorDown"),
+      instanceId: Schema.optionalKey(WatchConnectorInstanceId),
+      ...watchWidgetErrorFields,
+    }),
+    Schema.Struct({
+      cause: Schema.Literal("credentialsInvalid"),
+      instanceId: Schema.optionalKey(WatchConnectorInstanceId),
+      ...watchWidgetErrorFields,
+    }),
+    Schema.Struct({
+      cause: Schema.Literal("configMismatch"),
+      /** The config field that failed validation, when known. */
+      field: Schema.optionalKey(TrimmedNonEmptyString),
+      ...watchWidgetErrorFields,
+    }),
+    Schema.Struct({
+      cause: Schema.Literal("connectorMissing"),
+      instanceId: Schema.optionalKey(WatchConnectorInstanceId),
+      ...watchWidgetErrorFields,
+    }),
+    Schema.Struct({
+      cause: Schema.Literal("connectorSnapshotTooLarge"),
+      instanceId: Schema.optionalKey(WatchConnectorInstanceId),
+      ...watchWidgetErrorFields,
+    }),
+    Schema.Struct({
+      cause: Schema.Literal("projectMissing"),
+      projectId: Schema.optionalKey(ProjectId),
+      ...watchWidgetErrorFields,
+    }),
+    Schema.Struct({
+      cause: Schema.Literal("transpileFailed"),
+      ...watchWidgetErrorFields,
+    }),
+  ],
+  "cause",
+);
 export type WatchWidgetErrorState = typeof WatchWidgetErrorState.Type;
 
-/** The connector subscription stream: shared cached snapshots, or a typed widget-facing error. */
-export const WatchConnectorStreamItem = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("snapshot"),
-    snapshot: WatchConnectorSnapshot,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("error"),
-    error: WatchWidgetErrorState,
-  }),
-]);
+/**
+ * The connector subscription stream: shared cached snapshots, or a typed
+ * widget-facing error. Forward-compatible — a stream item kind a newer
+ * server adds decodes as {@link UnknownUnionMember}, which feeds skip rather
+ * than letting one item kill the subscription.
+ */
+export const WatchConnectorStreamItem = ForwardCompatibleUnion(
+  [
+    Schema.Struct({
+      type: Schema.Literal("snapshot"),
+      snapshot: WatchConnectorSnapshot,
+    }),
+    Schema.Struct({
+      type: Schema.Literal("error"),
+      error: WatchWidgetErrorState,
+    }),
+  ],
+  "type",
+);
 export type WatchConnectorStreamItem = typeof WatchConnectorStreamItem.Type;

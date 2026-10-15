@@ -104,7 +104,10 @@ export class ConnectorService extends Context.Service<
     /**
      * Replaces instance config (validated against the pinned manifest's auth
      * schema) and writes declared secret values into the secret store by key.
-     * Secret values never reach the instance row or a client.
+     * Secret values never reach the instance row or a client: config entries
+     * keyed by a declared secret name are rejected, migrated config is
+     * scrubbed of secret material before persist, and re-pins prune stored
+     * keys the new manifest no longer declares.
      */
     readonly setInstanceConfig: (
       input: WatchConnectorSetInstanceConfigInput,
@@ -118,13 +121,16 @@ export class ConnectorService extends Context.Service<
       instanceId: WatchConnectorInstanceId,
     ) => Effect.Effect<ConnectorRuntimeInfo, WatchConnectorError>;
     /**
-     * Server-side only: the poller's health write. Updates `health_json` in
-     * place — `updated_at` is untouched so subscribers diffing instance rows
-     * see health as health, not a config change.
+     * Server-side only: health writes from the poller, rollback, and
+     * confirm. `patch` is a delta merged onto the stored row inside a
+     * transaction, so one writer's stale read never clobbers fields another
+     * writer touched (`lastRollback` stays sticky because poller writes
+     * never name it). `updated_at` is untouched so subscribers diffing
+     * instance rows see health as health, not a config change.
      */
     readonly recordHealth: (
       instanceId: WatchConnectorInstanceId,
-      health: WatchConnectorHealth,
+      patch: Partial<WatchConnectorHealth>,
     ) => Effect.Effect<void, WatchConnectorError>;
     readonly requestInstall: (
       input: WatchConnectorRequestInstallInput,
@@ -271,22 +277,25 @@ const decodeInstance = Schema.decodeUnknownEffect(WatchConnectorInstance);
 const decodeRequest = Schema.decodeUnknownEffect(WatchConnectorInstallRequest);
 const isConnectorError = Schema.is(WatchConnectorError);
 
+const decodeUnknownJson = Schema.decodeEffect(UnknownJson);
 const parseJsonField = (text: string) =>
-  Schema.decodeEffect(UnknownJson)(text).pipe(
+  decodeUnknownJson(text).pipe(
     Effect.mapError((cause) =>
       connectorError("fetchFailed", "Stored connector row JSON failed to parse.", { cause }),
     ),
   );
 const decodeWidgetSource = Schema.decodeUnknownEffect(WatchPackWidgetSource);
 
+const decodeManifestJson = Schema.decodeEffect(ManifestJson);
+const decodeOriginJsonField = Schema.decodeEffect(OriginJson);
 const decodeManifestFromJson = (text: string) =>
-  Schema.decodeEffect(ManifestJson)(text).pipe(
+  decodeManifestJson(text).pipe(
     Effect.mapError((cause) =>
       connectorError("manifestInvalid", "Stored pack manifest failed to decode.", { cause }),
     ),
   );
 const decodeOriginFromJson = (text: string) =>
-  Schema.decodeEffect(OriginJson)(text).pipe(
+  decodeOriginJsonField(text).pipe(
     Effect.mapError((cause) =>
       connectorError("fetchFailed", "Could not decode a stored connector origin.", { cause }),
     ),
@@ -392,6 +401,16 @@ const defaultHealth = {
   consecutiveFailures: 0,
 } satisfies WatchConnectorHealth;
 
+/**
+ * Pending install requests are durable rows any agent can mint — and each
+ * mint may trigger an outbound fetch — so both the environment-wide and
+ * per-pack totals are capped. Deferred (`pack_id IS NULL`) requests only
+ * count toward the environment total; their pack is unknowable until
+ * prepare resolves the manifest.
+ */
+const MAX_PENDING_REQUESTS = 50;
+const MAX_PENDING_REQUESTS_PER_PACK = 10;
+
 /** What the poller loads per run: instance, pinned manifest, resolved secrets. */
 export interface ConnectorRuntimeInfo {
   readonly instance: WatchConnectorInstance;
@@ -460,6 +479,94 @@ const undeclaredSecretKey = (
     }
   }
   return null;
+};
+
+/**
+ * A config entry keyed by a declared secret name would land its value in
+ * `config_json` — client-visible — so the write is refused. This inverts the
+ * `undeclaredSecretKey` check: secret *values* must travel through the
+ * `secrets` input, never through config.
+ */
+const secretKeyInConfig = (
+  manifest: WatchConnectorPackManifest,
+  config: Readonly<Record<string, unknown>>,
+): WatchConnectorError | null => {
+  const declared = new Set(manifest.secretKeys);
+  for (const key of Object.keys(config)) {
+    if (declared.has(key)) {
+      return connectorError(
+        "configInvalid",
+        `Connector config field "${key}" is a declared secret key; set it via secrets, not config.`,
+        { field: key },
+      );
+    }
+  }
+  return null;
+};
+
+/**
+ * Keys that may be cleared: declared by the pinned manifest or still
+ * configured on the instance. The configured half keeps stale keys revocable
+ * — a key dropped from a newer manifest stays clearable until the re-pin
+ * prune (or this clear) removes it.
+ */
+const unrevocableSecretKey = (
+  manifest: WatchConnectorPackManifest,
+  instance: WatchConnectorInstance,
+  keys: Iterable<string>,
+): WatchConnectorError | null => {
+  const clearable = new Set([...manifest.secretKeys, ...instance.configuredSecretKeys]);
+  for (const key of keys) {
+    if (!clearable.has(key)) {
+      return connectorError(
+        "secretKeyUndeclared",
+        `Secret key "${key}" is not declared by the pack manifest or configured on the instance.`,
+      );
+    }
+  }
+  return null;
+};
+
+/**
+ * Belt-and-suspenders for pack-produced config: a `migrateConfig` return
+ * value is arbitrary pack output, so before it is persisted into
+ * `config_json` — and thereby broadcast to every client — drop entries keyed
+ * by a declared secret name and entries whose string value equals a resolved
+ * secret value. Shallow by design: the auth schema decides whether the
+ * surviving shape is valid.
+ */
+const scrubSecretsFromConfig = (
+  manifest: WatchConnectorPackManifest,
+  config: Record<string, unknown>,
+  resolvedSecrets: Readonly<Record<string, string>>,
+): Record<string, unknown> => {
+  const declared = new Set(manifest.secretKeys);
+  const secretValues = new Set(Object.values(resolvedSecrets));
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (declared.has(key)) continue;
+    if (typeof value === "string" && secretValues.has(value)) continue;
+    clean[key] = value;
+  }
+  return clean;
+};
+
+/**
+ * Splits configured keys into those the target manifest still declares (kept)
+ * and those it dropped (pruned). Re-pins apply this so a stale value cannot
+ * silently reactivate when a later manifest re-declares the key.
+ */
+const partitionSecretKeys = (
+  manifest: WatchConnectorPackManifest,
+  configuredKeys: ReadonlyArray<string>,
+) => {
+  const declared = new Set(manifest.secretKeys);
+  const kept: Array<string> = [];
+  const dropped: Array<string> = [];
+  for (const key of configuredKeys) {
+    (declared.has(key) ? kept : dropped).push(key);
+  }
+  return { kept: kept.sort(), dropped };
 };
 
 export const layer = Layer.effect(
@@ -716,6 +823,8 @@ export const layer = Layer.effect(
         const config = input.config ?? {};
         const configError = validateConfigAgainstManifest(manifest, config);
         if (configError !== null) return yield* configError;
+        const secretFieldError = secretKeyInConfig(manifest, config);
+        if (secretFieldError !== null) return yield* secretFieldError;
         const secretsInput = input.secrets ?? {};
         const secretError = undeclaredSecretKey(manifest, Object.keys(secretsInput));
         if (secretError !== null) return yield* secretError;
@@ -820,11 +929,15 @@ export const layer = Layer.effect(
         const manifest = yield* decodeManifestFromJson(packRow.manifest_json);
         const configError = validateConfigAgainstManifest(manifest, input.config);
         if (configError !== null) return yield* configError;
+        const secretFieldError = secretKeyInConfig(manifest, input.config);
+        if (secretFieldError !== null) return yield* secretFieldError;
         const secretsInput = input.secrets ?? {};
         const clearKeys = input.clearSecretKeys ?? [];
+        // New values must stay declared; clears may also target keys that are
+        // still configured even though the pinned manifest dropped them.
         const secretError =
           undeclaredSecretKey(manifest, Object.keys(secretsInput)) ??
-          undeclaredSecretKey(manifest, clearKeys);
+          unrevocableSecretKey(manifest, instance, clearKeys);
         if (secretError !== null) return yield* secretError;
 
         yield* writeSecrets(input.instanceId, secretsInput);
@@ -908,10 +1021,20 @@ export const layer = Layer.effect(
       }).pipe(Effect.mapError(toConnectorError("Could not load connector runtime.")));
 
     /**
+     * `lastFetchAt` ticks on every poll run, so per-tick notify would
+     * re-push the full list to every subscriber on every poll. But the
+     * widget renders it as the instance's liveness label — a frozen
+     * timestamp is a lie. Compromise: re-push when `lastFetchAt` crosses a
+     * coarse bucket boundary, bounding staleness without the churn.
+     */
+    const LAST_FETCH_NOTIFY_BUCKET_MS = 15 * 60 * 1000;
+    const lastFetchBucket = (value: string | null) =>
+      value === null ? null : Math.floor(Date.parse(value) / LAST_FETCH_NOTIFY_BUCKET_MS);
+
+    /**
      * Whether the stored health state differs from `next` in a way worth
-     * broadcasting. `lastFetchAt` ticks on every poll run, so it is excluded
-     * — notifying on it would re-push the full list to every subscriber on
-     * every tick of every instance.
+     * broadcasting: any real field delta, or `lastFetchAt` crossing a
+     * bucket boundary.
      */
     const healthChanged = (storedJson: string, next: WatchConnectorHealth) => {
       const previous = decodeHealthJsonOption(storedJson);
@@ -920,45 +1043,83 @@ export const layer = Layer.effect(
         previous.value.status !== next.status ||
         previous.value.lastError !== next.lastError ||
         previous.value.consecutiveFailures !== next.consecutiveFailures ||
+        lastFetchBucket(previous.value.lastFetchAt) !== lastFetchBucket(next.lastFetchAt) ||
         JSON.stringify(previous.value.lastRollback ?? null) !==
           JSON.stringify(next.lastRollback ?? null)
       );
     };
 
-    const recordHealth: ConnectorService["Service"]["recordHealth"] = (instanceId, health) =>
+    const recordHealth: ConnectorService["Service"]["recordHealth"] = (instanceId, patch) =>
       Effect.gen(function* () {
-        // The poller is the only writer of `health_json`, so the read-then-
-        // write here needs no transaction.
-        const stored = yield* sql<{ health_json: string }>`
-          SELECT health_json
-          FROM watch_connector_instances
-          WHERE instance_id = ${instanceId} AND archived_at IS NULL
-        `;
-        const row = stored[0];
-        if (row === undefined) {
-          return yield* connectorError(
-            "instanceNotFound",
-            "Connector instance not found or archived.",
-            { instanceId },
-          );
-        }
-        // `lastRollback` is sticky: a poller health write carries none, so it
-        // inherits the stored record instead of erasing the audit trail.
-        const previous = decodeHealthJsonOption(row.health_json);
-        const merged: WatchConnectorHealth =
-          Option.isSome(previous) &&
-          previous.value.lastRollback !== undefined &&
-          health.lastRollback === undefined
-            ? { ...health, lastRollback: previous.value.lastRollback }
-            : health;
-        const changed = healthChanged(row.health_json, merged);
-        yield* sql`
-          UPDATE watch_connector_instances
-          SET health_json = ${encodeHealthJson(merged)}
-          WHERE instance_id = ${instanceId} AND archived_at IS NULL
-        `;
+        // The poller, rollback, and confirm all write `health_json` — the
+        // merge runs inside a transaction so the delta lands on the row's
+        // current health, not on a snapshot the caller read earlier.
+        const changed = yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const stored = yield* sql<{ health_json: string }>`
+              SELECT health_json
+              FROM watch_connector_instances
+              WHERE instance_id = ${instanceId} AND archived_at IS NULL
+            `;
+            const row = stored[0];
+            if (row === undefined) {
+              return yield* connectorError(
+                "instanceNotFound",
+                "Connector instance not found or archived.",
+                { instanceId },
+              );
+            }
+            const previous = decodeHealthJsonOption(row.health_json);
+            const base: WatchConnectorHealth = Option.isSome(previous)
+              ? previous.value
+              : defaultHealth;
+            const lastRollback = patch.lastRollback ?? base.lastRollback;
+            const merged: WatchConnectorHealth = {
+              status: patch.status ?? base.status,
+              lastError: patch.lastError === undefined ? base.lastError : patch.lastError,
+              lastFetchAt: patch.lastFetchAt === undefined ? base.lastFetchAt : patch.lastFetchAt,
+              consecutiveFailures: patch.consecutiveFailures ?? base.consecutiveFailures,
+              ...(lastRollback === undefined ? {} : { lastRollback }),
+            };
+            yield* sql`
+              UPDATE watch_connector_instances
+              SET health_json = ${encodeHealthJson(merged)}
+              WHERE instance_id = ${instanceId} AND archived_at IS NULL
+            `;
+            return healthChanged(row.health_json, merged);
+          }),
+        );
         if (changed) yield* notifyChanged;
       }).pipe(Effect.mapError(toConnectorError("Could not record connector health.")));
+
+    /** Refuse a new request when the pending budget is already spent. */
+    const checkPendingRequestBudget = (packId: WatchConnectorPackId | null) =>
+      Effect.gen(function* () {
+        const totals = yield* sql<{ readonly n: number }>`
+          SELECT COUNT(*) AS n
+          FROM watch_connector_install_requests
+          WHERE status = 'pending'
+        `;
+        if ((totals[0]?.n ?? 0) >= MAX_PENDING_REQUESTS) {
+          return yield* connectorError(
+            "watchLimitExceeded",
+            `Too many pending connector install requests (cap ${MAX_PENDING_REQUESTS}).`,
+          );
+        }
+        if (packId === null) return;
+        const perPack = yield* sql<{ readonly n: number }>`
+          SELECT COUNT(*) AS n
+          FROM watch_connector_install_requests
+          WHERE status = 'pending' AND pack_id = ${packId}
+        `;
+        if ((perPack[0]?.n ?? 0) >= MAX_PENDING_REQUESTS_PER_PACK) {
+          return yield* connectorError(
+            "watchLimitExceeded",
+            `Too many pending install requests for ${packId} (cap ${MAX_PENDING_REQUESTS_PER_PACK}).`,
+            { packId },
+          );
+        }
+      });
 
     const insertRequest = (request: {
       readonly id: WatchConnectorInstallRequestId;
@@ -1035,9 +1196,12 @@ export const layer = Layer.effect(
 
     /**
      * Runs the target pack's `migrateConfig(from, to, ctx)` when it ships
-     * one — server-side, in the same vm realm rules as poll runs, with
-     * `ctx.config` holding the instance's current config. Returns:
-     * - `migrated` — validated against the target manifest, written on re-pin;
+     * one — server-side under the same pack boundary as poll runs, with
+     * `ctx.config` holding the instance's current config. Pack code gets no
+     * secrets here: migration transforms config, it never reads credentials.
+     * Returns:
+     * - `migrated` — scrubbed of secret material, validated against the
+     *   target manifest, written on re-pin;
      * - `failed` — the instance keeps its config and flags `configMismatch`;
      * - `absent` — no migrator shipped; poll-time validation decides.
      */
@@ -1049,10 +1213,11 @@ export const layer = Layer.effect(
       const mod = yield* PackModule.evalConnectorModule(bundle.files);
       const migrate = mod.migrateConfig;
       if (migrate === undefined) return { kind: "absent" as const };
+      // Resolved host-side only — the values feed the output scrub, never
+      // the pack's context.
       const resolvedSecrets = yield* resolveSecrets(instance, bundle.manifest);
       const ctx: PackModule.ConnectorModuleContext = {
         config: instance.config,
-        secrets: PackModule.makeSecretsAccessor(bundle.manifest.secretKeys, resolvedSecrets),
         failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
       };
       const migrated = yield* PackModule.invokePackFunction(() =>
@@ -1074,14 +1239,18 @@ export const layer = Layer.effect(
           detail: "Pack migrateConfig did not return a config object.",
         };
       }
-      const invalid = validateConfigAgainstManifest(
+      // Pack output is arbitrary: anything resembling a secret — by declared
+      // key or by resolved value — is stripped before the config persists.
+      const scrubbed = scrubSecretsFromConfig(
         bundle.manifest,
         next as Record<string, unknown>,
+        resolvedSecrets,
       );
+      const invalid = validateConfigAgainstManifest(bundle.manifest, scrubbed);
       if (invalid !== null) {
         return { kind: "failed" as const, detail: invalid.message };
       }
-      return { kind: "migrated" as const, config: next as Record<string, unknown> };
+      return { kind: "migrated" as const, config: scrubbed };
     });
 
     const requestInstall: ConnectorService["Service"]["requestInstall"] = (input) =>
@@ -1091,8 +1260,12 @@ export const layer = Layer.effect(
         // unfetched (`localUrl`), and the fetch waits for the human-acked
         // prepare step. An agent can never trigger a private-range fetch.
         const origin = stripLocalUrlAck(input.origin);
+        // Environment cap runs before the fetch: request spam must not
+        // amplify into outbound fetches.
+        yield* checkPendingRequestBudget(null);
         const deferred = yield* isDeferredLocalOrigin(origin);
         const bundle = deferred ? null : yield* fetchPackBundle(origin);
+        yield* checkPendingRequestBudget(bundle?.manifest.id ?? null);
         const id = yield* newRequestId;
         yield* insertRequest({
           id,
@@ -1139,6 +1312,7 @@ export const layer = Layer.effect(
         }
         // Same deferral as installs: a private-resolving https URL is
         // recorded unfetched; the manifest checks below then run at prepare.
+        yield* checkPendingRequestBudget(input.packId);
         const origin = stripLocalUrlAck(input.origin);
         const deferred = yield* isDeferredLocalOrigin(origin);
         const bundle = deferred ? null : yield* fetchPackBundle(origin);
@@ -1243,15 +1417,29 @@ export const layer = Layer.effect(
           }
           const manifestJson = encodeManifestJson(bundle.manifest);
           const originJson = encodeOriginJson(ackedOrigin);
-          yield* sql`
+          const filled = yield* sql<{ readonly request_id: string }>`
             UPDATE watch_connector_install_requests
             SET pack_id = ${bundle.manifest.id},
                 content_hash = ${bundle.contentHash},
                 manifest_json = ${manifestJson},
                 manifest_hash = ${bundle.manifestHash},
                 origin_json = ${originJson}
-            WHERE request_id = ${input.requestId}
+            WHERE request_id = ${input.requestId} AND status = 'pending'
+            RETURNING request_id
           `;
+          if (filled.length === 0) {
+            // A cancel landing during the deferred fetch wins — refuse
+            // rather than mutating a resolved row or minting a token for it.
+            return yield* connectorError(
+              "requestNotPending",
+              "Install request was resolved while it was being prepared.",
+              { requestId: input.requestId },
+            );
+          }
+          // The filled row is part of the pending list every client sees —
+          // the localUrl ack flow depends on subscribers observing the
+          // fetched manifest, so the update must be broadcast.
+          yield* notifyChanged;
           row = {
             ...row,
             pack_id: bundle.manifest.id,
@@ -1356,6 +1544,7 @@ export const layer = Layer.effect(
         let repinTarget: WatchConnectorInstance | null = null;
         let migratedConfig: Record<string, unknown> | null = null;
         let migrationFailure: string | null = null;
+        let repinnedSecretKeysJson: string | null = null;
         if (expectedKind === "upgrade" && row.upgrade_instance_id !== null) {
           repinTarget = yield* findInstance(WatchConnectorInstanceId.make(row.upgrade_instance_id));
           if (repinTarget !== null && repinTarget.archivedAt === null) {
@@ -1366,6 +1555,15 @@ export const layer = Layer.effect(
             );
             if (migration.kind === "migrated") migratedConfig = migration.config;
             if (migration.kind === "failed") migrationFailure = migration.detail;
+            // Keys the target manifest no longer declares are pruned with
+            // the re-pin so a stale value cannot silently reactivate later.
+            // Off-DB first, like every secret write.
+            const partitioned = partitionSecretKeys(
+              bundle.manifest,
+              repinTarget.configuredSecretKeys,
+            );
+            repinnedSecretKeysJson = encodeSecretKeysJson(partitioned.kept);
+            yield* removeSecrets(repinTarget.id, partitioned.dropped);
           }
         }
 
@@ -1389,6 +1587,32 @@ export const layer = Layer.effect(
                   { requestId, packId },
                 );
               }
+            }
+            // An approved (pack_id, schema_version) pin is immutable:
+            // re-approving identical bytes is a no-op (or the intentional
+            // archived-revive path), but writing different content over an
+            // existing pin would silently retcon what every pinned instance
+            // runs — new bytes require a new schemaVersion. The check covers
+            // archived rows too: a revive must revive the same bundle.
+            const approvedRows = yield* sql<{
+              readonly content_hash: string;
+              readonly manifest_hash: string;
+            }>`
+              SELECT content_hash, manifest_hash
+              FROM watch_connector_packs
+              WHERE pack_id = ${packId} AND schema_version = ${bundle.manifest.schemaVersion}
+            `;
+            const approved = approvedRows[0];
+            if (
+              approved !== undefined &&
+              (approved.content_hash !== bundle.contentHash ||
+                approved.manifest_hash !== bundle.manifestHash)
+            ) {
+              return yield* connectorError(
+                "versionAlreadyApproved",
+                `Connector pack ${packId} version ${bundle.manifest.schemaVersion} is already approved with different content; publish new bytes under a new schemaVersion.`,
+                { requestId, packId },
+              );
             }
             yield* sql`
               INSERT INTO watch_connector_packs ${sql.insert({
@@ -1445,6 +1669,7 @@ export const layer = Layer.effect(
                     content_hash = ${bundle.contentHash},
                     origin_json = ${row.origin_json},
                     config_json = COALESCE(${migratedConfig === null ? null : encodeConfigJson(migratedConfig)}, config_json),
+                    secret_keys_json = COALESCE(${repinnedSecretKeysJson}, secret_keys_json),
                     updated_at = ${nowIso}
                 WHERE instance_id = ${row.upgrade_instance_id}
                   AND pack_id = ${packId}
@@ -1459,11 +1684,22 @@ export const layer = Layer.effect(
                 );
               }
             }
-            yield* sql`
+            // The status flip is conditional: a cancel or uninstall landing
+            // in the fetch/migration window must win over this confirm —
+            // and the guard failing rolls the pack upsert back with it.
+            const confirmed = yield* sql<{ readonly request_id: string }>`
               UPDATE watch_connector_install_requests
               SET status = 'confirmed', resolved_at = ${nowIso}
-              WHERE request_id = ${requestId}
+              WHERE request_id = ${requestId} AND status = 'pending'
+              RETURNING request_id
             `;
+            if (confirmed.length === 0) {
+              return yield* connectorError(
+                "requestNotPending",
+                "Install request was resolved while the confirmation was in flight.",
+                { requestId },
+              );
+            }
           }),
         );
 
@@ -1472,7 +1708,6 @@ export const layer = Layer.effect(
         // re-pin as a failed call.
         if (migrationFailure !== null && repinTarget !== null) {
           yield* recordHealth(repinTarget.id, {
-            ...repinTarget.health,
             status: "unhealthy",
             lastError: `Pack migrateConfig(${repinTarget.schemaVersion} → ${bundle.manifest.schemaVersion}) failed: ${migrationFailure}. The previous config was kept; fix the instance configuration.`,
           }).pipe(Effect.ignore({ log: true }));
@@ -1538,6 +1773,11 @@ export const layer = Layer.effect(
       const migration = yield* runConfigMigration(bundle, instance, toSchemaVersion);
       const migratedConfig = migration.kind === "migrated" ? migration.config : null;
       const migrationFailure = migration.kind === "failed" ? migration.detail : null;
+      // Keys the target manifest no longer declares are pruned with the
+      // re-pin so a stale value cannot silently reactivate later. Off-DB
+      // first, like every secret write.
+      const partitioned = partitionSecretKeys(bundle.manifest, instance.configuredSecretKeys);
+      yield* removeSecrets(instance.id, partitioned.dropped);
       const nowIso = iso(yield* localNow);
       yield* sql`
         UPDATE watch_connector_instances
@@ -1545,6 +1785,7 @@ export const layer = Layer.effect(
             content_hash = ${bundle.contentHash},
             origin_json = ${originJson},
             config_json = ${encodeConfigJson(migratedConfig ?? instance.config)},
+            secret_keys_json = ${encodeSecretKeysJson(partitioned.kept)},
             updated_at = ${nowIso}
         WHERE instance_id = ${instance.id} AND archived_at IS NULL
       `;
@@ -1602,7 +1843,6 @@ export const layer = Layer.effect(
         // that already landed.
         yield* Effect.gen(function* () {
           yield* recordHealth(input.instanceId, {
-            ...instance.health,
             ...(migrationFailure === null
               ? {}
               : {
@@ -1659,10 +1899,25 @@ export const layer = Layer.effect(
               WHERE pack_id = ${input.packId} AND archived_at IS NULL
               RETURNING instance_id
             `;
+            // Deferred rows carry pack_id IS NULL until prepare resolves
+            // the manifest, so pack-scoped cancellation cannot see them.
+            // The only attribution available without fetching is the
+            // origin: a pending request to a URL this pack was approved
+            // from could still resolve to it, so it shares the pack's fate.
             yield* sql`
               UPDATE watch_connector_install_requests
               SET status = 'cancelled', resolved_at = ${nowIso}
-              WHERE pack_id = ${input.packId} AND status = 'pending'
+              WHERE status = 'pending' AND (
+                pack_id = ${input.packId}
+                OR (
+                  pack_id IS NULL
+                  AND json_extract(origin_json, '$.url') IN (
+                    SELECT json_extract(origin_json, '$.url')
+                    FROM watch_connector_packs
+                    WHERE pack_id = ${input.packId}
+                  )
+                )
+              )
             `;
             return instances.length;
           }),
@@ -1792,8 +2047,21 @@ export const layer = Layer.effect(
             yield* sql`
               DELETE FROM watch_pack_widget_sources WHERE pack_id = ${input.packId}
             `;
+            // Same NULL pack_id gap as uninstall's cancel: deferred
+            // requests whose origin could resolve to this pack go too —
+            // purge's contract is that nothing fetchable survives. Runs
+            // before the pack rows delete so the origin subquery resolves.
             yield* sql`
-              DELETE FROM watch_connector_install_requests WHERE pack_id = ${input.packId}
+              DELETE FROM watch_connector_install_requests
+              WHERE pack_id = ${input.packId}
+                 OR (
+                   pack_id IS NULL
+                   AND json_extract(origin_json, '$.url') IN (
+                     SELECT json_extract(origin_json, '$.url')
+                     FROM watch_connector_packs
+                     WHERE pack_id = ${input.packId}
+                   )
+                 )
             `;
             yield* sql`
               DELETE FROM watch_connector_packs WHERE pack_id = ${input.packId}

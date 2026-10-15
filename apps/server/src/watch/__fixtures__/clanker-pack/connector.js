@@ -5,8 +5,9 @@
 // `runs/<runId>/state.json` (plus `result.json` once a run exits) into a
 // serialized snapshot — the same output a real Clanker pack produces.
 //
-// Pack code runs in a vm realm with no ambient Node globals: the only
-// capability is the `ctx` argument (`module.exports` contract).
+// Pack code runs in a worker thread's inner realm with no ambient Node
+// globals: the only capability is the `ctx` argument (`module.exports`
+// contract).
 
 const RUN_STATE_RE = /(^|\/)runs\/([^/]+)\/state\.json$/;
 const RUN_RESULT_RE = /(^|\/)runs\/([^/]+)\/result\.json$/;

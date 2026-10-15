@@ -32,7 +32,7 @@ import type {
   WatchWidgetId,
   WatchWidgetSourceRecord,
 } from "@t3tools/contracts";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { WatchAppWidget } from "./WatchAppWidget";
 import { WatchActiveWorkWidget } from "./widgets/WatchActiveWorkWidget";
@@ -52,6 +52,52 @@ export interface WatchAppMountControls {
   readonly stateOf: (widgetId: WatchWidgetId) => WatchAppMountState;
   readonly reportVisibility: (widgetId: WatchWidgetId, visible: boolean) => void;
   readonly requestMount: (widgetId: WatchWidgetId) => void;
+}
+
+/**
+ * Wraps the configure form so a live `pagesLive` update can never leave it
+ * submitting stale draft values under a fresh `expectedRevision`: the form
+ * is keyed on `widget.revision`, so a remote config write remounts it
+ * against the new base. The gate outlives the remount — it carries the
+ * "changed elsewhere" notice, which the remounted form can't know about
+ * since its predecessor's draft state died with it.
+ */
+function WatchWidgetConfigFormGate(props: {
+  readonly widget: WatchWidget;
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly connectorInstances: ReadonlyArray<WatchConnectorInstance>;
+  /** Field key a `configMismatch` error names — forwarded to the form. */
+  readonly invalidField?: string | undefined;
+  readonly onSubmit: (config: WatchWidgetConfig) => void;
+  readonly onCancel: () => void;
+}) {
+  const { widget } = props;
+  // The revision the form opened against. Any later render carrying a
+  // different revision means a write landed while the user was editing —
+  // the keyed remount silently re-bases the draft, and this notice explains
+  // why in-progress edits were replaced. A successful save from this client
+  // also bumps the revision, but the screen closes the form on success, so
+  // the notice is at most a render's worth of flash before unmount.
+  const [openedRevision] = useState(widget.revision);
+  const changedElsewhere = widget.revision !== openedRevision;
+  return (
+    <>
+      {changedElsewhere ? (
+        <p className="mb-2 shrink-0 text-2xs text-muted-foreground">
+          This widget changed on another client — the form was reset to the latest values.
+        </p>
+      ) : null}
+      <WatchWidgetSettingsForm
+        key={widget.revision}
+        widget={widget}
+        projects={props.projects}
+        connectorInstances={props.connectorInstances}
+        invalidField={props.invalidField}
+        onSubmit={props.onSubmit}
+        onCancel={props.onCancel}
+      />
+    </>
+  );
 }
 
 /**
@@ -121,7 +167,7 @@ export function WatchWidgetBody(props: {
     if (watchAgentSourceId(widget.kind) === undefined) return undefined;
     if (props.configuring && watchWidgetIsConfigurable(widget)) {
       return (
-        <WatchWidgetSettingsForm
+        <WatchWidgetConfigFormGate
           widget={widget}
           projects={props.projects}
           connectorInstances={props.connectorInstances}
@@ -159,7 +205,7 @@ export function WatchWidgetBody(props: {
 
   if (props.configuring && watchWidgetIsConfigurable(widget)) {
     return (
-      <WatchWidgetSettingsForm
+      <WatchWidgetConfigFormGate
         widget={widget}
         projects={props.projects}
         connectorInstances={props.connectorInstances}

@@ -5,6 +5,7 @@ import type {
   WatchWidgetId,
   WatchWidgetRefreshPolicy,
 } from "@t3tools/contracts";
+import { isUnknownUnionMember } from "@t3tools/contracts";
 import {
   buildWatchAppDocument,
   makeWatchAppHost,
@@ -30,8 +31,12 @@ import { watchEnvironment } from "~/state/watch";
  * authorization) permits popups, downloads and network access. Watch widgets
  * get a `srcdoc` frame, `sandbox="allow-scripts"` only (no
  * `allow-same-origin`, no forms), and a generated document whose CSP
- * hash-authorizes exactly the prelude and the artifact — zero network, no
- * credential-entry UI.
+ * hash-authorizes exactly the prelude and the artifact — no fetch channels
+ * and no credential-entry UI. One hole CSP cannot close: the sandbox has no
+ * token that stops a frame navigating *itself*, and that navigation request
+ * can carry widget-visible data out (see the residual note in
+ * `watchAppBridge.ts`). Detection below is post-mortem — keep secrets out of
+ * anything the document can see.
  *
  * Kept in sync with its mobile twin,
  * `apps/mobile/src/features/watch/WatchAppWebView.tsx`: the feed plumbing
@@ -70,6 +75,10 @@ function WatchAppConnectorFeed(props: WatchAppFeedProps) {
   );
   useEffect(() => {
     if (result._tag === "Success") {
+      // A stream item kind this build does not know (a newer server's
+      // decode) carries nothing the widget could interpret — skip it rather
+      // than posting a malformed envelope.
+      if (isUnknownUnionMember(result.value)) return;
       props.host.deliver(props.feed.name, result.value);
       return;
     }
@@ -142,10 +151,13 @@ export function WatchAppFrame(props: {
   // The bridge belongs to the generated document. A frame that navigates
   // keeps its window, so a second load stops the widget and unmounts the
   // frame rather than letting a page T3 never generated pose as the widget.
-  // Enforcement lands on `load`: from the moment navigation starts until the
-  // load fires, the departing document can still post to this host and receive
-  // its posts — a bounded window no frame API closes earlier. Unmounting the
-  // iframe is what ends it for real.
+  // This is post-mortem containment, not prevention: the navigation request
+  // itself already left — with whatever widget-visible data the hostile page
+  // put in the URL — before `load` fires. Two narrower gaps it does close:
+  // the prelude's pagehide notice disposes the host at unload, and the
+  // dispose here ends the residual window where a departing page still
+  // passes the `event.source` check. Unmounting the iframe is what ends it
+  // for real.
   const loads = useRef({ document: "", count: 0 });
   const onFrameLoad = () => {
     if (loads.current.document !== srcdoc) loads.current = { document: srcdoc, count: 0 };

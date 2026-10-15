@@ -32,6 +32,7 @@ import { WatchAppFrame, type WatchAppFeedProps } from "./WatchAppFrame";
 const environmentId = Schema.decodeSync(EnvironmentId)("env-1");
 const widgetId = Schema.decodeSync(WatchWidgetId)("widget-1");
 const instanceId = Schema.decodeSync(WatchConnectorInstanceId)("instance-1");
+const otherInstanceId = Schema.decodeSync(WatchConnectorInstanceId)("instance-2");
 const manifest: WatchWidgetBridgeManifest = {
   subscriptions: ["status"],
   actions: ["restart"],
@@ -229,7 +230,76 @@ describe("WatchAppFrame bridge wiring", () => {
   });
 });
 
+describe("WatchAppFrame binding changes", () => {
+  const updateBinding = (binding: WatchConnectorInstanceId) => {
+    const marker = () => <span data-feed-marker />;
+    return act(async () => {
+      renderer!.update(
+        <WatchAppFrame
+          environmentId={environmentId}
+          widgetId={widgetId}
+          manifest={manifest}
+          bundle={BUNDLE}
+          scriptHash="abc123hash=="
+          connectorInstanceId={binding}
+          renderFeed={marker}
+        />,
+      );
+    });
+  };
+
+  it("closes open feeds when the widget rebinds to a different connector instance", async () => {
+    await mount({ renderFeed: () => <span data-feed-marker /> });
+    await postToHost({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "t3.watch/subscribe",
+      params: { name: "status" },
+    });
+    expect(renderer!.root.findAllByType("span")).toHaveLength(1);
+
+    // The row's binding moves to another instance; the feed that opened under
+    // the old one must not keep streaming it.
+    await updateBinding(otherInstanceId);
+    await postToHost({ jsonrpc: "2.0", id: 2, method: "ping" });
+
+    expect(renderer!.root.findAllByType("span")).toHaveLength(0);
+    // The document is told the feed died so it can re-subscribe under the new
+    // binding — no stale-instance item crosses after the change.
+    expect(postedMessages()).toContainEqual(
+      expect.objectContaining({ method: "t3.watch/data-error" }),
+    );
+    expect(
+      postedMessages().every((m) => (m as { method?: string }).method !== "t3.watch/data"),
+    ).toBe(true);
+  });
+});
+
 describe("WatchAppFrame navigation containment", () => {
+  it("stops the widget session on the prelude's navigating notice", async () => {
+    await mount({ renderFeed: () => <span data-feed-marker /> });
+    await postToHost({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "t3.watch/subscribe",
+      params: { name: "status" },
+    });
+    expect(renderer!.root.findAllByType("span")).toHaveLength(1);
+
+    // pagehide in the document posts this before the navigation completes —
+    // the host disposes at unload rather than at the next load.
+    await postToHost({ jsonrpc: "2.0", method: "t3.watch/navigating" });
+
+    expect(renderer!.root.findAllByType("span")).toHaveLength(0);
+    await postToHost({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "t3.watch/subscribe",
+      params: { name: "status" },
+    });
+    expect(postedReplies()).toHaveLength(1);
+  });
+
   it("unmounts the iframe and stops the widget when the document navigates away", async () => {
     const { onViolation, feeds } = await mount();
     await postToHost({

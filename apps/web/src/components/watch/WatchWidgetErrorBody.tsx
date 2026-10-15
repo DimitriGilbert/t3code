@@ -1,8 +1,9 @@
 import {
   watchWidgetErrorPresentation,
+  type KnownWatchWidgetErrorState,
   type WatchWidgetErrorActionId,
 } from "@t3tools/client-runtime/state/watch-widgets";
-import type { WatchWidgetErrorState } from "@t3tools/contracts";
+import { isUnknownUnionMember, type WatchWidgetErrorState } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   FileWarningIcon,
@@ -18,7 +19,7 @@ import { Button } from "~/components/ui/button";
 import { formatShortTimestamp } from "~/timestampFormat";
 import { cn } from "~/lib/utils";
 
-const ERROR_ICONS: Record<WatchWidgetErrorState["cause"], typeof TriangleAlertIcon> = {
+const ERROR_ICONS: Record<KnownWatchWidgetErrorState["cause"], typeof TriangleAlertIcon> = {
   connectorDown: UnplugIcon,
   credentialsInvalid: KeyRoundIcon,
   configMismatch: TriangleAlertIcon,
@@ -49,8 +50,12 @@ export function WatchWidgetErrorBody(props: {
   /** Action ids the host cannot perform — their buttons are never rendered. */
   readonly hiddenActions?: ReadonlyArray<WatchWidgetErrorActionId> | undefined;
 }) {
-  const presentation = watchWidgetErrorPresentation(props.error);
-  const Icon = ERROR_ICONS[props.error.cause];
+  const error = props.error;
+  const presentation = watchWidgetErrorPresentation(error);
+  // A cause this build does not know (a newer server's decode) has no icon
+  // or last-good timestamp — the presentation's generic line is all it gets.
+  const known = isUnknownUnionMember(error) ? undefined : error;
+  const Icon = known === undefined ? TriangleAlertIcon : ERROR_ICONS[known.cause];
   const onAction = props.onAction;
   const hidden = props.hiddenActions ?? [];
   const visible = (id: WatchWidgetErrorActionId) => !hidden.includes(id);
@@ -98,9 +103,9 @@ export function WatchWidgetErrorBody(props: {
       <Icon className="size-4" aria-hidden />
       <AlertTitle>{presentation.line}</AlertTitle>
       <AlertDescription>
-        {props.error.lastGoodDataAt === undefined ? null : (
+        {known?.lastGoodDataAt === undefined ? null : (
           <span className="block truncate">
-            {formatLastGood(props.error.lastGoodDataAt, props.timestampFormat)}
+            {formatLastGood(known.lastGoodDataAt, props.timestampFormat)}
           </span>
         )}
       </AlertDescription>

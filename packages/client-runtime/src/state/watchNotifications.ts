@@ -24,11 +24,19 @@ import {
  * Channel identity is the connected client session: each WS/browser session
  * (every tab, every window) is its own channel, so dedupe is per
  * `(notificationId, channel)` — suppressing one tab never suppresses another.
- * The desktop-native delivery path uses the `DESKTOP_NATIVE_CHANNEL` singleton
- * instead, so a device fires once even when several windows exist.
+ * The desktop-native delivery path shares the `DESKTOP_NATIVE_CHANNEL` id,
+ * but the delivered set behind it is per-window bookkeeping: two unattended
+ * windows can each construct a `Notification` for one event. What actually
+ * dedupes across windows is the platform `Notification` `tag`
+ * (`watch:<environmentId>:<notificationId>`) — a same-tag notification
+ * replaces the earlier one rather than stacking. Cross-window leader routing,
+ * where a single window owns native delivery, is deferred.
  */
 
-/** Singleton channel for the device's native notification path — one delivery per device. */
+/**
+ * Shared channel id for every window's native notification path. Per-device
+ * dedupe comes from the platform `Notification` `tag`, not from this key.
+ */
 export const WATCH_NOTIFICATION_DESKTOP_NATIVE_CHANNEL = "desktop-native";
 
 /** Identity of one delivery on one channel: the `(notificationId, channel)` dedupe key. */
@@ -126,8 +134,10 @@ export interface WatchNotificationDelivery {
  * - An attended window (visible + focused) takes the in-app channel — a
  *   toast; an unattended window takes the desktop-native channel — one
  *   `Notification`, deduped device-wide by the native `tag`.
- * - Either way the `(notificationId, channel)` dedupe key keeps a channel
- *   from firing twice, and prefs filtering runs before any surface check.
+ * - The `(notificationId, channel)` dedupe key keeps this window's channels
+ *   from firing twice — the delivered sets are per-window bookkeeping, so
+ *   only the native `tag` spans windows — and prefs filtering runs before any
+ *   surface check.
  */
 export function resolveWatchNotificationDelivery(input: {
   readonly notification: WatchNotificationEvent;
@@ -136,7 +146,7 @@ export function resolveWatchNotificationDelivery(input: {
   /** This client session's channel id — each tab/window is its own channel. */
   readonly inAppChannelId: string;
   readonly inAppDelivered: ReadonlySet<string>;
-  /** {@link WATCH_NOTIFICATION_DESKTOP_NATIVE_CHANNEL} — one delivery per device. */
+  /** {@link WATCH_NOTIFICATION_DESKTOP_NATIVE_CHANNEL} — shared key; the `tag` dedupes per device. */
   readonly nativeChannelId: string;
   readonly nativeDelivered: ReadonlySet<string>;
   /** The thread this client is actively viewing on this environment, if any. */

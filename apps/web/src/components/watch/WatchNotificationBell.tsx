@@ -8,6 +8,7 @@ import {
   type WatchPageId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { AsyncResult } from "effect/reactivity";
 import { BellIcon, EllipsisIcon, MoonIcon, VolumeOffIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -30,6 +31,8 @@ import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { WATCH_NOTIFICATION_ICONS, WATCH_NOTIFICATION_TYPE_LABELS } from "./notificationIcons";
 import {
   clearWatchNotificationUnread,
+  revertWatchNotificationPrefs,
+  setWatchNotificationPrefs,
   useWatchNotificationPrefs,
   useWatchUnreadCount,
 } from "./watchNotificationStore";
@@ -74,6 +77,10 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
   const navigate = useNavigate();
   const unread = useWatchUnreadCount(environmentId);
   const storedPrefs = useWatchNotificationPrefs(environmentId);
+  // Prefs are a server-global singleton the stream echoes; until the first
+  // echo lands there is no known base to compose a full-replace write on, so
+  // the editing controls stay disabled.
+  const prefsLoaded = storedPrefs !== null;
   const prefs = storedPrefs ?? EMPTY_PREFS;
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"history" | "prefs">("history");
@@ -95,7 +102,17 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
   }, [open, environmentId]);
 
   const updatePrefs = (next: WatchNotificationPrefs) => {
-    void setPrefs({ environmentId, input: next });
+    const previous = storedPrefs;
+    // Optimistic write: consecutive toggles inside one echo round-trip must
+    // compose against the newest local view, not the last echoed snapshot.
+    setWatchNotificationPrefs(environmentId, next);
+    void setPrefs({ environmentId, input: next }).then((result) => {
+      // A failed write gets no echo; restore the last server-known prefs,
+      // unless a newer write already replaced this optimistic value.
+      if (AsyncResult.isFailure(result)) {
+        revertWatchNotificationPrefs(environmentId, next, previous);
+      }
+    });
   };
 
   const toggleMutedType = (type: WatchNotificationEventType) => {
@@ -250,12 +267,17 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
                                   Open thread
                                 </MenuItem>
                               )}
-                              <MenuItem onClick={() => toggleMutedType(notification.type)}>
+                              <MenuItem
+                                disabled={!prefsLoaded}
+                                onClick={() => toggleMutedType(notification.type)}
+                              >
                                 {typeMuted
                                   ? `Unmute ${WATCH_NOTIFICATION_TYPE_LABELS[notification.type]}`
                                   : `Mute ${WATCH_NOTIFICATION_TYPE_LABELS[notification.type]}`}
                               </MenuItem>
-                              <MenuItem onClick={snoozeOneHour}>Snooze for an hour</MenuItem>
+                              <MenuItem disabled={!prefsLoaded} onClick={snoozeOneHour}>
+                                Snooze for an hour
+                              </MenuItem>
                             </MenuPopup>
                           </Menu>
                         </li>
@@ -288,6 +310,7 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
                         <Switch
                           size="sm"
                           checked={!muted}
+                          disabled={!prefsLoaded}
                           onCheckedChange={() => toggleMutedType(type)}
                           aria-label={`${WATCH_NOTIFICATION_TYPE_LABELS[type]} notifications`}
                         />
@@ -318,6 +341,7 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
                             <Switch
                               size="sm"
                               checked={!muted}
+                              disabled={!prefsLoaded}
                               onCheckedChange={() => toggleMutedPage(page.id)}
                               aria-label={`${page.name} notifications`}
                             />
@@ -338,6 +362,7 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
                       <Button
                         size="xs"
                         variant="outline"
+                        disabled={!prefsLoaded}
                         onClick={() => updatePrefs({ ...prefs, snoozedUntil: null })}
                       >
                         Resume
@@ -346,6 +371,7 @@ export function WatchNotificationBell(props: { readonly environmentId: Environme
                       <Button
                         size="xs"
                         variant="outline"
+                        disabled={!prefsLoaded}
                         onClick={() => {
                           void requestCustomSnooze().then((choice) => {
                             if (choice === null) return;

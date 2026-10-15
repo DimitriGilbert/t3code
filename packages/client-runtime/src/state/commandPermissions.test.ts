@@ -12,10 +12,14 @@ import {
   AuthPreviewOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
+  CLIENT_GUARDED_RPC_SCOPES,
   ThreadId,
   EnvironmentId,
   ScheduledTaskId,
+  WatchPageId,
+  WatchWidgetId,
   WS_METHODS,
+  type AuthEnvironmentScope,
   type AuthSessionState,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -25,7 +29,8 @@ import * as Layer from "effect/Layer";
 import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
-import { createEnvironmentRpcCommand } from "./runtime.ts";
+import { createEnvironmentRpcCommand, squashAtomCommandFailure } from "./runtime.ts";
+import { createWatchEnvironmentAtoms } from "./watch.ts";
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
@@ -346,3 +351,104 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(writes).toBe(0);
   }),
 );
+
+describe("watch revision-checked commands", () => {
+  // A runtime whose environment `run` serves a stub supervisor holding one
+  // fake RPC session, so commands reach the real guarded request path.
+  const guardedWatchRuntime = (client: RpcSession["client"]) =>
+    Effect.gen(function* () {
+      const supervisor = {
+        target: { environmentId: env, label: "target" },
+        session: yield* SubscriptionRef.make(Option.some({ client } as unknown as RpcSession)),
+      } as unknown as EnvironmentSupervisor["Service"];
+      return Atom.runtime(
+        Layer.succeed(EnvironmentRegistry, {
+          run: (_environmentId: EnvironmentId, effect: Effect.Effect<unknown>) =>
+            Effect.provideService(effect, EnvironmentSupervisor, supervisor),
+        } as unknown as EnvironmentRegistry["Service"]),
+      );
+    });
+
+  const configureInput = {
+    widgetId: WatchWidgetId.make("widget-1"),
+    expectedRevision: 0,
+    config: { source: { kind: "threads" as const } },
+  };
+
+  it.effect("passes the guard for a grant-gated widget write when granted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // Latent gate: no widget method sits in CLIENT_GUARDED_RPC_SCOPES
+        // today, so the harness adds one to the map instead of shipping a gate
+        // just to exercise the path.
+        const scopeMap = CLIENT_GUARDED_RPC_SCOPES as unknown as Record<
+          string,
+          AuthEnvironmentScope
+        >;
+        scopeMap[WS_METHODS.watchWidgetsConfigure] = AuthOrchestrationOperateScope;
+        try {
+          const registry = yield* setup;
+          let calls = 0;
+          const runtime = yield* guardedWatchRuntime({
+            [WS_METHODS.watchWidgetsConfigure]: () =>
+              Effect.sync(() => {
+                calls++;
+                return { widget: { id: WatchWidgetId.make("widget-1") } };
+              }),
+          } as unknown as RpcSession["client"]);
+          const atoms = createWatchEnvironmentAtoms(runtime);
+          const target = { environmentId: env, input: configureInput };
+
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          expect(registry.get(atoms.configureWidget.permissionAtom(env))).toBe(true);
+          const granted = yield* Effect.promise(() => atoms.configureWidget.run(registry, target));
+          expect(granted._tag).toBe("Success");
+          expect(calls).toBe(1);
+
+          registry.set(sessions(env), AsyncResult.success(grant(false)));
+          expect(registry.get(atoms.configureWidget.permissionAtom(env))).toBe(false);
+          const denied = yield* Effect.promise(() => atoms.configureWidget.run(registry, target));
+          expect(denied._tag).toBe("Failure");
+          if (denied._tag === "Failure") {
+            expect(squashAtomCommandFailure(denied)).toMatchObject({
+              _tag: "EnvironmentAuthorizationError",
+            });
+          }
+          expect(calls).toBe(1);
+        } finally {
+          delete scopeMap[WS_METHODS.watchWidgetsConfigure];
+        }
+      }),
+    ),
+  );
+
+  it.effect("flags the page for reload when a revision-checked write conflicts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const pageId = WatchPageId.make("watch-page:home");
+        // The squashed cause of a failed RPC is a tagged value, not a decoded
+        // error class — fail with the plain-object shape the transport yields.
+        const runtime = yield* guardedWatchRuntime({
+          [WS_METHODS.watchWidgetsConfigure]: () =>
+            Effect.fail({ _tag: "WatchPageRevisionConflictError", pageId }),
+        } as unknown as RpcSession["client"]);
+        const atoms = createWatchEnvironmentAtoms(runtime);
+        const registry = yield* setup;
+
+        const result = yield* Effect.promise(() =>
+          atoms.configureWidget.run(registry, {
+            environmentId: env,
+            input: configureInput,
+          }),
+        );
+        expect(result._tag).toBe("Failure");
+        expect(registry.get(atoms.needsReload({ environmentId: env, pageId }))).toBe(true);
+        expect(
+          registry.get(
+            atoms.needsReload({ environmentId: env, pageId: WatchPageId.make("watch-page:other") }),
+          ),
+        ).toBe(false);
+      }),
+    ),
+  );
+});

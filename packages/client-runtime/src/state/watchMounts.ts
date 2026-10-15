@@ -66,8 +66,11 @@ export function makeWatchAppMountRegistry(limit = WATCH_APP_MOUNT_LIMIT): WatchA
     while (mountedIds.length < limit && standbyIds.length > 0) {
       const id = standbyIds.shift();
       if (id === undefined) return;
-      // It keeps its LRU seat: it was the least recently visible before.
-      mountedIds.push(id);
+      // Every standby entry is still visible — `setHidden` removes it — so a
+      // promoted widget takes the freshest seat like a tap does, not the LRU
+      // tail. Seating it stalest would re-evict it on the next mount: a
+      // visible widget bouncing between placeholder and frame every scroll.
+      mountedIds.unshift(id);
       changes.push({ id, state: "mounted" });
     }
   };
@@ -122,8 +125,12 @@ export function makeWatchAppMountRegistry(limit = WATCH_APP_MOUNT_LIMIT): WatchA
         bump(id, mountedIds);
         return changes;
       }
+      // A tap only promotes a tracked visible placeholder. An id the registry
+      // no longer knows — a tap racing `setHidden`, a stale placeholder render
+      // — is a no-op rather than an offscreen widget claiming a cap seat.
       const standbyIndex = standbyIds.indexOf(id);
-      if (standbyIndex >= 0) standbyIds.splice(standbyIndex, 1);
+      if (standbyIndex < 0) return changes;
+      standbyIds.splice(standbyIndex, 1);
       mount(id, changes);
       return changes;
     },

@@ -169,6 +169,42 @@ describe("makeWatchAppMountRegistry", () => {
     ]);
   });
 
+  it("refuses a tap-mount for an id the registry is not tracking", () => {
+    const registry = makeWatchAppMountRegistry();
+    // A tap can't seat an invisible widget — an untracked id is a no-op.
+    expect(registry.requestMount("ghost")).toEqual([]);
+    expect(registry.stateOf("ghost")).toBe("unmounted");
+    expect(registry.mounted()).toEqual([]);
+  });
+
+  it("does not mount a placeholder that scrolled out before the tap landed", () => {
+    const registry = makeWatchAppMountRegistry();
+    for (const id of ["a", "b", "c", "d", "e", "f", "g"]) registry.setVisible(id);
+    // `a` was evicted to the placeholder, then scrolled offscreen — the
+    // registry dropped it before a stale tap could flush.
+    registry.setHidden("a");
+    expect(registry.requestMount("a")).toEqual([]);
+    expect(registry.stateOf("a")).toBe("unmounted");
+    // Its seat was not stolen: the six still-visible widgets stay mounted.
+    expect(registry.mounted()).toHaveLength(WATCH_APP_MOUNT_LIMIT);
+  });
+
+  it("seats an auto-promoted placeholder at the freshest position", () => {
+    const registry = makeWatchAppMountRegistry();
+    for (const id of ["a", "b", "c", "d", "e", "f", "g"]) registry.setVisible(id);
+    registry.setHidden("f");
+    expect(registry.stateOf("a")).toBe("mounted");
+    // `a` is still visible, so promotion takes the freshest seat — the next
+    // overflow evicts the real LRU rather than bouncing `a` back out.
+    expect(registry.mounted()[0]).toBe("a");
+    expect(registry.setVisible("h")).toEqual([
+      { id: "h", state: "mounted" },
+      { id: "b", state: "placeholder" },
+    ]);
+    expect(registry.stateOf("a")).toBe("mounted");
+    expect(registry.stateOf("b")).toBe("placeholder");
+  });
+
   it("stops tracking a removed widget", () => {
     const registry = makeWatchAppMountRegistry();
     registry.setVisible("a");

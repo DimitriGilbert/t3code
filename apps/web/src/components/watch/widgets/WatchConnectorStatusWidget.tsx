@@ -39,11 +39,22 @@ import { useNowMinute } from "~/hooks/useNowMinute";
 import { readLocalApi } from "~/localApi";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { watchEnvironment } from "~/state/watch";
-import { formatRelativeTimeLabel } from "~/timestampFormat";
+import { formatRelativeTime, formatRelativeTimeLabel } from "~/timestampFormat";
 
 import { WatchConnectorConfigDialog } from "./WatchConnectorConfigDialog";
 import { WatchConnectorSecretDialog } from "./WatchConnectorSecretDialog";
 import { WatchWidgetEmpty, WatchWidgetRows } from "./shared";
+
+/**
+ * `lastFetchAt` only re-pushes when it crosses a ~15-minute bucket boundary
+ * (or another health field changes), so the rendered age can overstate the
+ * real one by that much — the "~" keeps it from reading as a live timestamp.
+ */
+function lastFetchLabel(lastFetchAt: string): string {
+  const relative = formatRelativeTime(lastFetchAt);
+  if (relative === null) return "unknown";
+  return relative.suffix === null ? relative.value : `~${relative.value} ${relative.suffix}`;
+}
 
 const HEALTH_BADGE: Record<
   WatchConnectorInstance["health"]["status"],
@@ -122,8 +133,7 @@ function ConnectorRow(props: {
   const missingSecrets = declaredSecrets.filter(
     (key) => !instance.configuredSecretKeys.includes(key),
   );
-  const lastFetch =
-    health.lastFetchAt === null ? "never fetched" : formatRelativeTimeLabel(health.lastFetchAt);
+  const lastFetch = health.lastFetchAt === null ? null : lastFetchLabel(health.lastFetchAt);
   const rollback = health.lastRollback;
 
   const reportFailure = (result: AtomCommandResult<unknown, unknown>, title: string) => {
@@ -140,6 +150,7 @@ function ConnectorRow(props: {
     intent: "reconnect" | "secrets" | "config",
     config = instance.config,
     secrets?: Record<string, string>,
+    clearSecretKeys?: ReadonlyArray<string>,
   ) => {
     setBusy(true);
     try {
@@ -150,6 +161,9 @@ function ConnectorRow(props: {
           instanceId: instance.id,
           config,
           ...(secrets === undefined ? {} : { secrets }),
+          ...(clearSecretKeys === undefined || clearSecretKeys.length === 0
+            ? {}
+            : { clearSecretKeys: [...clearSecretKeys] }),
         },
       });
       reportFailure(
@@ -290,7 +304,9 @@ function ConnectorRow(props: {
         <span className="shrink-0">·</span>
         <span className="shrink-0">v{instance.schemaVersion}</span>
         <span className="shrink-0">·</span>
-        <span className="shrink-0">last fetch {lastFetch}</span>
+        <span className="shrink-0">
+          {lastFetch === null ? "never fetched" : `last fetch ${lastFetch}`}
+        </span>
       </div>
       {health.lastError !== null ? (
         <p className="truncate text-2xs text-error-foreground">{health.lastError}</p>
@@ -306,9 +322,9 @@ function ConnectorRow(props: {
         <WatchConnectorSecretDialog
           instance={instance}
           secretKeys={declaredSecrets}
-          onSubmit={(secrets) => {
+          onSubmit={(secrets, clearSecretKeys) => {
             setSecretsOpen(false);
-            void run("secrets", undefined, secrets);
+            void run("secrets", undefined, secrets, clearSecretKeys);
           }}
           onClose={() => setSecretsOpen(false)}
         />

@@ -56,7 +56,6 @@
     "@t3tools/source-control-github": "workspace:*",
     "@t3tools/source-control-gitlab": "workspace:*",
     "effect": "catalog:",
-    "esbuild": "0.28.2",
     "jose": "catalog:",
     "node-pty": "^1.2.0-beta.15",
     "playwright-core": "1.60.0",
@@ -64,6 +63,7 @@
     "stream-chain": "^4.2.5",
     "stream-json": "3.6.0",
     "tldts": "catalog:",
+    "tsc-rs": "0.6.0",
     "undici": "catalog:",
     "yaml": "catalog:",
     "yauzl": "^3.4.0"

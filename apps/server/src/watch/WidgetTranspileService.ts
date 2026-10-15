@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - esbuild is external to the CLI
+// @effect-diagnostics nodeBuiltinImport:off - tsc-rs is external to the CLI
 // bundle and must load through createRequire inside a Node SEA; artifact
 // hashes use node:crypto (same posture as PackStore.ts / NodePtyAdapter.ts).
 import * as NodeCrypto from "node:crypto";
@@ -23,35 +23,34 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as Predicate from "effect/Predicate";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
-import type * as Esbuild from "esbuild";
+import type { Diagnostic, RawCompilerOptions } from "tsc-rs/unstable/async";
 
 import * as ServerConfig from "../config.ts";
 
 /**
  * Agent-authored widget pipeline: `publish` validates the bridge manifest,
- * esbuild-bundles the single-file TS/TSX source into an IIFE artifact cached
- * on disk by content hash, and records the outcome as a
- * `WatchWidgetSourceRecord`. A bad build is *data*, not a call failure — the
- * record's `transpileFailed` state is what the widget shell renders; only
- * manifest shape, source-size, and rate-limit violations reject the call.
+ * transpiles the single-file TS/TSX source through a shared `tsc-rs`
+ * compiler server into an IIFE artifact cached on disk by content hash, and
+ * records the outcome as a `WatchWidgetSourceRecord`. A bad build is *data*,
+ * not a call failure — the record's `transpileFailed` state is what the
+ * widget shell renders; only manifest shape, source-size, and rate-limit
+ * violations reject the call.
  *
  * Emitted code contract (the hardened host document owns the other half):
- * the bundle is a self-contained IIFE. Imports esbuild can resolve (static
- * `import`/`export … from`, `require("x")`, literal `import("x")`) are
- * rejected at build time by the no-imports plugin. Non-literal forms never
- * reach resolution, so three more defenses apply: `supported` with
- * `"dynamic-import": false` lowers `import(expr)` to a throwing `__require`
- * stub, any esbuild warning fails the build (the `import.meta` substitution
- * warns), and output still containing `import(`, `import.meta`, or
- * `__require` is rejected — a source can never smuggle filesystem contents
- * into the artifact or defer to modules that do not exist in the frame.
+ * the artifact is a self-contained IIFE. `transpileModule` rewrites one
+ * file; it never resolves specifiers. Compiling as CommonJS turns every
+ * module form into detectable residue — static `import`/`export … from`,
+ * `import x = require("y")`, and literal `import("y")` all lower to
+ * `require(...)`/`exports.`/`module.exports` plumbing, while `import(expr)`
+ * and `import.meta` survive verbatim — and output still containing any of
+ * it is rejected, so a source can never smuggle filesystem contents into
+ * the artifact or defer to modules that do not exist in the frame.
  * `</script` sequences are escaped to `<\/script` so the bundle cannot
  * close its own inline script tag; `scriptHash` covers the escaped bytes
  * actually served. JSX compiles to the `T3` host global (`T3.h`,
@@ -64,13 +63,15 @@ import * as ServerConfig from "../config.ts";
  * without bound, and `get`/`publish` already tolerate missing files.
  */
 
-export type EsbuildModule = typeof import("esbuild");
+export type TscRsModule = typeof import("tsc-rs/unstable/async");
 
-// esbuild stays external to the CLI bundle: its JS wrapper locates a
-// per-platform `@esbuild/<os>-<arch>` binary on the real filesystem. Inside a
+// tsc-rs stays external to the CLI bundle: its JS API locates a
+// per-platform `@tsc-rs/<os>-<arch>` binary on the real filesystem. Inside a
 // Node SEA `import`/`import()` cannot reach file-backed packages, so — like
 // node-pty — it loads through createRequire, which works in every runtime.
-const requireForEsbuild = NodeModule.createRequire(import.meta.url);
+// The package is ESM, which `require()` loads through Node's require(esm)
+// path (unflagged since Node 22.12, below our minimum engine).
+const requireForTscRs = NodeModule.createRequire(import.meta.url);
 
 const SOURCE_ID_PREFIX = "watch-widget-source:";
 
@@ -109,11 +110,12 @@ export class WidgetTranspileError extends Schema.TaggedError<WidgetTranspileErro
   "WidgetTranspileError",
   {
     /**
-     * `unavailable` marks the esbuild module or its platform binary as
+     * `unavailable` marks the tsc-rs module or its platform binary as
      * missing/broken — latched by `makeTranspile` so later publishes fast-fail
      * instead of re-probing. `failed` is a per-source build diagnostic *or*
-     * any other non-diagnostic rejection (a wedged service, spawn pressure);
-     * only the verifiably-permanent missing-binary signature latches.
+     * any other non-diagnostic rejection (a wedged compiler server, spawn
+     * pressure); only the verifiably-permanent missing-binary signature
+     * latches.
      */
     reason: Schema.Literals(["unavailable", "failed"]),
     detail: Schema.String,
@@ -129,10 +131,10 @@ export class WidgetSourceTranspiler extends Context.Service<
 
 /**
  * Latches the first `unavailable` transpile failure: a missing or mismatched
- * `@esbuild/*` platform binary cannot appear mid-process, so re-probing on
- * every publish would just respawn a broken service. Only that signature is
- * classified `unavailable` — transient esbuild rejections and per-source
- * build diagnostics are `failed` and pass through every time.
+ * `@tsc-rs/*` platform binary cannot appear mid-process, so re-probing on
+ * every publish would just fail the same way. Only that signature is
+ * classified `unavailable` — transient compiler-server rejections and
+ * per-source diagnostics are `failed` and pass through every time.
  */
 export const makeTranspile = (
   build: (source: string) => Effect.Effect<string, WidgetTranspileError>,
@@ -154,63 +156,45 @@ export const makeTranspile = (
   );
 
 /**
- * Sources are one self-contained file: a resolvable import would pull
- * server-side modules into the artifact. Non-literal imports never reach
- * this hook — they are handled by `supported.dynamic-import` and the
- * residual-output check in `makeBuild`.
+ * `transpileModule` rewrites one file; it never resolves specifiers.
+ * `module: CommonJS` is load-bearing for the residue scan below: every
+ * import/export form compiles to `require(...)`/`exports.`/`module.exports`
+ * plumbing — `import x = require("y")` is the case that silently vanishes
+ * under `module: none` — so module syntax can never emit as a working
+ * script that reached for a module the frame does not have. JSX lowers to
+ * the host-provided T3 global.
+ *
+ * The enum members are RawCompilerOptions' wire values
+ * (ScriptTarget.ES2022, ModuleKind.CommonJS, JsxEmit.React); keeping them
+ * literal means `makeBuild`'s client never has to carry the enum exports.
+ * `strict` is inert for `transpileModule` — it reports only parse/options
+ * diagnostics, never semantic ones — but is kept so the option set matches
+ * the tsconfig contract these sources are written against.
  */
-const noImportsPlugin: Esbuild.Plugin = {
-  name: "t3-watch-widget-no-imports",
-  setup(build) {
-    build.onResolve({ filter: /.*/ }, (args) => {
-      // The <stdin> entry resolves through this hook too; only real imports fail.
-      if (args.kind === "entry-point") return undefined;
-      return {
-        errors: [
-          {
-            text: `Widget sources are a single self-contained file; imports are not allowed ("${args.path}").`,
-            pluginName: "t3-watch-widget-no-imports",
-          },
-        ],
-      };
-    });
-  },
-};
-
-const widgetBuildOptions = (source: string): Esbuild.BuildOptions => ({
-  stdin: { contents: source, loader: "tsx", sourcefile: "widget.tsx" },
-  bundle: true,
-  // IIFE so the generated srcdoc document injects the artifact with a plain
-  // inline <script>; JSX lowers to the host-provided T3 global.
-  format: "iife",
-  platform: "browser",
-  target: "es2022",
-  jsx: "transform",
+const WIDGET_COMPILER_OPTIONS = {
+  target: 9,
+  module: 1,
+  jsx: 2,
   jsxFactory: "T3.h",
-  jsxFragment: "T3.Fragment",
-  write: false,
-  charset: "utf8",
-  // Non-literal `import(expr)` never reaches the no-imports resolver, so the
-  // dynamic-import feature is dropped entirely: esbuild lowers it to a
-  // throwing `__require` stub, and the residual-output check in `makeBuild`
-  // then rejects the artifact — the emitted code can never hold a live
-  // module-specifier fetch.
-  supported: { "dynamic-import": false },
-  // Diagnostics are captured into the source record, so esbuild must not
-  // echo them to the server log.
-  logLevel: "silent",
-  legalComments: "none",
-  plugins: [noImportsPlugin],
-});
+  jsxFragmentFactory: "T3.Fragment",
+  strict: true,
+  removeComments: true,
+} satisfies RawCompilerOptions;
 
 /**
- * Import-shaped residue in the emitted artifact means one of the
- * non-literal forms slipped past the resolver and its lowering: a verbatim
- * `import(`, an `import.meta`, or esbuild's `__require` shim. Rather than
- * ship a live module specifier in hash-authorized code, `makeBuild` fails
- * the build.
+ * Module machinery in the emitted artifact means the source reached for a
+ * module the widget frame does not have: a verbatim `import(` or
+ * `import.meta`, CommonJS plumbing from lowered import/export forms
+ * (`require(`, `exports.`, `module.exports`), or a `__require` shim. The
+ * preceding-character check spares member lookups such as `foo.require(x)`.
+ * Rather than ship a live module specifier in hash-authorized code,
+ * `makeBuild` fails the build.
  */
-const FORBIDDEN_ARTIFACT_PATTERN = /\bimport\s*\(|import\.meta|\b__require\b/;
+const FORBIDDEN_ARTIFACT_PATTERN =
+  /(?<![\w$.])(?:import\s*\(|import\.meta|require\s*\(|__require\b|exports\.|module\.exports\b)/g;
+
+/** Extracts `"<specifier>"` from a `require("x")` for the failure detail. */
+const REQUIRED_SPECIFIER_PATTERN = /(?<![\w$.])require\s*\(\s*["'`]([^"'`]+)["'`]/;
 
 /**
  * `</script` in artifact bytes would close the host document's inline
@@ -223,139 +207,165 @@ const escapeScriptCloseTags = (text: string) => text.replace(/<\/script/gi, "<\\
 
 /**
  * The only non-diagnostic rejection worth latching `unavailable`: a missing
- * or mismatched `@esbuild/*` platform binary cannot appear mid-process, and
- * its signature is `ENOENT` on the spawned binary or the wrapper's
- * `@esbuild/<pkg>` message. Everything else — `EMFILE`/`EAGAIN` spawn
- * pressure, a wedged service, a panic on pathological input — is a
- * per-source `failed` so the next publish retries cleanly.
+ * or mismatched `@tsc-rs/*` platform binary cannot appear mid-process. Its
+ * signatures are `ENOENT` on the spawned binary and the wrapper's
+ * `Unable to resolve @tsc-rs/<pkg>` / `Executable not found` messages.
+ * Everything else — `EMFILE`/`EAGAIN` spawn pressure, a wedged compiler
+ * server, a panic on pathological input — is a per-source `failed` so the
+ * next publish retries cleanly.
  */
-const MISSING_BINARY_PATTERN = /ENOENT|@esbuild\//;
-
-const isBuildDiagnostics = (
-  cause: unknown,
-): cause is { readonly errors: ReadonlyArray<Esbuild.Message> } =>
-  Predicate.isObject(cause) && "errors" in cause && Array.isArray(cause.errors);
+const MISSING_BINARY_PATTERN = /ENOENT|@tsc-rs\/|Executable not found/;
 
 const causeMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
-const formatDiagnostics = (
-  esbuild: EsbuildModule,
-  messages: ReadonlyArray<Esbuild.PartialMessage>,
-  kind: "error" | "warning",
-) => {
+/**
+ * The slice of the tsc-rs async API one widget build needs: a
+ * `transpileModule` call on a long-lived `API` plus `formatDiagnostics` to
+ * render its diagnostics. Kept narrow so tests can drive `makeBuild` and
+ * `makeTranspilerLayer` with a fake.
+ */
+export interface WidgetTscRsClient {
+  readonly transpileModule: (
+    input: string,
+    options: {
+      readonly fileName: string;
+      readonly reportDiagnostics: boolean;
+      readonly compilerOptions: RawCompilerOptions;
+    },
+  ) => Promise<{
+    readonly outputText: string;
+    readonly diagnostics?: readonly Diagnostic[] | undefined;
+  }>;
+  readonly formatDiagnostics: (diagnostics: readonly Diagnostic[]) => string;
+}
+
+const formatDiagnostics = (client: WidgetTscRsClient, diagnostics: readonly Diagnostic[]) => {
   try {
-    const formatted = esbuild
-      .formatMessagesSync([...messages], { kind })
-      .join("\n")
-      .trim();
-    return formatted === "" ? "esbuild build failed." : formatted;
+    const formatted = client.formatDiagnostics(diagnostics).trim();
+    return formatted === "" ? "tsc-rs transpile failed." : formatted;
   } catch {
-    return "esbuild build failed.";
+    return "tsc-rs transpile failed.";
   }
 };
 
-const toBuildError = (esbuild: EsbuildModule, cause: unknown): WidgetTranspileError => {
-  if (isBuildDiagnostics(cause)) {
-    return new WidgetTranspileError({
-      reason: "failed",
-      detail: formatDiagnostics(esbuild, cause.errors, "error"),
-    });
-  }
+const toTranspileError = (cause: unknown): WidgetTranspileError => {
   const detail = causeMessage(cause);
   return MISSING_BINARY_PATTERN.test(detail)
     ? new WidgetTranspileError({
         reason: "unavailable",
-        detail: `The esbuild platform binary could not run: ${detail}.`,
+        detail: `The tsc-rs platform binary could not run: ${detail}.`,
       })
     : new WidgetTranspileError({
         reason: "failed",
-        detail: `The widget build failed unexpectedly: ${detail}.`,
+        detail: `The widget transpile failed unexpectedly: ${detail}.`,
       });
 };
 
-const loadEsbuild = Effect.try({
-  try: () => requireForEsbuild("esbuild") as EsbuildModule,
+/**
+ * One source's transpile through the shared compiler client. There is no
+ * per-request cancellation: interrupting the `tryPromise` (a
+ * `transpileTimeoutMs` expiry or fiber interrupt) abandons the wait while
+ * the request keeps running inside the shared server — a hung transpile can
+ * stall the requests queued behind it, which surface as `failed` timeouts
+ * rather than crashing the layer. Exported so tests can drive it with a
+ * fake client.
+ */
+export const makeBuild =
+  (client: WidgetTscRsClient) =>
+  (source: string): Effect.Effect<string, WidgetTranspileError> =>
+    Effect.gen(function* () {
+      const result = yield* Effect.tryPromise({
+        try: () =>
+          client.transpileModule(source, {
+            fileName: "widget.tsx",
+            reportDiagnostics: true,
+            compilerOptions: WIDGET_COMPILER_OPTIONS,
+          }),
+        catch: toTranspileError,
+      });
+      // `transpileModule` still emits an outputText for a syntactically
+      // broken source, so the diagnostics — parse and options errors — are
+      // what make a bad build a failure instead of a broken artifact.
+      if (result.diagnostics !== undefined && result.diagnostics.length > 0) {
+        return yield* new WidgetTranspileError({
+          reason: "failed",
+          detail: formatDiagnostics(client, result.diagnostics),
+        });
+      }
+      const forbidden = [...result.outputText.matchAll(FORBIDDEN_ARTIFACT_PATTERN)].map(
+        (match) => match[0],
+      );
+      if (forbidden.length > 0) {
+        const specifier = REQUIRED_SPECIFIER_PATTERN.exec(result.outputText)?.[1];
+        return yield* new WidgetTranspileError({
+          reason: "failed",
+          detail:
+            specifier === undefined
+              ? `The emitted widget artifact still contains import or require forms (${[...new Set(forbidden)].map((form) => `"${form}"`).join(", ")}); widget sources are a single self-contained file. The artifact was rejected.`
+              : `Widget sources are a single self-contained file; imports are not allowed ("${specifier}").`,
+        });
+      }
+      // transpileModule emits loose top-level statements, but the artifact
+      // contract is a self-contained IIFE so widget `var`/function
+      // declarations cannot leak onto the host frame's window. The wrapper
+      // is async so a stray top-level `await` still parses.
+      return `(async () => {\n${result.outputText}\n})();\n`;
+    });
+
+const loadTscRs = Effect.try({
+  try: () => requireForTscRs("tsc-rs/unstable/async") as TscRsModule,
   catch: (cause) =>
     new WidgetTranspileError({
       reason: "unavailable",
-      detail: `The esbuild package could not be loaded: ${causeMessage(cause)}.`,
+      detail: `The tsc-rs package could not be loaded: ${causeMessage(cause)}.`,
     }),
 });
 
 /**
- * One source's build, run through an `esbuild.context` so interruption can
- * cancel the work: `ctx.cancel()` fires both from the `tryPromise` abort
- * signal and again in the release finalizer (cancel is idempotent), so a
- * `transpileTimeoutMs` expiry or fiber interrupt actually stops the esbuild
- * service's work instead of abandoning a promise it keeps running.
- * Exported so tests can drive it with a fake esbuild module.
+ * One lazily-spawned compiler server shared by every publish. The module
+ * require is the first probe (a missing tsc-rs package caches `unavailable`
+ * through `Effect.cached` + `makeTranspile`'s latch); the first
+ * `transpileModule` is the second — `API` connects to its child process on
+ * first request, so a missing `@tsc-rs/<os>-<arch>` binary surfaces there.
+ * Caching the client also dedupes concurrent first publishes onto a single
+ * server. The API is closed when the layer's scope ends.
  */
-export const makeBuild =
-  (esbuild: EsbuildModule) =>
-  (source: string): Effect.Effect<string, WidgetTranspileError> =>
+export const makeTranspilerLayer = (
+  tscRsModule: Effect.Effect<TscRsModule, WidgetTranspileError>,
+) =>
+  Layer.effect(
+    WidgetSourceTranspiler,
     Effect.gen(function* () {
-      const result = yield* Effect.scoped(
-        Effect.acquireRelease(
-          Effect.tryPromise({
-            try: () => esbuild.context(widgetBuildOptions(source)),
-            catch: (cause) => toBuildError(esbuild, cause),
-          }),
-          (ctx) =>
-            Effect.promise(async () => {
-              await ctx.cancel();
-              await ctx.dispose();
-            }),
-        ).pipe(
-          Effect.flatMap((ctx) =>
-            Effect.tryPromise({
-              try: (signal) => {
-                const abort = () => void ctx.cancel();
-                signal.addEventListener("abort", abort, { once: true });
-                return ctx.rebuild().finally(() => signal.removeEventListener("abort", abort));
-              },
-              catch: (cause) => toBuildError(esbuild, cause),
-            }),
-          ),
+      const module = yield* Effect.cached(tscRsModule);
+      const apiRef = yield* Ref.make<InstanceType<TscRsModule["API"]> | null>(null);
+      const client = yield* Effect.cached(
+        Effect.flatMap(module, (tscrs) =>
+          Effect.try({
+            try: () => {
+              const api = new tscrs.API();
+              return { tscrs, api };
+            },
+            catch: toTranspileError,
+          }).pipe(Effect.tap(({ api }) => Ref.set(apiRef, api))),
         ),
       );
-      const output = result.outputFiles?.[0]?.text;
-      if (output === undefined) {
-        return yield* new WidgetTranspileError({
-          reason: "failed",
-          detail: "esbuild produced no output.",
-        });
-      }
-      // Warnings are silent degradations of the artifact contract (e.g. the
-      // `import.meta` → empty-object substitution), so they fail the build.
-      if (result.warnings.length > 0) {
-        return yield* new WidgetTranspileError({
-          reason: "failed",
-          detail: formatDiagnostics(esbuild, result.warnings, "warning"),
-        });
-      }
-      if (FORBIDDEN_ARTIFACT_PATTERN.test(output)) {
-        return yield* new WidgetTranspileError({
-          reason: "failed",
-          detail:
-            "The emitted widget bundle still contains an import or require shim; the artifact was rejected.",
-        });
-      }
-      return output;
-    });
+      yield* Effect.addFinalizer(() =>
+        Ref.get(apiRef).pipe(
+          Effect.flatMap((api) => (api === null ? Effect.void : Effect.promise(() => api.close()))),
+        ),
+      );
+      const build = (source: string) =>
+        Effect.flatMap(client, ({ tscrs, api }) =>
+          makeBuild({
+            transpileModule: (input, options) => api.transpileModule(input, options),
+            formatDiagnostics: (diagnostics) => tscrs.formatDiagnostics(diagnostics, api),
+          })(source),
+        );
+      return { transpile: yield* makeTranspile(build) };
+    }),
+  );
 
-export const layerTranspiler = Layer.effect(
-  WidgetSourceTranspiler,
-  Effect.gen(function* () {
-    // The module require and the first build are the two lazy probes for the
-    // platform binary; a missing one caches its failure (Effect.cached keeps
-    // the error, makeTranspile latches it) so a packaged server with a
-    // missing @esbuild/* degrades to transpileFailed instead of crashing.
-    const esbuildModule = yield* Effect.cached(loadEsbuild);
-    const build = (source: string) =>
-      Effect.flatMap(esbuildModule, (esbuild) => makeBuild(esbuild)(source));
-    return { transpile: yield* makeTranspile(build) };
-  }),
-);
+export const layerTranspiler = makeTranspilerLayer(loadTscRs);
 
 // ── Service ──────────────────────────────────────────────────────────────
 
@@ -669,11 +679,10 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           }
 
           // `Effect.result` turns a build diagnostic into a value first, so
-          // the timeout bounds only a hung transpile — and the transpiler
-          // builds inside an `esbuild.context`, so interruption calls
-          // `ctx.cancel()` and the limit bounds the service's work rather
-          // than just this wait. Either way the outcome is written as a
-          // record — data, never an effect failure.
+          // the timeout bounds only a hung transpile. The shared tsc-rs
+          // server has no per-request cancel, so interruption abandons the
+          // wait while the request keeps running there. Either way the
+          // outcome is written as a record — data, never an effect failure.
           const transpiled = yield* transpiler.transpile(input.source).pipe(
             Effect.result,
             Effect.timeoutOrElse({

@@ -124,7 +124,7 @@ it.effect("a missing transpiler binary records failed and latches", () => {
       assert.equal(first.source.failure?.cause, "transpileFailed");
       assert.include(first.source.failure?.detail ?? "", "platform binary");
 
-      // A missing @esbuild/* binary cannot appear mid-process, so the second
+      // A missing @tsc-rs/* binary cannot appear mid-process, so the second
       // publish fast-fails from the latch without probing the transpiler.
       const second = yield* service.publish(input("const a = 2;"));
       assert.equal(second.source.status, "failed");
@@ -142,7 +142,7 @@ it.effect("a missing transpiler binary records failed and latches", () => {
               return Effect.fail(
                 new WidgetTranspileService.WidgetTranspileError({
                   reason: "unavailable",
-                  detail: "The esbuild platform binary could not run: spawn ENOENT.",
+                  detail: "The tsc-rs platform binary could not run: spawn ENOENT.",
                 }),
               );
             }),
@@ -169,9 +169,9 @@ it.effect("rejects a non-literal dynamic import instead of shipping it", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const service = yield* WidgetTranspileService.WidgetTranspileService;
-      // `import(globalThis.X)` never reaches the resolver: esbuild lowers it
-      // to a throwing `__require` stub, and the residual-output check then
-      // rejects the artifact — the record is failed, not ready-but-broken.
+      // `import(globalThis.X)` lowers to a `require(...)` call under
+      // CommonJS output, and the residual-output check then rejects the
+      // artifact — the record is failed, not ready-but-broken.
       const { source } = yield* service.publish(
         input("const m = import(globalThis.X);\nT3.render(() => m);"),
       );
@@ -183,15 +183,28 @@ it.effect("rejects a non-literal dynamic import instead of shipping it", () =>
   ).pipe(Effect.provide(layerService(WidgetTranspileService.layerTranspiler))),
 );
 
-it.effect("fails the build when esbuild reports warnings", () =>
+it.effect("fails the build when import.meta survives the emit", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const service = yield* WidgetTranspileService.WidgetTranspileService;
-      // `import.meta` under iife output is a silent empty-object
-      // substitution reported only as a warning — it must not ship.
+      // `import.meta` is emitted verbatim by transpileModule — a live
+      // module specifier in hash-authorized code must not ship.
       const { source } = yield* service.publish(input("const url = import.meta.url;"));
       assert.equal(source.status, "failed");
       assert.include(source.failure?.detail ?? "", "import.meta");
+    }),
+  ).pipe(Effect.provide(layerService(WidgetTranspileService.layerTranspiler))),
+);
+
+it.effect("rejects a source that calls require", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const { source } = yield* service.publish(
+        input('const fs = require("node:fs");\nT3.render(fs);'),
+      );
+      assert.equal(source.status, "failed");
+      assert.include(source.failure?.detail ?? "", "single self-contained file");
     }),
   ).pipe(Effect.provide(layerService(WidgetTranspileService.layerTranspiler))),
 );
@@ -535,37 +548,108 @@ it.effect("remove deletes the artifact files and emits a tombstone", () =>
 );
 
 /**
- * A minimal `EsbuildModule` stand-in for `makeBuild`: only `context` and
- * `formatMessagesSync` are exercised by the transpiler.
+ * A minimal `WidgetTscRsClient` stand-in for `makeBuild`: only
+ * `transpileModule` and `formatDiagnostics` are exercised by the
+ * transpiler.
  */
-const fakeEsbuildModule = (options: {
-  readonly rebuild: () => Promise<unknown>;
-  readonly cancel?: () => Promise<void>;
-  readonly dispose?: () => Promise<void>;
+const fakeTscRsClient = (options: {
+  readonly transpileModule: (
+    input: string,
+    options: {
+      readonly fileName: string;
+      readonly reportDiagnostics: boolean;
+      readonly compilerOptions: unknown;
+    },
+  ) => Promise<{
+    readonly outputText: string;
+    readonly diagnostics?: ReadonlyArray<{ readonly text?: string }>;
+  }>;
+  readonly formatDiagnostics?: (diagnostics: ReadonlyArray<{ readonly text?: string }>) => string;
 }) =>
   ({
-    context: () =>
-      Promise.resolve({
-        rebuild: options.rebuild,
-        cancel: options.cancel ?? (() => Promise.resolve()),
-        dispose: options.dispose ?? (() => Promise.resolve()),
-      }),
-    formatMessagesSync: (messages: ReadonlyArray<{ text?: string }>) =>
-      messages.map((message) => message.text ?? ""),
-  }) as unknown as WidgetTranspileService.EsbuildModule;
+    transpileModule: options.transpileModule,
+    formatDiagnostics:
+      options.formatDiagnostics ??
+      ((diagnostics) => diagnostics.map((diagnostic) => diagnostic.text ?? "").join("\n")),
+  }) as unknown as WidgetTranspileService.WidgetTscRsClient;
 
-it.effect("a timed-out build cancels and disposes the esbuild context", () => {
-  let cancels = 0;
-  let disposes = 0;
-  const fake = fakeEsbuildModule({
-    rebuild: () => new Promise<never>(() => {}),
-    cancel: () => {
-      cancels += 1;
+/**
+ * A minimal `TscRsModule` stand-in for `makeTranspilerLayer`: `API` is the
+ * lazily-spawned compiler client, `formatDiagnostics` its host-bound
+ * renderer. `onConstruct`/`close` let a test watch the client lifecycle.
+ */
+const fakeTscRsModule = (options: {
+  readonly onConstruct?: () => void;
+  readonly transpileModule: (
+    input: string,
+    options: {
+      readonly fileName: string;
+      readonly reportDiagnostics: boolean;
+      readonly compilerOptions: unknown;
+    },
+  ) => Promise<{
+    readonly outputText: string;
+    readonly diagnostics?: ReadonlyArray<{ readonly text?: string }>;
+  }>;
+  readonly close?: () => Promise<void>;
+}) =>
+  ({
+    API: class {
+      constructor() {
+        options.onConstruct?.();
+      }
+      transpileModule = options.transpileModule;
+      close = options.close ?? (() => Promise.resolve());
+    },
+    formatDiagnostics: (diagnostics: ReadonlyArray<{ text?: string }>) =>
+      diagnostics.map((diagnostic) => diagnostic.text ?? "").join("\n"),
+  }) as unknown as WidgetTranspileService.TscRsModule;
+
+it.effect("the shared compiler client is reused across publishes and closed at scope end", () => {
+  let constructions = 0;
+  let transpiles = 0;
+  let closes = 0;
+  const module = fakeTscRsModule({
+    onConstruct: () => {
+      constructions += 1;
+    },
+    transpileModule: () => {
+      transpiles += 1;
+      return Promise.resolve({ outputText: "T3.render();" });
+    },
+    close: () => {
+      closes += 1;
       return Promise.resolve();
     },
-    dispose: () => {
-      disposes += 1;
-      return Promise.resolve();
+  });
+  return Effect.gen(function* () {
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* WidgetTranspileService.WidgetTranspileService;
+        yield* service.publish(input("const a = 1;"));
+        yield* service.publish(input("const a = 2;"));
+        assert.equal(transpiles, 2);
+        // Both publishes rode one lazily-spawned compiler server.
+        assert.equal(constructions, 1);
+      }),
+    ).pipe(
+      Effect.provide(
+        layerService(WidgetTranspileService.makeTranspilerLayer(Effect.succeed(module))),
+      ),
+    );
+    // Layer teardown closed the shared server exactly once.
+    assert.equal(closes, 1);
+  });
+});
+
+it.effect("a timed-out transpile fails the record but leaves the shared client usable", () => {
+  let calls = 0;
+  const client = fakeTscRsClient({
+    transpileModule: () => {
+      calls += 1;
+      return calls === 1
+        ? new Promise<never>(() => {})
+        : Promise.resolve({ outputText: "T3.render();" });
     },
   });
   return Effect.scoped(
@@ -580,28 +664,29 @@ it.effect("a timed-out build cancels and disposes the esbuild context", () => {
       const { source } = yield* Fiber.join(publishing);
       assert.equal(source.status, "failed");
       assert.include(source.failure?.detail ?? "", "exceeded the 50ms limit");
-      // Interruption routes to ctx.cancel() — via the rebuild abort signal
-      // and the scope finalizer — so the work stops, not just the wait.
-      assert.isTrue(cancels >= 1);
-      assert.equal(disposes, 1);
+      // There is no per-request cancel — the timed-out call keeps running
+      // inside the shared server — but the client itself stays usable.
+      const second = yield* service.publish(input("const a = 2;"));
+      assert.equal(second.source.status, "ready");
+      assert.equal(calls, 2);
     }),
   ).pipe(
     Effect.provide(
-      layerService(layerTranspiler(WidgetTranspileService.makeBuild(fake)), {
+      layerService(layerTranspiler(WidgetTranspileService.makeBuild(client)), {
         transpileTimeoutMs: 50,
       }),
     ),
   );
 });
 
-it.effect("a transient esbuild error records failed and does not latch", () => {
+it.effect("a transient tsc-rs error records failed and does not latch", () => {
   let builds = 0;
-  const fake = fakeEsbuildModule({
-    rebuild: () => {
+  const client = fakeTscRsClient({
+    transpileModule: () => {
       builds += 1;
       return builds === 1
-        ? Promise.reject(new Error("The service was stopped"))
-        : Promise.resolve({ outputFiles: [{ text: "T3.render();" }], warnings: [], errors: [] });
+        ? Promise.reject(new Error("The server was stopped"))
+        : Promise.resolve({ outputText: "T3.render();" });
     },
   });
   return Effect.scoped(
@@ -610,8 +695,8 @@ it.effect("a transient esbuild error records failed and does not latch", () => {
       const first = yield* service.publish(input("const a = 1;"));
       assert.equal(first.source.status, "failed");
       assert.equal(first.source.failure?.cause, "transpileFailed");
-      // A wedged service is not a missing binary — the detail must say so
-      // and the next publish must retry the transpiler instead of
+      // A wedged compiler server is not a missing binary — the detail must
+      // say so and the next publish must retry the transpiler instead of
       // fast-failing from the latch.
       assert.include(first.source.failure?.detail ?? "", "unexpectedly");
       const second = yield* service.publish(input("const a = 2;"));
@@ -624,7 +709,7 @@ it.effect("a transient esbuild error records failed and does not latch", () => {
         Layer.effect(
           WidgetTranspileService.WidgetSourceTranspiler,
           Effect.map(
-            WidgetTranspileService.makeTranspile(WidgetTranspileService.makeBuild(fake)),
+            WidgetTranspileService.makeTranspile(WidgetTranspileService.makeBuild(client)),
             (transpile) => ({
               transpile,
             }),
@@ -636,17 +721,13 @@ it.effect("a transient esbuild error records failed and does not latch", () => {
 });
 
 it.effect("a missing platform binary still latches unavailable", () => {
-  let contexts = 0;
-  const fake = {
-    context: () => {
-      contexts += 1;
-      return Promise.reject(
-        new Error("spawn /app/node_modules/@esbuild/linux-x64/bin/esbuild ENOENT"),
-      );
+  let transpiles = 0;
+  const client = fakeTscRsClient({
+    transpileModule: () => {
+      transpiles += 1;
+      return Promise.reject(new Error("spawn /app/node_modules/@tsc-rs/linux-x64/lib/tsc ENOENT"));
     },
-    formatMessagesSync: (messages: ReadonlyArray<{ text?: string }>) =>
-      messages.map((message) => message.text ?? ""),
-  } as unknown as WidgetTranspileService.EsbuildModule;
+  });
   return Effect.scoped(
     Effect.gen(function* () {
       const service = yield* WidgetTranspileService.WidgetTranspileService;
@@ -655,8 +736,8 @@ it.effect("a missing platform binary still latches unavailable", () => {
       assert.include(first.source.failure?.detail ?? "", "platform binary");
       const second = yield* service.publish(input("const a = 2;"));
       assert.equal(second.source.status, "failed");
-      // The latch fast-fails the second publish without re-probing esbuild.
-      assert.equal(contexts, 1);
+      // The latch fast-fails the second publish without re-probing tsc-rs.
+      assert.equal(transpiles, 1);
     }),
   ).pipe(
     Effect.provide(
@@ -664,7 +745,7 @@ it.effect("a missing platform binary still latches unavailable", () => {
         Layer.effect(
           WidgetTranspileService.WidgetSourceTranspiler,
           Effect.map(
-            WidgetTranspileService.makeTranspile(WidgetTranspileService.makeBuild(fake)),
+            WidgetTranspileService.makeTranspile(WidgetTranspileService.makeBuild(client)),
             (transpile) => ({
               transpile,
             }),

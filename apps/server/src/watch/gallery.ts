@@ -9,7 +9,8 @@ export const WATCH_GALLERY_TEMPLATES: ReadonlyArray<WatchGalleryTemplate> = [
   {
     id: "starter-watch",
     name: "Watch",
-    description: "Running work, what needs you, a quick task starter, and recent activity.",
+    description:
+      "Running work, what needs you, a quick task starter, recent activity, subagents, and scheduled tasks.",
     scope: "global",
     widgets: [
       {
@@ -33,9 +34,19 @@ export const WATCH_GALLERY_TEMPLATES: ReadonlyArray<WatchGalleryTemplate> = [
         placement: { x: 4, y: 4, w: 8, h: 3 },
       },
       {
+        kind: "subagent-runs",
+        config: { source: { kind: "threads" } },
+        placement: { x: 0, y: 7, w: 6, h: 3 },
+      },
+      {
+        kind: "scheduled-tasks",
+        config: { source: { kind: "threads" } },
+        placement: { x: 6, y: 7, w: 6, h: 3 },
+      },
+      {
         kind: "connector-status",
         config: { source: { kind: "static" } },
-        placement: { x: 0, y: 7, w: 12, h: 2 },
+        placement: { x: 0, y: 10, w: 12, h: 2 },
       },
     ],
   },

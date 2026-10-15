@@ -1,12 +1,14 @@
 import {
   EnvironmentId,
   ProjectId,
+  ScheduledTaskId,
   ThreadId,
   WatchConnectorInstanceId,
   WatchConnectorPackId,
   WatchPageId,
   WatchWidgetId,
   type OrchestrationV2ThreadShell,
+  type ScheduledTask,
   type WatchConnectorInstance,
   type WatchPage,
   type WatchWidget,
@@ -22,6 +24,10 @@ import {
   watchAttentionItems,
   watchConnectorHealthErrorState,
   watchRecentActivityThreads,
+  watchScheduledTaskItems,
+  watchScheduledTaskScheduleLabel,
+  watchScheduledTaskTimingLabel,
+  watchSubagentRunItems,
   watchWidgetErrorPresentation,
   watchWidgetSettingBoolean,
   watchWidgetSettingNumber,
@@ -396,5 +402,189 @@ describe("watchRecentActivityThreads", () => {
     });
     const live = shellWith("live", { latestRun: null });
     expect(watchRecentActivityThreads([live, done], { projectId: null })).toEqual([done]);
+  });
+});
+
+describe("watchSubagentRunItems", () => {
+  const runningRuntime = {
+    status: "running" as const,
+    activeRunId: null,
+    providerInstanceId: makeShell().providerInstanceId,
+    providerName: null,
+    lastError: null,
+    updatedAt: nowIso,
+  };
+
+  function subagentShell(id: string, parentId: string, overrides = {}) {
+    return shellWith(id, {
+      lineage: {
+        rootThreadId: ThreadId.make(parentId),
+        parentThreadId: ThreadId.make(parentId),
+        relationshipToParent: "subagent" as const,
+      },
+      ...overrides,
+    });
+  }
+
+  it("leads with running runs and folds thread-less pending tasks under their parent", () => {
+    const parent = shellWith("parent", {
+      pendingBackgroundTasks: [
+        { taskId: "bg-1", description: "Survey the repo", kind: "subagent" as const },
+        { taskId: "bg-2", description: "npm run dev", kind: "command" as const },
+      ],
+    });
+    const running = subagentShell("running-child", "parent", {
+      runtime: runningRuntime,
+      updatedAt: "2026-06-20T11:00:00.000Z",
+    });
+    const done = subagentShell("done-child", "parent", {
+      updatedAt: "2026-06-20T10:30:00.000Z",
+    });
+    const items = watchSubagentRunItems([parent, running, done], { projectId: null });
+    expect(items.map((item) => item.id)).toEqual([running.id, `${parent.id}:bg-1`, done.id]);
+    const pending = items[1]!;
+    expect(pending.thread).toBeNull();
+    expect(pending.parentThread?.id).toBe(parent.id);
+    expect(pending.status).toBe("running");
+    expect(items[0]?.parentThread?.id).toBe(parent.id);
+    expect(items[2]?.status).toBe("completed");
+  });
+
+  it("does not double-list a pending task whose child thread rendered", () => {
+    const parent = shellWith("parent", {
+      pendingBackgroundTasks: [
+        {
+          taskId: "bg-1",
+          description: "Survey",
+          kind: "subagent" as const,
+          childThreadId: ThreadId.make("child"),
+        },
+      ],
+    });
+    const child = subagentShell("child", "parent", { runtime: runningRuntime });
+    const items = watchSubagentRunItems([parent, child], { projectId: null });
+    expect(items.map((item) => item.id)).toEqual([child.id]);
+  });
+
+  it("scopes to the bound project, pending rows by the parent's project", () => {
+    const otherProject = ProjectId.make("project-other");
+    const parent = shellWith("parent", {
+      pendingBackgroundTasks: [
+        { taskId: "bg-1", description: "Survey", kind: "subagent" as const },
+      ],
+    });
+    const inScope = subagentShell("child", "parent", { runtime: runningRuntime });
+    const outOfScope = subagentShell("other-child", "parent", {
+      projectId: otherProject,
+      runtime: runningRuntime,
+    });
+    const items = watchSubagentRunItems([parent, inScope, outOfScope], { projectId });
+    expect(items.map((item) => item.id)).toEqual([inScope.id, `${parent.id}:bg-1`]);
+  });
+});
+
+describe("watchScheduledTaskItems", () => {
+  function makeTask(id: string, overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+    return {
+      id: ScheduledTaskId.make(`task-${id}`),
+      title: id,
+      prompt: "Do the thing",
+      enabled: true,
+      schedule: { type: "interval", everyMs: 60_000 },
+      projectId,
+      threadId: null,
+      workspaceStrategy: { type: "root" },
+      modelSelection: { instanceId: makeShell().providerInstanceId, model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      nextRunAt: null,
+      lastRunAt: null,
+      lastRunStatus: "never",
+      lastRunError: null,
+      runCount: 0,
+      ...overrides,
+    };
+  }
+
+  it("leads with failures, then enabled tasks by soonest next run, then paused", () => {
+    const failed = makeTask("failed", {
+      lastRunStatus: "failed",
+      lastRunAt: "2026-06-20T11:00:00.000Z",
+    });
+    const soon = makeTask("soon", { nextRunAt: "2026-06-20T12:05:00.000Z" });
+    const later = makeTask("later", { nextRunAt: "2026-06-20T13:00:00.000Z" });
+    const webhook = makeTask("hook", {
+      schedule: { type: "webhook", signature: null },
+    });
+    const paused = makeTask("paused", { enabled: false });
+    const items = watchScheduledTaskItems([paused, later, webhook, failed, soon], {
+      projectId: null,
+    });
+    expect(items.map((task) => task.title)).toEqual(["failed", "soon", "later", "hook", "paused"]);
+  });
+
+  it("filters to the bound project and honours maxItems", () => {
+    const scoped = makeTask("a", { nextRunAt: "2026-06-20T12:05:00.000Z" });
+    const other = makeTask("b", {
+      projectId: ProjectId.make("project-other"),
+      nextRunAt: "2026-06-20T12:01:00.000Z",
+    });
+    expect(
+      watchScheduledTaskItems([other, scoped], { projectId }).map((task) => task.title),
+    ).toEqual(["a"]);
+    expect(
+      watchScheduledTaskItems([scoped, other], { projectId: null, maxItems: 1 }).map(
+        (task) => task.title,
+      ),
+    ).toEqual(["b"]);
+  });
+});
+
+describe("watchScheduledTask labels", () => {
+  it("describes interval, fixed_time, and webhook triggers", () => {
+    expect(watchScheduledTaskScheduleLabel({ type: "interval", everyMs: 300_000 })).toBe(
+      "Every 5 min",
+    );
+    expect(watchScheduledTaskScheduleLabel({ type: "interval", everyMs: 45_000 })).toBe(
+      "Every 45 sec",
+    );
+    expect(watchScheduledTaskScheduleLabel({ type: "fixed_time", timeOfDay: "09:30" })).toBe(
+      "Daily at 09:30",
+    );
+    expect(
+      watchScheduledTaskScheduleLabel({
+        type: "fixed_time",
+        timeOfDay: "09:30",
+        weekdays: [1, 2, 3, 4, 5],
+      }),
+    ).toBe("Weekdays at 09:30");
+    expect(watchScheduledTaskScheduleLabel({ type: "webhook", signature: null })).toBe(
+      "On webhook",
+    );
+  });
+
+  it("reports paused, listening, and upcoming timing", () => {
+    const now = Date.parse(nowIso);
+    const base = {
+      enabled: true,
+      schedule: { type: "interval" as const, everyMs: 60_000 },
+      nextRunAt: "2026-06-20T12:30:00.000Z",
+    };
+    expect(watchScheduledTaskTimingLabel(base, now)).toBe("In 30m");
+    expect(watchScheduledTaskTimingLabel({ ...base, enabled: false }, now)).toBe("Paused");
+    expect(
+      watchScheduledTaskTimingLabel(
+        { ...base, schedule: { type: "webhook", signature: null } },
+        now,
+      ),
+    ).toBe("Listening");
+    expect(watchScheduledTaskTimingLabel({ ...base, nextRunAt: null }, now)).toBe("Not scheduled");
+    expect(
+      watchScheduledTaskTimingLabel({ ...base, nextRunAt: "2026-06-20T11:00:00.000Z" }, now),
+    ).toBe("Due now");
   });
 });

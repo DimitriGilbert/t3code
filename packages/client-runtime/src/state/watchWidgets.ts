@@ -1,4 +1,6 @@
 import type {
+  ScheduledTask,
+  ScheduledTaskSchedule,
   WatchConnectorInstance,
   WatchPage,
   WatchWidget,
@@ -461,5 +463,199 @@ export function watchRecentActivityThreads(
         a.id.localeCompare(b.id) ||
         a.environmentId.localeCompare(b.environmentId),
     )
+    .slice(0, options.maxItems ?? 8);
+}
+
+// ── Subagent runs ─────────────────────────────────────────────────────
+
+/**
+ * The coarse status the widget badges: `waiting` keeps its own pill because
+ * it means the run parked on something; the remaining terminal states fold
+ * into `stopped` — only `failed` earns a red badge.
+ */
+export type WatchSubagentRunStatus = "running" | "waiting" | "completed" | "failed" | "stopped";
+
+export interface WatchSubagentRunItem {
+  /** Stable row key: the child thread id, or `parentId:taskId` for a thread-less task. */
+  readonly id: string;
+  readonly title: string;
+  readonly status: WatchSubagentRunStatus;
+  /** The subagent's own thread — the row's primary open target when present. */
+  readonly thread: EnvironmentThreadShell | null;
+  /** The spawning thread; thread-less rows open here. Null when it left the shell list. */
+  readonly parentThread: EnvironmentThreadShell | null;
+  /** Background-task id when the row came from a parent's pending roster. */
+  readonly taskId: string | null;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+  readonly updatedAt: string;
+}
+
+function watchSubagentRunStatusOf(thread: EnvironmentThreadShell): WatchSubagentRunStatus {
+  const status = thread.runtime?.status ?? thread.latestRun?.status ?? "idle";
+  switch (status) {
+    case "preparing":
+    case "queued":
+    case "starting":
+    case "running":
+      return "running";
+    case "waiting":
+      return "waiting";
+    case "failed":
+      return "failed";
+    case "interrupted":
+    case "cancelled":
+    case "rolled_back":
+      return "stopped";
+    default:
+      return "completed";
+  }
+}
+
+/**
+ * Subagent runs on the bound projects, read entirely from the shell
+ * projection: a subagent that owns a thread shows up under
+ * `lineage.relationshipToParent === "subagent"`, and one still running
+ * without a thread shows up in its parent's `pendingBackgroundTasks`
+ * roster. Running/waiting rows lead, then recently settled, newest
+ * activity first.
+ */
+export function watchSubagentRunItems(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  options: { readonly projectId: string | null; readonly maxItems?: number },
+): ReadonlyArray<WatchSubagentRunItem> {
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
+  const inScope = (thread: EnvironmentThreadShell) =>
+    thread.deletedAt === null &&
+    thread.archivedAt === null &&
+    (options.projectId === null || thread.projectId === options.projectId);
+
+  const items: WatchSubagentRunItem[] = [];
+  const rendered = new Set<string>();
+  for (const thread of threads) {
+    if (thread.lineage.relationshipToParent !== "subagent" || !inScope(thread)) continue;
+    rendered.add(thread.id);
+    const parentThreadId = thread.lineage.parentThreadId;
+    items.push({
+      id: thread.id,
+      title: thread.title,
+      status: watchSubagentRunStatusOf(thread),
+      thread,
+      parentThread: parentThreadId === null ? null : (byId.get(parentThreadId) ?? null),
+      taskId: null,
+      startedAt: resolveThreadWorkingStartedAt(thread) ?? thread.latestRun?.startedAt ?? null,
+      completedAt: thread.latestRun?.completedAt ?? null,
+      updatedAt: thread.updatedAt,
+    });
+  }
+  // A provider-side subagent that never got its own thread is only visible
+  // as a pending background task on the parent; the row opens the parent.
+  for (const parent of threads) {
+    if (!inScope(parent)) continue;
+    for (const task of parent.pendingBackgroundTasks) {
+      if (task.kind !== "subagent") continue;
+      if (task.childThreadId !== undefined && rendered.has(task.childThreadId)) continue;
+      items.push({
+        id: `${parent.id}:${task.taskId}`,
+        title: task.description ?? "Subagent",
+        status: "running",
+        thread: null,
+        parentThread: parent,
+        taskId: task.taskId,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: parent.updatedAt,
+      });
+    }
+  }
+  const rank = (item: WatchSubagentRunItem) =>
+    item.status === "running" || item.status === "waiting" ? 0 : 1;
+  return items
+    .sort(
+      (a, b) =>
+        rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id),
+    )
+    .slice(0, options.maxItems ?? 8);
+}
+
+// ── Scheduled tasks ───────────────────────────────────────────────────
+
+const WEEKDAY_SHORT_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+
+/** Short trigger description shared by the web and mobile widget bodies. */
+export function watchScheduledTaskScheduleLabel(schedule: ScheduledTaskSchedule): string {
+  if (schedule.type === "webhook") return "On webhook";
+  if (schedule.type === "interval") {
+    const minutes = schedule.everyMs / 60_000;
+    return Number.isInteger(minutes)
+      ? `Every ${minutes} min`
+      : `Every ${Math.round(schedule.everyMs / 1000)} sec`;
+  }
+  const weekdays = schedule.weekdays ?? [];
+  const days =
+    weekdays.length === 0
+      ? "Daily"
+      : weekdays.length === 5 && weekdays.every((day) => day >= 1 && day <= 5)
+        ? "Weekdays"
+        : weekdays.map((day) => WEEKDAY_SHORT_LABELS[day] ?? String(day)).join(", ");
+  return `${days} at ${schedule.timeOfDay}`;
+}
+
+/**
+ * The timing readout beside the schedule: paused and webhook-listening tasks
+ * have no next fire time, so they report their state instead of a countdown.
+ */
+export function watchScheduledTaskTimingLabel(
+  task: Pick<ScheduledTask, "enabled" | "schedule" | "nextRunAt">,
+  nowMs: number,
+): string {
+  if (!task.enabled) return "Paused";
+  if (task.schedule.type === "webhook") return "Listening";
+  const nextMs = task.nextRunAt === null ? NaN : Date.parse(task.nextRunAt);
+  if (Number.isNaN(nextMs)) return "Not scheduled";
+  const diffMs = nextMs - nowMs;
+  if (diffMs <= 0) return "Due now";
+  const minutes = Math.ceil(diffMs / 60_000);
+  if (minutes < 2) return "In under a minute";
+  if (minutes < 60) return `In ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `In ${hours}h`;
+  return `In ${Math.round(hours / 24)}d`;
+}
+
+/**
+ * Scheduled tasks on the bound projects: failures lead (a watch surface is
+ * for noticing them), then enabled tasks by soonest next run — unscheduled
+ * and webhook tasks trail — then paused tasks by name.
+ */
+export function watchScheduledTaskItems(
+  tasks: ReadonlyArray<ScheduledTask>,
+  options: { readonly projectId: string | null; readonly maxItems?: number },
+): ReadonlyArray<ScheduledTask> {
+  const timeMs = (value: string | null): number => {
+    // Unparseable/absent timestamps sort as 0 — comparators must never see NaN.
+    if (value === null) return 0;
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  const group = (task: ScheduledTask) =>
+    task.lastRunStatus === "failed" ? 0 : task.enabled ? 1 : 2;
+  return tasks
+    .filter((task) => options.projectId === null || task.projectId === options.projectId)
+    .sort((a, b) => {
+      const groupDelta = group(a) - group(b);
+      if (groupDelta !== 0) return groupDelta;
+      if (group(a) === 0) {
+        // Newest failure first.
+        return timeMs(b.lastRunAt) - timeMs(a.lastRunAt) || a.title.localeCompare(b.title);
+      }
+      if (group(a) === 1) {
+        // Soonest next run first; webhook/unscheduled tasks (null) trail.
+        const aNext = a.nextRunAt === null ? Number.POSITIVE_INFINITY : timeMs(a.nextRunAt);
+        const bNext = b.nextRunAt === null ? Number.POSITIVE_INFINITY : timeMs(b.nextRunAt);
+        return aNext - bNext || a.title.localeCompare(b.title);
+      }
+      return a.title.localeCompare(b.title);
+    })
     .slice(0, options.maxItems ?? 8);
 }

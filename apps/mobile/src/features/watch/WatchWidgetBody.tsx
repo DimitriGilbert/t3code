@@ -20,10 +20,15 @@ import {
   watchAttentionItems,
   watchConnectorHealthErrorState,
   watchRecentActivityThreads,
+  watchScheduledTaskItems,
+  watchScheduledTaskScheduleLabel,
+  watchScheduledTaskTimingLabel,
+  watchSubagentRunItems,
   watchWidgetSettingBoolean,
   watchWidgetSettingNumber,
   type WatchActiveWorkKind,
   type WatchAttentionReason,
+  type WatchSubagentRunStatus,
 } from "@t3tools/client-runtime/state/watch-widgets";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { AsyncResult } from "effect/reactivity";
@@ -48,6 +53,8 @@ import { RowPressable } from "../../components/RowPressable";
 import { StatusPill } from "../../components/StatusPill";
 import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/time";
+import { useEnvironmentQuery } from "../../state/query";
+import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { threadEnvironment } from "../../state/threads";
 import { watchEnvironment } from "../../state/watch";
@@ -527,6 +534,220 @@ function ConnectorStatusBody(props: {
   );
 }
 
+// ── Subagent runs ──────────────────────────────────────────────────────
+
+const SUBAGENT_STATUS_TONE: Record<
+  WatchSubagentRunStatus,
+  { readonly label: string; readonly tone: WatchPillTone }
+> = {
+  running: { label: "Running", tone: "info" },
+  waiting: { label: "Waiting", tone: "warning" },
+  completed: { label: "Done", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+  stopped: { label: "Stopped", tone: "neutral" },
+};
+
+/**
+ * Live and recent subagent runs. Unlike web, rows stay shell-only here — no
+ * per-thread projection subscriptions for workflow phase labels on a
+ * dashboard. A run with its own thread opens there; a thread-less pending
+ * run opens its parent.
+ */
+function SubagentRunsBody(props: {
+  readonly environmentId: EnvironmentId;
+  readonly widget: WatchWidget;
+  readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+  readonly projectId: ProjectId | null;
+  readonly projectTitleById: ReadonlyMap<string, string>;
+  readonly showProjectBadge: boolean;
+  readonly onOpenThread: (ref: ScopedThreadRef) => void;
+}) {
+  const maxItems = watchWidgetSettingNumber(props.widget, "maxItems", 8, { min: 1, max: 20 });
+  const items = watchSubagentRunItems(props.threads, {
+    projectId: props.projectId,
+    maxItems,
+  });
+  if (items.length === 0) return <WatchWidgetEmpty text="No subagent runs" />;
+  return (
+    <View>
+      {items.map((item) => {
+        const status = SUBAGENT_STATUS_TONE[item.status];
+        const target = item.thread ?? item.parentThread;
+        return (
+          <WatchWidgetRow
+            key={item.id}
+            title={item.title}
+            onPress={
+              target === null
+                ? undefined
+                : () => props.onOpenThread(scopeThreadRef(props.environmentId, target.id))
+            }
+            meta={
+              <>
+                <WatchPill label={status.label} tone={status.tone} />
+                <ProjectBadge
+                  title={
+                    props.showProjectBadge
+                      ? (props.projectTitleById.get(
+                          (item.thread ?? item.parentThread)?.projectId ?? "",
+                        ) ?? null)
+                      : null
+                  }
+                />
+                {item.parentThread === null ? null : (
+                  <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
+                    {item.parentThread.title}
+                  </Text>
+                )}
+                <Text className="text-2xs text-foreground-muted">
+                  {relativeTime(item.completedAt ?? item.updatedAt)}
+                </Text>
+              </>
+            }
+          />
+        );
+      })}
+    </View>
+  );
+}
+
+// ── Recent diffs ───────────────────────────────────────────────────────
+
+/**
+ * Recently finished threads whose checkpoint is the interesting part.
+ * Mobile renders no diff totals — per-thread projection streams are too
+ * heavy for the watch column — and the row opens the review sheet, the
+ * mobile diff surface.
+ */
+function RecentDiffsBody(props: {
+  readonly environmentId: EnvironmentId;
+  readonly widget: WatchWidget;
+  readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+  readonly projectId: ProjectId | null;
+  readonly projectTitleById: ReadonlyMap<string, string>;
+  readonly showProjectBadge: boolean;
+  readonly onOpenReview: (ref: ScopedThreadRef) => void;
+}) {
+  const maxItems = watchWidgetSettingNumber(props.widget, "maxItems", 8, { min: 1, max: 20 });
+  const items = watchRecentActivityThreads(props.threads, {
+    projectId: props.projectId,
+    maxItems,
+  });
+  if (items.length === 0) return <WatchWidgetEmpty text="No diffs yet" />;
+  return (
+    <View>
+      {items.map((thread) => (
+        <WatchWidgetRow
+          key={thread.id}
+          title={thread.title}
+          onPress={() => props.onOpenReview(scopeThreadRef(props.environmentId, thread.id))}
+          meta={
+            <>
+              <WatchPill label="Diff" tone="neutral" />
+              <ProjectBadge
+                title={
+                  props.showProjectBadge
+                    ? (props.projectTitleById.get(thread.projectId) ?? null)
+                    : null
+                }
+              />
+              <Text className="text-2xs text-foreground-muted">
+                {relativeTime(thread.latestRun?.completedAt ?? thread.updatedAt)}
+              </Text>
+            </>
+          }
+          right={<SymbolView name="file.diff" size={15} tintColorClassName="accent-icon-muted" />}
+        />
+      ))}
+    </View>
+  );
+}
+
+// ── Scheduled tasks ────────────────────────────────────────────────────
+
+const TASK_STATUS_TONE: Record<
+  string,
+  { readonly label: string; readonly tone: WatchPillTone } | null
+> = {
+  never: null,
+  running: { label: "Running", tone: "info" },
+  succeeded: { label: "Succeeded", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+};
+
+/**
+ * Scheduled tasks on the bound projects over the shared
+ * `scheduledTasksLive` subscription — failures lead, then soonest next run.
+ * A task with a bound thread opens it; the rest open the scheduled-tasks
+ * settings screen.
+ */
+function ScheduledTasksBody(props: {
+  readonly environmentId: EnvironmentId;
+  readonly widget: WatchWidget;
+  readonly projectId: ProjectId | null;
+  readonly projectTitleById: ReadonlyMap<string, string>;
+  readonly showProjectBadge: boolean;
+  readonly now: string;
+  readonly onOpenThread: (ref: ScopedThreadRef) => void;
+  readonly onOpenScheduledTasks: () => void;
+}) {
+  const tasksQuery = useEnvironmentQuery(
+    serverEnvironment.scheduledTasksLive({ environmentId: props.environmentId, input: {} }),
+  );
+  if (tasksQuery.data === null) {
+    return (
+      <WatchWidgetEmpty
+        text={
+          tasksQuery.error !== null ? "Could not load scheduled tasks" : "Loading scheduled tasks…"
+        }
+      />
+    );
+  }
+  const maxItems = watchWidgetSettingNumber(props.widget, "maxItems", 8, { min: 1, max: 20 });
+  const items = watchScheduledTaskItems(tasksQuery.data.tasks, {
+    projectId: props.projectId,
+    maxItems,
+  });
+  if (items.length === 0) return <WatchWidgetEmpty text="No scheduled tasks" />;
+  const nowMs = Date.parse(props.now);
+  return (
+    <View>
+      {items.map((task) => {
+        const status = TASK_STATUS_TONE[task.lastRunStatus] ?? null;
+        return (
+          <WatchWidgetRow
+            key={task.id}
+            title={task.title}
+            onPress={
+              task.threadId === null
+                ? props.onOpenScheduledTasks
+                : () => props.onOpenThread(scopeThreadRef(props.environmentId, task.threadId!))
+            }
+            meta={
+              <>
+                <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
+                  {watchScheduledTaskScheduleLabel(task.schedule)}
+                </Text>
+                <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
+                  {watchScheduledTaskTimingLabel(task, nowMs)}
+                </Text>
+                {status !== null && <WatchPill label={status.label} tone={status.tone} />}
+              </>
+            }
+            detail={
+              task.lastRunError === null ? undefined : (
+                <Text className="text-2xs text-danger-foreground" numberOfLines={2}>
+                  {task.lastRunError}
+                </Text>
+              )
+            }
+          />
+        );
+      })}
+    </View>
+  );
+}
+
 export function WatchWidgetBody(props: {
   readonly environmentId: EnvironmentId;
   readonly page: WatchPage;
@@ -549,6 +770,10 @@ export function WatchWidgetBody(props: {
   readonly connectorsReady: boolean;
   readonly connectorsError: string | null;
   readonly onOpenThread: (ref: ScopedThreadRef) => void;
+  /** Opens the thread's review sheet — the mobile diff surface. */
+  readonly onOpenReview: (ref: ScopedThreadRef) => void;
+  /** Opens the scheduled-tasks settings screen for thread-less tasks. */
+  readonly onOpenScheduledTasks: () => void;
   readonly onNewTask: (projectId: ProjectId | null) => void;
 }): ReactNode {
   const { widget, page } = props;
@@ -638,6 +863,32 @@ export function WatchWidgetBody(props: {
     case "recent-activity":
       return (
         <RecentActivityBody environmentId={props.environmentId} widget={widget} {...threadScope} />
+      );
+    case "subagent-runs":
+      return (
+        <SubagentRunsBody environmentId={props.environmentId} widget={widget} {...threadScope} />
+      );
+    case "recent-diffs":
+      return (
+        <RecentDiffsBody
+          environmentId={props.environmentId}
+          widget={widget}
+          {...threadScope}
+          onOpenReview={props.onOpenReview}
+        />
+      );
+    case "scheduled-tasks":
+      return (
+        <ScheduledTasksBody
+          environmentId={props.environmentId}
+          widget={widget}
+          projectId={threadScope.projectId}
+          projectTitleById={threadScope.projectTitleById}
+          showProjectBadge={threadScope.showProjectBadge}
+          now={props.now}
+          onOpenThread={props.onOpenThread}
+          onOpenScheduledTasks={props.onOpenScheduledTasks}
+        />
       );
     case "task-starter":
       return (

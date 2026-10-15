@@ -199,6 +199,23 @@ function WatchPageColumn(props: {
     [navigation, props.environmentId],
   );
 
+  const openReview = useCallback(
+    (ref: ScopedThreadRef) => {
+      navigation.navigate("ThreadReview", {
+        environmentId: ref.environmentId,
+        threadId: ref.threadId,
+      });
+    },
+    [navigation],
+  );
+
+  const openScheduledTasks = useCallback(() => {
+    navigation.navigate("SettingsSheet", {
+      screen: "SettingsContent",
+      params: { screen: "SettingsScheduledTasks" },
+    });
+  }, [navigation]);
+
   return (
     <View className="gap-4">
       {visibleWidgets.map((widget) => {
@@ -231,6 +248,8 @@ function WatchPageColumn(props: {
               connectorsReady={connectorsReady}
               connectorsError={connectorsError}
               onOpenThread={openThread}
+              onOpenReview={openReview}
+              onOpenScheduledTasks={openScheduledTasks}
               onNewTask={openNewTask}
             />
           </WatchWidgetSection>

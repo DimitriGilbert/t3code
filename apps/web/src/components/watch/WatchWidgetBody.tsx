@@ -39,6 +39,9 @@ import { WatchActiveWorkWidget } from "./widgets/WatchActiveWorkWidget";
 import { WatchConnectorStatusWidget } from "./widgets/WatchConnectorStatusWidget";
 import { WatchNeedsAttentionWidget } from "./widgets/WatchNeedsAttentionWidget";
 import { WatchRecentActivityWidget } from "./widgets/WatchRecentActivityWidget";
+import { WatchRecentDiffsWidget } from "./widgets/WatchRecentDiffsWidget";
+import { WatchScheduledTasksWidget } from "./widgets/WatchScheduledTasksWidget";
+import { WatchSubagentRunsWidget } from "./widgets/WatchSubagentRunsWidget";
 import { WatchTaskStarterWidget } from "./widgets/WatchTaskStarterWidget";
 import { WatchWidgetErrorBody } from "./WatchWidgetErrorBody";
 import { WatchWidgetSettingsForm } from "./WatchWidgetSettingsForm";
@@ -299,6 +302,32 @@ export function WatchWidgetBody(props: {
           environmentId={props.environmentId}
           widget={widget}
           {...threadScope}
+        />
+      );
+    case "subagent-runs":
+      return (
+        <WatchSubagentRunsWidget
+          environmentId={props.environmentId}
+          widget={widget}
+          {...threadScope}
+        />
+      );
+    case "recent-diffs":
+      return (
+        <WatchRecentDiffsWidget
+          environmentId={props.environmentId}
+          widget={widget}
+          {...threadScope}
+        />
+      );
+    case "scheduled-tasks":
+      return (
+        <WatchScheduledTasksWidget
+          environmentId={props.environmentId}
+          widget={widget}
+          projectId={threadScope.projectId}
+          projectTitleById={threadScope.projectTitleById}
+          showProjectBadge={threadScope.showProjectBadge}
         />
       );
     case "connector-status":

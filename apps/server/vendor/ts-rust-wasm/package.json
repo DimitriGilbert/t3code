@@ -1,0 +1,5 @@
+{
+  "name": "t3-vendored-ts-rust-wasm",
+  "private": true,
+  "type": "module"
+}

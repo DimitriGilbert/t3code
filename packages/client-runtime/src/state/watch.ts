@@ -4,22 +4,16 @@ import {
   type WatchPageId,
   type WatchPageRevisionConflictError,
 } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
-import { Atom } from "effect/reactivity";
+import { Atom, AtomRegistry } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import type { EnvironmentRpcInput, EnvironmentUnaryRpcTag } from "../rpc/client.ts";
 import {
-  type EnvironmentRpcInput,
-  type EnvironmentUnaryRpcTag,
-  requestGuarded,
-} from "../rpc/client.ts";
-import { createCommandPermissions } from "./commandPermissions.ts";
-import {
-  createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
   environmentRpcKey,
+  squashAtomCommandFailure,
 } from "./runtime.ts";
 import { createWatchNotificationAtoms } from "./watchNotifications.ts";
 
@@ -62,38 +56,39 @@ export function createWatchEnvironmentAtoms<R, E>(
       environmentRpcKey({ environmentId: target.environmentId, input: target.pageId }),
     );
 
-  /** Revision-checked mutation: a conflict flags the page for reload, then re-fails. */
+  /**
+   * Revision-checked mutation built on `createEnvironmentRpcCommand`: the
+   * shared boundary keeps the grant check and the `RpcPermissionGuard`
+   * install. The `run` wrapper only adds the conflict flag — a settled
+   * failure whose squashed cause is the revision conflict marks the page for
+   * reload, the same tagged-value check the caller's toast path applies.
+   */
   const revisionCheckedCommand = <TTag extends EnvironmentUnaryRpcTag>(
     label: string,
     tag: TTag,
   ) => {
-    // Same permission wrapping as `createEnvironmentRpcCommand`; the custom
-    // execute only adds the conflict flag before re-failing.
-    const permissions = createCommandPermissions(runtime, tag);
-    const command = createEnvironmentCommand(runtime, {
-      label,
-      execute: (input: EnvironmentRpcInput<TTag>, registry, environmentId) =>
-        permissions.authorize(registry, environmentId, input).pipe(
-          Effect.andThen(() =>
-            requestGuarded(tag, input).pipe(
-              Effect.catch((error) => {
-                // Generic `TTag` keeps `catchIf` from narrowing, so refine by hand.
-                const pageId = isWatchPageRevisionConflict(error) ? error.pageId : undefined;
-                if (pageId === undefined) {
-                  return Effect.fail(error);
-                }
-                return Effect.sync(() =>
-                  registry.set(needsReload({ environmentId, pageId }), true),
-                ).pipe(Effect.andThen(Effect.fail(error)));
-              }),
-            ),
-          ),
-        ),
-    });
+    const command = createEnvironmentRpcCommand(runtime, { label, tag });
     return {
       ...command,
-      requiredScopes: permissions.requiredScopes,
-      permissionAtom: permissions.permissionAtom,
+      run: (
+        registry: AtomRegistry.AtomRegistry,
+        target: {
+          readonly environmentId: EnvironmentId;
+          readonly input: EnvironmentRpcInput<TTag>;
+        },
+      ) =>
+        command.run(registry, target).then((result) => {
+          if (result._tag === "Failure") {
+            const failure = squashAtomCommandFailure(result);
+            if (isWatchPageRevisionConflict(failure)) {
+              registry.set(
+                needsReload({ environmentId: target.environmentId, pageId: failure.pageId }),
+                true,
+              );
+            }
+          }
+          return result;
+        }),
     };
   };
 
@@ -198,10 +193,11 @@ export function createWatchEnvironmentAtoms<R, E>(
       tag: WS_METHODS.watchConnectorsSetInstanceConfig,
     }),
     /**
-     * The UI-only half of the install gate: returns the pending request plus
-     * the single-use token bound to its manifest hash (and, for `localUrl`
-     * requests, performs the deferred fetch under the caller's
-     * `allowLocalUrl` acknowledgement). Not agent-reachable.
+     * Mints the single-use token bound to the pending request's manifest
+     * hash (and, for `localUrl` requests, performs the deferred fetch under
+     * the caller-asserted `allowLocalUrl` acknowledgement). Only operate
+     * scope is needed to mint — the enforced boundary is
+     * `environment:maintain` on the confirm calls plus MCP absence.
      */
     prepareConnectorInstallConfirm: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:watch:connector-prepare-install-confirm",

@@ -11,8 +11,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { usePullRequestsSupported, useWatchScreenSupported } from "../../state/environments";
-import { useActiveEnvironmentId } from "../../state/entities";
-import { useWatchUnreadCount } from "../watch/watchNotificationStore";
+import { useWatchUnreadTotal } from "../watch/watchNotificationStore";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -187,7 +186,10 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   });
   const pullRequestsSupported = usePullRequestsSupported();
   const watchScreenSupported = useWatchScreenSupported();
-  const watchUnreadCount = useWatchUnreadCount(useActiveEnvironmentId());
+  // Aggregate across environments: unread accrues for every environment the
+  // coordinator follows, and the badge is the ambient "something happened"
+  // signal — a non-active environment's alerts must surface here too.
+  const watchUnreadCount = useWatchUnreadTotal();
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);

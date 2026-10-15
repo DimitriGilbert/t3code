@@ -10,6 +10,7 @@ import type {
   WatchConnectorInstallRequest,
   WatchConnectorPack,
   WatchConnectorPackManifest,
+  WatchConnectorPackWidget,
   WatchConnectorPrepareInstallConfirmResult,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
@@ -58,7 +59,8 @@ import { watchEnvironment } from "~/state/watch";
  * - on upgrades, the pending manifest diffed against the approved one;
  * - a `localUrl` request renders nothing it fetched: the "local URL" review
  *   acknowledgement runs `prepareInstallConfirm` first, which performs the
- *   deferred fetch under that acknowledgement;
+ *   deferred fetch under that acknowledgement — then the fetched manifest is
+ *   shown and the review acknowledgement must be given again, as a fresh act;
  * - confirm spends the single-use token prepare minted — the token never
  *   leaves this dialog.
  */
@@ -112,6 +114,7 @@ function ManifestDiffRows(props: {
     { label: "egress", diff: diff.egressHosts },
     { label: "secret", diff: diff.secretKeys },
     { label: "operation", diff: diff.operations },
+    { label: "widget", diff: diff.widgets.names },
   ]) {
     for (const entry of group.diff.added) {
       rows.push({ key: `${group.label}:+:${entry}`, added: true, text: `${group.label} ${entry}` });
@@ -123,6 +126,50 @@ function ManifestDiffRows(props: {
         text: `${group.label} ${entry}`,
       });
     }
+  }
+  for (const change of diff.operationDescriptions) {
+    rows.push({
+      key: `operation-description:~:${change.name}`,
+      added: true,
+      text: `operation ${change.name} description: ${change.from ?? "none"} → ${change.to ?? "none"}`,
+    });
+  }
+  for (const widget of diff.widgets.changed) {
+    if (widget.file !== null) {
+      rows.push({
+        key: `widget-file:~:${widget.name}`,
+        added: true,
+        text: `widget ${widget.name} file ${widget.file.from} → ${widget.file.to}`,
+      });
+    }
+    for (const group of [
+      { label: "subscription", diff: widget.subscriptions },
+      { label: "action", diff: widget.actions },
+    ]) {
+      for (const entry of group.diff.added) {
+        rows.push({
+          key: `widget-${group.label}:+:${widget.name}:${entry}`,
+          added: true,
+          text: `widget ${widget.name} ${group.label} ${entry}`,
+        });
+      }
+      for (const entry of group.diff.removed) {
+        rows.push({
+          key: `widget-${group.label}:-:${widget.name}:${entry}`,
+          added: false,
+          text: `widget ${widget.name} ${group.label} ${entry}`,
+        });
+      }
+    }
+  }
+  if (diff.authSchemaChanged) {
+    rows.push({ key: "auth-schema", added: true, text: "authSchema changed" });
+  }
+  // Catch-all for anything the itemized groups miss (today: the pack id;
+  // later: any new manifest field) so a real surface move can never render as
+  // a bare `schemaVersion N → M`.
+  if (diff.surfaceChanged) {
+    rows.push({ key: "surface", added: true, text: "manifest surface changed" });
   }
   if (rows.length === 0) {
     return <span className="text-xs text-muted-foreground">No manifest changes.</span>;
@@ -143,6 +190,21 @@ function ManifestDiffRows(props: {
       ))}
     </div>
   );
+}
+
+/**
+ * One line of bridge-surface review for a bundled widget: which data
+ * subscriptions and actions the sandboxed frame may use, or that it has none.
+ */
+function widgetBridgeSummary(widget: WatchConnectorPackWidget): string {
+  const parts: Array<string> = [];
+  if (widget.bridge.subscriptions.length > 0) {
+    parts.push(`reads ${widget.bridge.subscriptions.join(", ")}`);
+  }
+  if (widget.bridge.actions.length > 0) {
+    parts.push(`actions ${widget.bridge.actions.join(", ")}`);
+  }
+  return parts.length === 0 ? "no bridge access" : parts.join(" · ");
 }
 
 function ConfirmBody(props: {
@@ -208,6 +270,38 @@ function ConfirmBody(props: {
             entries={manifest.secretKeys}
             icon={KeyRoundIcon}
           />
+          {manifest.operations.length === 0 ? null : (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                Operations it exposes
+              </span>
+              <div className="flex flex-col gap-1.5">
+                {manifest.operations.map((operation) => (
+                  <div key={operation.name} className="flex flex-col gap-0.5">
+                    <span className="w-fit font-mono text-xs">{operation.name}</span>
+                    {operation.description === undefined ? null : (
+                      <span className="text-xs text-muted-foreground">{operation.description}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {(manifest.widgets ?? []).length === 0 ? null : (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">Bundled widgets</span>
+              <div className="flex flex-col gap-1.5">
+                {(manifest.widgets ?? []).map((widget) => (
+                  <div key={widget.name} className="flex flex-col gap-0.5">
+                    <span className="w-fit font-mono text-xs">{widget.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {widgetBridgeSummary(widget)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {manifest.secretKeys.length > 0 ? (
             <Alert variant="info">
               <AlertDescription>
@@ -231,13 +325,11 @@ export function WatchConnectorInstallConfirmDialog(props: {
   const request = props.request;
   const requestId = request?.id ?? null;
   const isUpgrade = request?.kind === "upgrade";
-  // A localUrl request may only be fetched under the caller's acknowledgement;
-  // everything else prepares — minting the confirm token — as soon as it opens.
-  const needsLocalFetchAck = request !== null && watchInstallRequestIsUnfetched(request);
-  const needsReviewAck = request !== null && watchInstallRequestNeedsReviewAck(request);
 
   const [reviewed, setReviewed] = useState(false);
-  const [prepared, setPrepared] = useState<WatchConnectorPrepareInstallConfirmResult | null>(null);
+  const [preparedResult, setPrepared] = useState<WatchConnectorPrepareInstallConfirmResult | null>(
+    null,
+  );
   const [preparing, setPreparing] = useState(false);
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -263,6 +355,22 @@ export function WatchConnectorInstallConfirmDialog(props: {
   // A new request resets all dialog state during render — including the
   // preparing flag, so the auto-prepare below is never double-run.
   const [seenRequestId, setSeenRequestId] = useState(requestId);
+  // A prepared result belongs to the request that produced it; a stale one
+  // from the previous request must not leak into this render's derivations
+  // (the reset below only takes effect on the next render).
+  const prepared = seenRequestId === requestId ? preparedResult : null;
+  const shownRequest = prepared?.request ?? request;
+  // A localUrl request may only be fetched under the caller's acknowledgement;
+  // everything else prepares — minting the confirm token — as soon as it
+  // opens. Derived from `shownRequest` so the fetched request that prepare
+  // returns flips the dialog from the fetch ack to the review ack.
+  const needsLocalFetchAck = shownRequest !== null && watchInstallRequestIsUnfetched(shownRequest);
+  const needsReviewAck = shownRequest !== null && watchInstallRequestNeedsReviewAck(shownRequest);
+  // The auto-prepare below must not re-fire when `needsLocalFetchAck` flips
+  // false as `prepared` (or a live request update) lands. Read/written only in
+  // effects and handlers; cleared by the requestId-keyed effect below.
+  const prepareAttemptedRef = useRef<typeof requestId>(null);
+
   if (seenRequestId !== requestId) {
     setSeenRequestId(requestId);
     setReviewed(false);
@@ -273,8 +381,36 @@ export function WatchConnectorInstallConfirmDialog(props: {
     setConfirmError(null);
   }
 
+  // The deferred-fetch ack and the post-fetch review ack are two separate
+  // acts: when `prepared` lands for a `localUrl` request the checkbox flips
+  // meaning, and the checked state must not carry over.
+  const [preparedForAck, setPreparedForAck] = useState(prepared);
+  if (prepared !== preparedForAck) {
+    setPreparedForAck(prepared);
+    if (prepared !== null && request?.localUrl === true) {
+      setReviewed(false);
+    }
+  }
+
+  // Effects run in declaration order, so on a request change this reset lands
+  // before the auto-prepare below reads the ref — covering the close-then-
+  // reopen-same-request case the render-phase reset cannot reach. The effect
+  // body deliberately only touches the ref; `requestId` is the trigger.
   useEffect(() => {
-    if (requestId === null || needsLocalFetchAck) return;
+    prepareAttemptedRef.current = null;
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- the body only touches the ref; requestId is the intentional trigger
+  }, [requestId]);
+
+  useEffect(() => {
+    if (
+      requestId === null ||
+      needsLocalFetchAck ||
+      prepared !== null ||
+      prepareAttemptedRef.current === requestId
+    ) {
+      return;
+    }
+    prepareAttemptedRef.current = requestId;
     let cancelled = false;
     void prepareConfirm({
       environmentId: props.environmentId,
@@ -298,10 +434,11 @@ export function WatchConnectorInstallConfirmDialog(props: {
     };
     // prepareConfirm is a stable command runner; the request id is the key.
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
-  }, [requestId, needsLocalFetchAck, props.environmentId]);
+  }, [requestId, needsLocalFetchAck, prepared, props.environmentId]);
 
   const runPrepareWithAck = () => {
     if (requestId === null) return;
+    prepareAttemptedRef.current = requestId;
     setPreparing(true);
     setPrepareError(null);
     void prepareConfirm({
@@ -350,12 +487,11 @@ export function WatchConnectorInstallConfirmDialog(props: {
     });
   };
 
-  const shownRequest = prepared?.request ?? request;
   const confirmDisabled =
     prepared === null ||
     confirming ||
     !canConfirm ||
-    (needsReviewAck && !needsLocalFetchAck && !reviewed);
+    ((needsReviewAck || needsLocalFetchAck) && !reviewed);
 
   return (
     <Dialog open={request !== null} onOpenChange={(open) => (!open ? props.onClose() : undefined)}>

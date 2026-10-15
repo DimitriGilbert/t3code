@@ -5,6 +5,7 @@ import type {
   WatchWidgetId,
   WatchWidgetRefreshPolicy,
 } from "@t3tools/contracts";
+import { isUnknownUnionMember } from "@t3tools/contracts";
 import {
   buildWatchAppDocument,
   makeWatchAppHost,
@@ -62,6 +63,10 @@ function WatchAppConnectorFeed(props: WatchAppFeedProps) {
   );
   useEffect(() => {
     if (result._tag === "Success") {
+      // A stream item kind this build does not know (a newer server's
+      // decode) carries nothing the widget could interpret — skip it rather
+      // than posting a malformed envelope.
+      if (isUnknownUnionMember(result.value)) return;
       props.host.deliver(props.feed.name, result.value);
       return;
     }
@@ -202,12 +207,53 @@ export function WatchAppWebView(props: {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Context changes trigger a resend.
   }, [theme, props.hostContext]);
 
+  // The bridge belongs to the generated document, which loads exactly once as
+  // about:blank. `loads` counts main-frame load starts so a second one — a
+  // navigation the JS gate failed to stop, `location.reload()`, an Android
+  // callback timeout that failed open — stops the session instead of letting
+  // a page T3 never generated pose as the widget. Web parity: the iframe's
+  // `onLoad` counter in `WatchAppFrame`; the count, not the URL, is the check
+  // so a same-URL reload counts too.
+  const loads = useRef({ document: html, count: 0 });
+
+  // One terminal teardown for every way the session dies: disposing the host
+  // rides its closeName teardown (closeSubscription → feed unmount → atom
+  // unsubscribe), and clearing `host` keeps the feed block from rendering.
+  const stopSession = () => {
+    hostRef.current?.dispose();
+    hostRef.current = null;
+    setHost(null);
+  };
+
+  const reportNavigatedAway = () =>
+    latest.current.props.onViolation?.({
+      code: "navigatedAway",
+      message: "The widget document navigated away and was stopped.",
+    });
+
+  const onMainFrameLoadStart = () => {
+    if (loads.current.document !== html) loads.current = { document: html, count: 0 };
+    loads.current.count += 1;
+    if (loads.current.count <= 1) return;
+    stopSession();
+    setNavigatedAway(true);
+    reportNavigatedAway();
+  };
+
   // Anything but the generated page's own `about:blank` means the widget left
   // its page; the bridge is dead either way, so stop it and say so.
   const stopIfNavigated = (url: string) => {
     if (navigatedAway || url === "about:blank" || url === "") return;
-    hostRef.current?.dispose();
+    stopSession();
     setNavigatedAway(true);
+    reportNavigatedAway();
+  };
+
+  // Process death and load failure are terminal for the same reason a bad
+  // navigation is: the page the bridge was talking to is gone.
+  const onTerminalFault = () => {
+    stopSession();
+    setCrashed(true);
   };
 
   const renderFeed =
@@ -242,18 +288,25 @@ export function WatchAppWebView(props: {
           allowsBackForwardNavigationGestures={false}
           // The JS gate, not the whitelist, is the enforcement point on both
           // platforms — the same contract as web: the generated page loads
-          // exactly once, as about:blank, and every other request is denied.
-          // Its CSP already denies subframes (`default-src 'none'`).
-          // Residual: Android fails open if the callback never answers within
-          // the native timeout; that platform limitation is covered by the
-          // `watchAgentWidgetsMobile` kill switch.
-          onShouldStartLoadWithRequest={(request) => request.url === "about:blank"}
+          // exactly once, as about:blank, and every other request is denied —
+          // including a second about:blank once the first load has started,
+          // so even `location.reload()` is refused. A request that still gets
+          // through (Android fails open if the callback never answers within
+          // the native timeout — that platform limitation is covered by the
+          // `watchAgentWidgetsMobile` kill switch) is caught by the load
+          // counter below. Its CSP already denies subframes
+          // (`default-src 'none'`).
+          onShouldStartLoadWithRequest={(request) =>
+            request.url === "about:blank" &&
+            (loads.current.document !== html || loads.current.count === 0)
+          }
+          onLoadStart={onMainFrameLoadStart}
           onNavigationStateChange={(navState) => stopIfNavigated(navState.url)}
-          onContentProcessDidTerminate={() => setCrashed(true)}
-          onRenderProcessGone={() => setCrashed(true)}
+          onContentProcessDidTerminate={onTerminalFault}
+          onRenderProcessGone={onTerminalFault}
           onLoadEnd={() => setLoaded(true)}
-          onError={() => setCrashed(true)}
-          onHttpError={() => setCrashed(true)}
+          onError={onTerminalFault}
+          onHttpError={onTerminalFault}
           onMessage={(event: WebViewMessageEvent) => {
             let message: unknown;
             try {
@@ -271,7 +324,7 @@ export function WatchAppWebView(props: {
           <ActivityIndicator />
         </View>
       ) : null}
-      {host === null
+      {crashed || navigatedAway || host === null
         ? null
         : subscriptions.map((feed) => (
             <Fragment key={feed.name}>

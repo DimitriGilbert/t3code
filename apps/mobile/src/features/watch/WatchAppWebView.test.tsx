@@ -5,8 +5,9 @@ import {
   WatchWidgetId,
   type WatchWidgetBridgeManifest,
 } from "@t3tools/contracts";
+import type { WatchAppHost } from "@t3tools/client-runtime/watch-app-bridge";
 import * as Schema from "effect/Schema";
-import { act } from "react";
+import { act, useEffect, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -64,7 +65,7 @@ const manifest: WatchWidgetBridgeManifest = {
 let container: HTMLDivElement;
 let root: Root | null = null;
 
-function mount() {
+function mount(overrides: Partial<ComponentProps<typeof WatchAppWebView>> = {}) {
   act(() => {
     root = createRoot(container);
     root.render(
@@ -76,6 +77,7 @@ function mount() {
         scriptHash="abc123hash=="
         connectorInstanceId={instanceId}
         renderFeed={() => null}
+        {...overrides}
       />,
     );
   });
@@ -125,6 +127,122 @@ describe("WatchAppWebView load gates", () => {
     expect(webViewProps().originWhitelist).toEqual(["*"]);
     expect(shouldStartLoad("about:blank")).toBe(true);
     expect(shouldStartLoad("https://evil.example/?data=secret")).toBe(false);
+  });
+});
+
+/** Records feed mounts/unmounts so a disposed host's closeName path is observed end to end. */
+function FeedProbe(props: { name: string; opened: Array<string>; closed: Array<string> }) {
+  const { name, opened, closed } = props;
+  useEffect(() => {
+    opened.push(name);
+    return () => {
+      closed.push(name);
+    };
+  }, [name, opened, closed]);
+  return null;
+}
+
+describe("WatchAppWebView session teardown", () => {
+  const postToHost = (message: unknown) => {
+    (webViewProps().onMessage as (event: { nativeEvent: { data: string } }) => void)({
+      nativeEvent: { data: JSON.stringify(message) },
+    });
+  };
+
+  // Drives the bridge subscribe request the prelude would post; the open
+  // handshake resolves on a microtask, so this awaits act to settle it.
+  const openStatusFeed = async () => {
+    await act(async () => {
+      postToHost({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "t3.watch/subscribe",
+        params: { name: "status" },
+      });
+    });
+  };
+
+  it("keeps the session alive on the first load and stops it on a second", async () => {
+    const onViolation = vi.fn();
+    const opened: Array<string> = [];
+    const closed: Array<string> = [];
+    mount({
+      onViolation,
+      renderFeed: ({ feed }) => <FeedProbe name={feed.name} opened={opened} closed={closed} />,
+    });
+    await openStatusFeed();
+    expect(opened).toEqual(["status"]);
+
+    act(() => {
+      (webViewProps().onLoadStart as () => void)();
+    });
+    // The first load is the generated document itself — the session lives.
+    expect(closed).toEqual([]);
+    expect(onViolation).not.toHaveBeenCalled();
+
+    act(() => {
+      (webViewProps().onLoadStart as () => void)();
+    });
+    // A second load means a page T3 never generated (e.g. location.reload()).
+    expect(closed).toEqual(["status"]);
+    expect(container.textContent).toContain("The widget left its page and was stopped");
+    expect(onViolation).toHaveBeenCalledWith(expect.objectContaining({ code: "navigatedAway" }));
+  });
+
+  it("denies even an about:blank request once the first load has started", () => {
+    mount();
+    act(() => {
+      (webViewProps().onLoadStart as () => void)();
+    });
+    expect(shouldStartLoad("about:blank")).toBe(false);
+    expect(shouldStartLoad("https://evil.example/")).toBe(false);
+  });
+
+  it("closes subscriptions and reports navigatedAway when the page navigates away", async () => {
+    const onViolation = vi.fn();
+    const opened: Array<string> = [];
+    const closed: Array<string> = [];
+    mount({
+      onViolation,
+      renderFeed: ({ feed }) => <FeedProbe name={feed.name} opened={opened} closed={closed} />,
+    });
+    await openStatusFeed();
+    expect(opened).toEqual(["status"]);
+
+    act(() => {
+      (webViewProps().onNavigationStateChange as (navState: { url: string }) => void)({
+        url: "https://evil.example/",
+      });
+    });
+    expect(closed).toEqual(["status"]);
+    expect(container.textContent).toContain("The widget left its page and was stopped");
+    expect(onViolation).toHaveBeenCalledWith(expect.objectContaining({ code: "navigatedAway" }));
+  });
+
+  it.each([
+    "onContentProcessDidTerminate",
+    "onRenderProcessGone",
+    "onError",
+    "onHttpError",
+  ] as const)("disposes the host and closes subscriptions when %s fires", async (handler) => {
+    const opened: Array<string> = [];
+    const closed: Array<string> = [];
+    let capturedHost: WatchAppHost | null = null;
+    mount({
+      renderFeed: (feedProps) => {
+        capturedHost = feedProps.host;
+        return <FeedProbe name={feedProps.feed.name} opened={opened} closed={closed} />;
+      },
+    });
+    await openStatusFeed();
+    const dispose = vi.spyOn(capturedHost!, "dispose");
+
+    act(() => {
+      (webViewProps()[handler] as () => void)();
+    });
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(closed).toEqual(["status"]);
+    expect(container.textContent).toContain("Unable to load the widget");
   });
 });
 

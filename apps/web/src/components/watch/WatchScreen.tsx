@@ -40,6 +40,7 @@ import type {
   WatchWidgetPlacement,
   WatchWidgetSourceRecord,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { CheckIcon, LayoutDashboardIcon, PencilIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -361,7 +362,7 @@ function WatchLiveBoard(props: {
         <WatchConnectorSecretDialog
           instance={secretInstance}
           secretKeys={secretPack?.manifest.secretKeys ?? []}
-          onSubmit={(secrets) => {
+          onSubmit={(secrets, clearSecretKeys) => {
             setSecretInstanceId(null);
             void setConnectorInstanceConfig({
               environmentId: props.environmentId,
@@ -369,6 +370,7 @@ function WatchLiveBoard(props: {
                 instanceId: secretInstance.id,
                 config: secretInstance.config,
                 secrets,
+                ...(clearSecretKeys.length === 0 ? {} : { clearSecretKeys: [...clearSecretKeys] }),
               },
             }).then((result) => reportConnectorConfigFailure(result, "Could not update secrets"));
           }}
@@ -391,18 +393,48 @@ function WatchBoardSkeleton() {
 }
 
 /**
- * The toast half of a revision conflict — `revisionCheckedCommand` already
- * flagged the page's inline reload banner; this prompts at the write that
- * failed. Other failures stay on the command reporter.
+ * Result handler for every watch page/widget write. A revision conflict
+ * keeps its dedicated warning — `revisionCheckedCommand` already flagged
+ * the page's inline reload banner — while every other failure (layout
+ * collision, page error, permission denial, transport) surfaces as an
+ * error toast rather than vanishing to the console reporter. Exported for
+ * tests.
  */
-function reportWatchWriteConflict(result: AtomCommandResult<unknown, unknown>): void {
-  if (!AsyncResult.isFailure(result)) return;
-  if (!isWatchPageRevisionConflict(squashAtomCommandFailure(result))) return;
+export function reportWatchWriteResult(result: AtomCommandResult<unknown, unknown>): void {
+  if (AsyncResult.isSuccess(result) || Cause.hasInterruptsOnly(result.cause)) return;
+  const failure = squashAtomCommandFailure(result);
+  if (isWatchPageRevisionConflict(failure)) {
+    toastManager.add({
+      type: "warning",
+      title: "This page changed on another client.",
+      description: "Reload to pick up the latest layout, then retry.",
+      timeout: 5000,
+    });
+    return;
+  }
   toastManager.add({
-    type: "warning",
-    title: "This page changed on another client.",
-    description: "Reload to pick up the latest layout, then retry.",
-    timeout: 5000,
+    type: "error",
+    title: "The watch change did not apply.",
+    description:
+      failure instanceof Error && failure.message !== ""
+        ? failure.message
+        : "The write was rejected.",
+  });
+}
+
+/**
+ * Configure-save plumbing kept separate so tests can drive it: the outcome
+ * is reported and the form closes only on success — a conflict or failure
+ * keeps the draft mounted so the retry the toast suggests has something to
+ * send. Exported for tests.
+ */
+export function settleWatchWidgetConfigure(
+  write: Promise<AtomCommandResult<unknown, unknown>>,
+  onClose: () => void,
+): void {
+  void write.then((result) => {
+    reportWatchWriteResult(result);
+    if (AsyncResult.isSuccess(result)) onClose();
   });
 }
 
@@ -513,6 +545,7 @@ export function WatchScreen() {
             : { scope: "project" as const, projectId }),
         },
       }).then((result) => {
+        reportWatchWriteResult(result);
         if (!AsyncResult.isSuccess(result)) return;
         setSelectedPageId(result.value.page.id);
         setRenamingPageId(result.value.page.id);
@@ -526,7 +559,7 @@ export function WatchScreen() {
     (pageId: WatchPageId, name: string) => {
       setRenamingPageId(null);
       if (environmentId === null) return;
-      void renamePage({ environmentId, input: { pageId, name } });
+      void renamePage({ environmentId, input: { pageId, name } }).then(reportWatchWriteResult);
     },
     [environmentId, renamePage],
   );
@@ -542,7 +575,7 @@ export function WatchScreen() {
         })
         .then((confirmed) => {
           if (!confirmed) return;
-          void deletePage({ environmentId, input: { pageId } });
+          void deletePage({ environmentId, input: { pageId } }).then(reportWatchWriteResult);
         });
     },
     [allPages, deletePage, environmentId],
@@ -556,6 +589,7 @@ export function WatchScreen() {
         environmentId,
         input: watchGalleryInstantiateInput(template),
       }).then((result) => {
+        reportWatchWriteResult(result);
         if (!AsyncResult.isSuccess(result)) return;
         setSelectedPageId(result.value.page.id);
       });
@@ -570,7 +604,7 @@ export function WatchScreen() {
       void addWidget({
         environmentId,
         input: buildWatchWidgetAddInput(selectedPage, selectedWidgets, spec.kind),
-      }).then(reportWatchWriteConflict);
+      }).then(reportWatchWriteResult);
     },
     [addWidget, environmentId, selectedPage, selectedWidgets],
   );
@@ -593,7 +627,7 @@ export function WatchScreen() {
           source,
           instanceId === undefined ? {} : { instanceId },
         ),
-      }).then(reportWatchWriteConflict);
+      }).then(reportWatchWriteResult);
     },
     [addWidget, environmentId, pickerInstances, selectedPage, selectedWidgets],
   );
@@ -611,19 +645,21 @@ export function WatchScreen() {
       void setLayout({
         environmentId,
         input: buildWatchWidgetSetLayoutInput(selectedPage, widgetId, placement),
-      }).then(reportWatchWriteConflict);
+      }).then(reportWatchWriteResult);
     },
     [editing, environmentId, selectedPage, selectedWidgets, setLayout],
   );
 
   const handleConfigureSave = useCallback(
     (widget: WatchWidget, config: WatchWidgetConfig) => {
-      setConfiguringWidgetId(null);
       if (environmentId === null) return;
-      void configureWidget({
-        environmentId,
-        input: buildWatchWidgetConfigureInput(widget, config),
-      }).then(reportWatchWriteConflict);
+      settleWatchWidgetConfigure(
+        configureWidget({
+          environmentId,
+          input: buildWatchWidgetConfigureInput(widget, config),
+        }),
+        () => setConfiguringWidgetId(null),
+      );
     },
     [configureWidget, environmentId],
   );
@@ -685,14 +721,14 @@ export function WatchScreen() {
         void addWidget({
           environmentId,
           input: buildWatchWidgetDuplicateInput(page, selectedWidgets, widget),
-        }).then(reportWatchWriteConflict);
+        }).then(reportWatchWriteResult);
         return;
       }
       if (action === "remove") {
         void removeWidget({
           environmentId,
           input: { pageId: page.id, widgetId: widget.id, expectedRevision: page.revision },
-        }).then(reportWatchWriteConflict);
+        }).then(reportWatchWriteResult);
         return;
       }
       if (action.startsWith("move-to:")) {
@@ -704,7 +740,7 @@ export function WatchScreen() {
         void moveWidgetToPage({
           environmentId,
           input: buildWatchWidgetMoveToPageInput(widget, page, destination, destinationWidgets),
-        }).then(reportWatchWriteConflict);
+        }).then(reportWatchWriteResult);
       }
     },
     [
@@ -768,7 +804,12 @@ export function WatchScreen() {
     [handleCreatePage, requestEditToggle, selectedPage],
   );
 
-  useEffect(() => onWatchUiAction(handleUiAction), [handleUiAction]);
+  // Only a supported screen consumes queued intents — registering while
+  // gated off would flush (and discard) actions meant for a real mount.
+  useEffect(() => {
+    if (!watchSupported) return;
+    return onWatchUiAction(handleUiAction);
+  }, [handleUiAction, watchSupported]);
 
   useEscapeToGoBack(
     editing
@@ -829,6 +870,7 @@ export function WatchScreen() {
               onDuplicatePage={(pageId) => {
                 if (environmentId === null) return;
                 void duplicatePage({ environmentId, input: { pageId } }).then((result) => {
+                  reportWatchWriteResult(result);
                   if (AsyncResult.isSuccess(result)) setSelectedPageId(result.value.page.id);
                 });
               }}
@@ -836,6 +878,7 @@ export function WatchScreen() {
               onRestorePage={(pageId) => {
                 if (environmentId === null) return;
                 void restorePage({ environmentId, input: { pageId } }).then((result) => {
+                  reportWatchWriteResult(result);
                   if (AsyncResult.isSuccess(result)) setSelectedPageId(result.value.page.id);
                 });
               }}
@@ -848,11 +891,13 @@ export function WatchScreen() {
                     scope,
                     ...(projectId === undefined ? {} : { projectId }),
                   },
-                });
+                }).then(reportWatchWriteResult);
               }}
               onReorderPage={(pageId, beforePageId) => {
                 if (environmentId === null) return;
-                void reorderPage({ environmentId, input: { pageId, beforePageId } });
+                void reorderPage({ environmentId, input: { pageId, beforePageId } }).then(
+                  reportWatchWriteResult,
+                );
               }}
               onStartRename={(pageId) => setRenamingPageId(pageId)}
               onToggleEdit={requestEditToggle}

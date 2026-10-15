@@ -175,6 +175,8 @@ export default defineConfig({
       // Vendored and generated C.
       "apps/mobile/modules/t3-highlights/Vendor/**",
       "apps/mobile/modules/t3-highlights/cpp/generated/**",
+      // Vendored upstream artifacts stay byte-identical to their source.
+      "apps/server/vendor/**",
       "*.icon/**",
     ],
     sortPackageJson: {},
@@ -204,6 +206,8 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
+      // Vendored upstream artifacts stay byte-identical to their source.
+      "apps/server/vendor/**",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
     jsPlugins: ["./oxlint-plugin-t3code/index.ts", "@shadcn/lint"],

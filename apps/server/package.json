@@ -11,7 +11,8 @@
     "t3": "./dist/bin.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "vendor"
   ],
   "type": "module",
   "scripts": {

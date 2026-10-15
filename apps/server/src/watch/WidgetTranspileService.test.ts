@@ -634,7 +634,9 @@ it.effect("the shared compiler client is reused across publishes and closed at s
       }),
     ).pipe(
       Effect.provide(
-        layerService(WidgetTranspileService.makeTranspilerLayer(Effect.succeed(module))),
+        layerService(
+          WidgetTranspileService.makeTranspilerLayer(Effect.succeed(module), wasmUnavailable),
+        ),
       ),
     );
     // Layer teardown closed the shared server exactly once.
@@ -888,6 +890,131 @@ it.effect("escapes </script> in the artifact and hashes the escaped bytes", () =
     Effect.provide(
       layerService(
         layerTranspiler(() => Effect.succeed('var html = "</script>";\nT3.render(() => html);')),
+      ),
+    ),
+  ),
+);
+
+// ── Backend selection ────────────────────────────────────────────────────
+
+/**
+ * The real vendored wasm compiler wrapped as a `WidgetTscRsClient` —
+ * layer init's preferred backend.
+ */
+const realWasmClient = Effect.map(
+  WidgetTranspileService.loadTsRustWasm,
+  WidgetTranspileService.makeWasmClient,
+);
+
+const wasmUnavailable = Effect.fail(
+  new WidgetTranspileService.WidgetTranspileError({
+    reason: "unavailable",
+    detail: "The vendored ts-rust wasm module could not be loaded: ENOENT.",
+  }),
+);
+
+const unavailableNativeModule = Effect.fail(
+  new WidgetTranspileService.WidgetTranspileError({
+    reason: "unavailable",
+    detail: "The tsc-rs package could not be loaded: Cannot find module 'tsc-rs'.",
+  }),
+);
+
+it.effect("the wasm backend produces the same artifact shape without touching native", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      // The native module load fails if it ever runs — a ready artifact
+      // proves the publish went through the vendored wasm backend.
+      const { source } = yield* service.publish(
+        input('const App = () => <div className="card">hi</div>;\nT3.render(App);'),
+      );
+      assert.equal(source.status, "ready");
+
+      const { bundle } = yield* service.get({ sourceId: source.sourceId });
+      if (bundle === null) assert.fail("expected the emitted bundle");
+      assert.include(bundle, "T3.h");
+      assert.notInclude(bundle, "require(");
+      assert.isTrue(bundle.startsWith("(async () => {"));
+      assert.equal(
+        source.scriptHash,
+        NodeCrypto.createHash("sha256").update(bundle, "utf8").digest("base64"),
+      );
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        WidgetTranspileService.makeTranspilerLayer(unavailableNativeModule, realWasmClient),
+      ),
+    ),
+  ),
+);
+
+it.effect("a missing wasm module falls back to the native tsc-rs client", () => {
+  let transpiles = 0;
+  const module = fakeTscRsModule({
+    transpileModule: () => {
+      transpiles += 1;
+      return Promise.resolve({ outputText: "T3.render();" });
+    },
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const { source } = yield* service.publish(input("const a = 1;"));
+      assert.equal(source.status, "ready");
+      assert.equal(transpiles, 1);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        WidgetTranspileService.makeTranspilerLayer(Effect.succeed(module), wasmUnavailable),
+      ),
+    ),
+  );
+});
+
+it.effect("unavailable latches only when both backends fail", () => {
+  let nativeLoads = 0;
+  const nativeModule = Effect.suspend(() => {
+    nativeLoads += 1;
+    return unavailableNativeModule;
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const first = yield* service.publish(input("const a = 1;"));
+      assert.equal(first.source.status, "failed");
+      assert.include(first.source.failure?.detail ?? "", "could not be loaded");
+
+      // The second publish fast-fails from the native latch — the wasm
+      // probe and the tsc-rs require ran once each, at init/first build.
+      const second = yield* service.publish(input("const a = 2;"));
+      assert.equal(second.source.status, "failed");
+      assert.equal(nativeLoads, 1);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(WidgetTranspileService.makeTranspilerLayer(nativeModule, wasmUnavailable)),
+    ),
+  );
+});
+
+it.effect("the wasm backend reports a bad build through the same failed record", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const { source } = yield* service.publish(input("const broken = ("));
+      assert.equal(source.status, "failed");
+      assert.equal(source.failure?.cause, "transpileFailed");
+      // Diagnostics render in the same file(line,char): error TSxxxx
+      // shape the native formatter produces.
+      assert.include(source.failure?.detail ?? "", "TS1109");
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        WidgetTranspileService.makeTranspilerLayer(unavailableNativeModule, realWasmClient),
       ),
     ),
   ),

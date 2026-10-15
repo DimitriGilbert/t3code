@@ -1,8 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off - tsc-rs is external to the CLI
 // bundle and must load through createRequire inside a Node SEA; artifact
 // hashes use node:crypto (same posture as PackStore.ts / NodePtyAdapter.ts).
+// The vendored ts-rust wasm module loads the same way: node:fs reads its
+// bytes by real path and node:path/node:url resolve the vendored dir.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
 import {
   WatchWidgetBridgeManifest,
@@ -35,12 +40,15 @@ import * as ServerConfig from "../config.ts";
 
 /**
  * Agent-authored widget pipeline: `publish` validates the bridge manifest,
- * transpiles the single-file TS/TSX source through a shared `tsc-rs`
- * compiler server into an IIFE artifact cached on disk by content hash, and
- * records the outcome as a `WatchWidgetSourceRecord`. A bad build is *data*,
- * not a call failure — the record's `transpileFailed` state is what the
- * widget shell renders; only manifest shape, source-size, and rate-limit
- * violations reject the call.
+ * transpiles the single-file TS/TSX source through tsc-rs into an IIFE
+ * artifact cached on disk by content hash, and records the outcome as a
+ * `WatchWidgetSourceRecord`. Two compile backends produce the same emit:
+ * the vendored in-process wasm module is preferred, and the native
+ * `@tsc-rs/*` compiler server is the automatic fallback when the wasm file
+ * assets do not exist (a SEA bundle). A bad build is *data*, not a call
+ * failure — the record's `transpileFailed` state is what the widget shell
+ * renders; only manifest shape, source-size, and rate-limit violations
+ * reject the call.
  *
  * Emitted code contract (the hardened host document owns the other half):
  * the artifact is a self-contained IIFE. `transpileModule` rewrites one
@@ -312,6 +320,181 @@ export const makeBuild =
       return `(async () => {\n${result.outputText}\n})();\n`;
     });
 
+// ── Wasm backend ─────────────────────────────────────────────────────────
+
+/**
+ * `WebAssembly` is a real Node global at runtime, but the ambient lib set
+ * declares only the namespace types (no lib.dom here). The module-scoped
+ * binding gives `Module`'s constructor a type without pulling in a lib.
+ */
+declare const WebAssembly: {
+  readonly Module: new (bytes: Uint8Array) => WebAssembly.Module;
+};
+
+/**
+ * The vendored ts-rust wasm host — upstream `npm/wasm/core.js`, kept
+ * byte-identical in `vendor/ts-rust-wasm` (see its VENDORED.md). Type-only
+ * import: the module itself loads through `createRequire`, like the tsc-rs
+ * package, so no bundler ever sees the specifier.
+ */
+export type TsRustWasmCore = typeof import("../../vendor/ts-rust-wasm/core.js");
+
+export interface TsRustWasmCompiler {
+  /** Compiled once at layer init; each run instantiates a fresh instance. */
+  readonly module: WebAssembly.Module;
+  readonly core: TsRustWasmCore;
+}
+
+/**
+ * The tsconfig the wasm backend compiles against. A real `tsc -p` run
+ * typechecks and resolves modules, so `noCheck` and `noResolve` bring it
+ * back to `transpileModule`'s contract — parse/options diagnostics only,
+ * and imports never reach a real fs — keeping both backends accepting and
+ * rejecting the same sources before the residue scan runs. The enum-valued
+ * options mirror `WIDGET_COMPILER_OPTIONS` (target 9 = ES2022, module 1 =
+ * CommonJS, jsx 2 = react); keep them in sync.
+ */
+const WIDGET_WASM_TSCONFIG_JSON = JSON.stringify({
+  compilerOptions: {
+    target: "ES2022",
+    module: "CommonJS",
+    jsx: "react",
+    jsxFactory: WIDGET_COMPILER_OPTIONS.jsxFactory,
+    jsxFragmentFactory: WIDGET_COMPILER_OPTIONS.jsxFragmentFactory,
+    strict: WIDGET_COMPILER_OPTIONS.strict,
+    removeComments: WIDGET_COMPILER_OPTIONS.removeComments,
+    noResolve: true,
+    noCheck: true,
+    types: [],
+    outDir: "/out",
+  },
+  files: ["widget.tsx"],
+});
+
+const WASM_PROJECT_DIR = "/app";
+const WASM_EMIT_PATH = "/out/widget.js";
+
+/**
+ * Renders wasm diagnostics in the same `file(line,char): error TSxxxx`
+ * shape tsc-rs's `formatDiagnostics` produces, so a failure detail reads
+ * alike whichever backend ran. The wasm host returns `DiagnosticResponse`
+ * objects — the same wire type as the native API's `Diagnostic`.
+ */
+const formatWasmDiagnostics = (diagnostics: readonly Diagnostic[]) => {
+  const flatten = (diagnostic: Diagnostic): string =>
+    diagnostic.text +
+    (diagnostic.messageChain ?? []).map((child) => `\n  ${flatten(child)}`).join("");
+  const categories = ["warning", "error", "suggestion", "message"];
+  const projectPrefix = `${WASM_PROJECT_DIR}/`;
+  return diagnostics
+    .map((diagnostic) => {
+      const fileName = diagnostic.fileName?.startsWith(projectPrefix)
+        ? diagnostic.fileName.slice(projectPrefix.length)
+        : diagnostic.fileName;
+      const location =
+        fileName !== undefined && diagnostic.startPosition !== undefined
+          ? `${fileName}(${diagnostic.startPosition.line + 1},${diagnostic.startPosition.character + 1}): `
+          : "";
+      return `${location}${categories[diagnostic.category] ?? "error"} ${diagnostic.source ?? "TS"}${diagnostic.code}: ${flatten(diagnostic)}`;
+    })
+    .join("\n");
+};
+
+/**
+ * Adapts the vendored wasm compiler to the `WidgetTscRsClient` seam: each
+ * `transpileModule` is one `runTscAsync` against a memory file system
+ * holding only `widget.tsx` and the generated tsconfig — the compile can
+ * never touch the real filesystem. `compilerOptions`/`fileName` are the
+ * native-path parameters; the wasm run's fixed compile profile lives in
+ * `WIDGET_WASM_TSCONFIG_JSON`.
+ *
+ * `runTscAsync` returns a promise so the call composes with
+ * `transpileTimeoutMs`, but the wasm itself still executes on the calling
+ * thread (Node has no JSPI): an interruption abandons the result rather
+ * than preempting the run — the same "no per-request cancel" posture as
+ * the native server.
+ */
+export const makeWasmClient = (compiler: TsRustWasmCompiler): WidgetTscRsClient => {
+  const stderrDecoder = new TextDecoder();
+  return {
+    transpileModule: async (input) => {
+      const fs = compiler.core.memoryFileSystem({
+        [`${WASM_PROJECT_DIR}/widget.tsx`]: input,
+        [`${WASM_PROJECT_DIR}/tsconfig.json`]: WIDGET_WASM_TSCONFIG_JSON,
+      });
+      let stderr = "";
+      const result = await compiler.core.runTscAsync(compiler.module, {
+        args: ["-p", WASM_PROJECT_DIR],
+        cwd: WASM_PROJECT_DIR,
+        fs,
+        diagnosticsJson: true,
+        stderr: (chunk) => {
+          stderr += stderrDecoder.decode(chunk, { stream: true });
+        },
+      });
+      stderr += stderrDecoder.decode();
+      // The wasm host returns the same DiagnosticResponse wire shape as
+      // the native API; only the RootedFilePath brand on fileName differs.
+      const diagnostics = (result.diagnostics ?? []) as unknown as readonly Diagnostic[];
+      const outputText = fs.files.get(WASM_EMIT_PATH);
+      if (diagnostics.length === 0) {
+        // Diagnostics carry a source error as data; a nonzero exit without
+        // them (a trapped run, a rejected tsconfig) is a client failure,
+        // and a clean run with no emit has nothing to wrap.
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `the wasm tsc run exited ${result.exitCode}${stderr === "" ? "" : `: ${stderr}`}`,
+          );
+        }
+        if (outputText === undefined) {
+          throw new Error(`the wasm tsc run produced no emit${stderr === "" ? "" : `: ${stderr}`}`);
+        }
+      }
+      return { outputText: outputText ?? "", diagnostics };
+    },
+    formatDiagnostics: formatWasmDiagnostics,
+  };
+};
+
+/**
+ * The vendored module is a file asset, so it resolves by path — the same
+ * posture as the tsc-rs createRequire load. `vendor/ts-rust-wasm/` sits at
+ * the package root: two levels up from `src/watch/` in the source layout,
+ * one up from `dist/` in the packed bundle. Where file assets do not exist
+ * — inside a Node SEA, or an artifact that did not stage the dir — every
+ * probe fails, this effect fails `unavailable`, and
+ * `makeTranspilerLayer` falls back to the native backend. The wasm probe
+ * is never the `unavailable` latch.
+ */
+const WASM_VENDOR_URLS = [
+  new URL("../../vendor/ts-rust-wasm/", import.meta.url),
+  new URL("../vendor/ts-rust-wasm/", import.meta.url),
+];
+
+export const loadTsRustWasm = Effect.try({
+  try: (): TsRustWasmCompiler => {
+    let cause: unknown = new Error("no vendor/ts-rust-wasm directory was found");
+    for (const url of WASM_VENDOR_URLS) {
+      const dir = NodeURL.fileURLToPath(url);
+      try {
+        const bytes = NodeFS.readFileSync(NodePath.join(dir, "ts_rust.wasm"));
+        const core = requireForTscRs(NodePath.join(dir, "core.js")) as TsRustWasmCore;
+        return { module: new WebAssembly.Module(bytes), core };
+      } catch (error) {
+        cause = error;
+      }
+    }
+    throw cause;
+  },
+  catch: (cause) =>
+    new WidgetTranspileError({
+      reason: "unavailable",
+      detail: `The vendored ts-rust wasm module could not be loaded: ${causeMessage(cause)}.`,
+    }),
+});
+
+const loadWasmClient = Effect.map(loadTsRustWasm, makeWasmClient);
+
 const loadTscRs = Effect.try({
   try: () => requireForTscRs("tsc-rs/unstable/async") as TscRsModule,
   catch: (cause) =>
@@ -322,20 +505,30 @@ const loadTscRs = Effect.try({
 });
 
 /**
- * One lazily-spawned compiler server shared by every publish. The module
- * require is the first probe (a missing tsc-rs package caches `unavailable`
- * through `Effect.cached` + `makeTranspile`'s latch); the first
- * `transpileModule` is the second — `API` connects to its child process on
- * first request, so a missing `@tsc-rs/<os>-<arch>` binary surfaces there.
- * Caching the client also dedupes concurrent first publishes onto a single
- * server. The API is closed when the layer's scope ends.
+ * Backend selection: the vendored in-process wasm compiler is preferred —
+ * no child process, no platform binary — and is probed once at layer init.
+ * A probe failure (missing file assets in a SEA, a corrupt module) is the
+ * fallback trigger, not a latch: the native tsc-rs compiler server below
+ * keeps its old semantics, so when wasm is absent AND native cannot load
+ * either, the publish path fails `unavailable` through the existing latch.
+ *
+ * The native side is unchanged: one lazily-spawned compiler server shared
+ * by every publish. The module require is the first probe (a missing
+ * tsc-rs package caches `unavailable` through `Effect.cached` +
+ * `makeTranspile`'s latch); the first `transpileModule` is the second —
+ * `API` connects to its child process on first request, so a missing
+ * `@tsc-rs/<os>-<arch>` binary surfaces there. Caching the client also
+ * dedupes concurrent first publishes onto a single server. The API is
+ * closed when the layer's scope ends.
  */
 export const makeTranspilerLayer = (
   tscRsModule: Effect.Effect<TscRsModule, WidgetTranspileError>,
+  wasmClient: Effect.Effect<WidgetTscRsClient, WidgetTranspileError> = loadWasmClient,
 ) =>
   Layer.effect(
     WidgetSourceTranspiler,
     Effect.gen(function* () {
+      const wasm = yield* Effect.option(wasmClient);
       const module = yield* Effect.cached(tscRsModule);
       const apiRef = yield* Ref.make<InstanceType<TscRsModule["API"]> | null>(null);
       const client = yield* Effect.cached(
@@ -354,13 +547,15 @@ export const makeTranspilerLayer = (
           Effect.flatMap((api) => (api === null ? Effect.void : Effect.promise(() => api.close()))),
         ),
       );
-      const build = (source: string) =>
-        Effect.flatMap(client, ({ tscrs, api }) =>
-          makeBuild({
-            transpileModule: (input, options) => api.transpileModule(input, options),
-            formatDiagnostics: (diagnostics) => tscrs.formatDiagnostics(diagnostics, api),
-          })(source),
-        );
+      const build = Option.isSome(wasm)
+        ? makeBuild(wasm.value)
+        : (source: string) =>
+            Effect.flatMap(client, ({ tscrs, api }) =>
+              makeBuild({
+                transpileModule: (input, options) => api.transpileModule(input, options),
+                formatDiagnostics: (diagnostics) => tscrs.formatDiagnostics(diagnostics, api),
+              })(source),
+            );
       return { transpile: yield* makeTranspile(build) };
     }),
   );

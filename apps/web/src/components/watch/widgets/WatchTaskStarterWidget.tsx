@@ -21,7 +21,7 @@ import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/reactivity";
 import { ArrowUpIcon, CircleCheckIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import {
@@ -33,7 +33,11 @@ import {
 } from "~/components/ui/select";
 import { Textarea } from "~/components/ui/textarea";
 import { toastManager } from "~/components/ui/toast";
-import { resolveSendEnvMode } from "~/components/ChatView.logic";
+import {
+  recallCheckoutIsRepo,
+  rememberCheckoutIsRepo,
+  resolveSendEnvMode,
+} from "~/components/ChatView.logic";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { readT3ProjectFile } from "~/lib/t3ProjectFileDefaults";
 import { newMessageId, newThreadId } from "~/lib/utils";
@@ -130,8 +134,36 @@ export function WatchTaskStarterWidget(props: {
       : null,
   );
 
+  // Git status lands after the widget paints. The composer's session memory
+  // (ChatView.logic.ts) lets a checkout seen earlier answer while the query
+  // is in flight, so a warm revisit doesn't gate Start on a refetch.
+  const workspaceRoot = project?.workspaceRoot ?? null;
+  const liveIsGitRepo = gitStatusQuery.data?.isRepo;
+  useEffect(() => {
+    if (workspaceRoot !== null && liveIsGitRepo !== undefined) {
+      rememberCheckoutIsRepo(props.environmentId, workspaceRoot, liveIsGitRepo);
+    }
+  }, [props.environmentId, workspaceRoot, liveIsGitRepo]);
+  const rememberedIsGitRepo = recallCheckoutIsRepo(props.environmentId, workspaceRoot);
+
+  // While the status query is in flight `data` is null, `isRepo` would read
+  // false, and `resolveSendEnvMode` would silently downgrade "worktree" to
+  // "local" — gate Start until the answer exists. A checkout remembered as
+  // a non-repo resolves "local" either way and need not wait; a remembered
+  // repo still waits, since a worktree start needs the live base branch.
+  const gitStatusPending =
+    envModeMayBeWorktree &&
+    rememberedIsGitRepo !== false &&
+    gitStatusQuery.isPending &&
+    gitStatusQuery.data === null;
+
   const canStart =
-    !starting && project !== null && provider !== null && model !== null && prompt.trim() !== "";
+    !starting &&
+    !gitStatusPending &&
+    project !== null &&
+    provider !== null &&
+    model !== null &&
+    prompt.trim() !== "";
 
   const onStart = async () => {
     if (!canStart || project === null || provider === null || model === null) return;
@@ -157,7 +189,7 @@ export function WatchTaskStarterWidget(props: {
           newProjectsRoot: serverConfig?.newProjectsRoot,
           projectHasThreads: props.threads.some((entry) => entry.projectId === project.id),
         }),
-        isGitRepo: gitStatusQuery.data?.isRepo === true,
+        isGitRepo: gitStatusQuery.data?.isRepo ?? rememberedIsGitRepo ?? false,
       });
       // No branch picker here — the checkout's current branch is the base,
       // the same default the composer's branch toolbar displays.

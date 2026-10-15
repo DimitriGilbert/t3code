@@ -4,7 +4,12 @@ import type {
   WatchWidget,
   WatchWidgetErrorState,
 } from "@t3tools/contracts";
-import { ProjectId, WatchConnectorInstanceId } from "@t3tools/contracts";
+import {
+  isUnknownUnionMember,
+  ProjectId,
+  WatchConnectorInstanceId,
+  type UnknownUnionMember,
+} from "@t3tools/contracts";
 
 import {
   resolveThreadWorkingStartedAt,
@@ -119,6 +124,9 @@ export interface WatchWidgetErrorPresentation {
   };
 }
 
+/** The members of {@link WatchWidgetErrorState} this build knows — what the resolvers below construct. */
+export type KnownWatchWidgetErrorState = Exclude<WatchWidgetErrorState, UnknownUnionMember>;
+
 /**
  * The copy table for `WatchWidgetErrorState` — one line and one primary
  * recovery per cause, per the watch-screen design's severity table.
@@ -129,6 +137,11 @@ export interface WatchWidgetErrorPresentation {
 export function watchWidgetErrorPresentation(
   error: WatchWidgetErrorState,
 ): WatchWidgetErrorPresentation {
+  // A cause a newer server adds decodes as an unknown member; it gets the
+  // generic warning — there is no copy or recovery action tabled for it.
+  if (isUnknownUnionMember(error)) {
+    return { line: "Widget error", variant: "warning" };
+  }
   switch (error.cause) {
     case "connectorDown":
       return {
@@ -191,7 +204,7 @@ export function resolveWatchThreadsProjectError(
   page: Pick<WatchPage, "scope" | "projectId">,
   widget: Pick<WatchWidget, "config">,
   projects: ReadonlyArray<EnvironmentProject>,
-): WatchWidgetErrorState | null {
+): KnownWatchWidgetErrorState | null {
   const binding = resolveWatchThreadsProjectBinding(page, widget);
   // null means "all projects" — unbound bindings can't go stale.
   if (binding === null) return null;
@@ -209,7 +222,7 @@ export function resolveWatchThreadsProjectError(
 export function resolveWatchConnectorSourceError(
   widget: Pick<WatchWidget, "config">,
   instances: ReadonlyArray<WatchConnectorInstance>,
-): WatchWidgetErrorState | null {
+): KnownWatchWidgetErrorState | null {
   const source = widget.config.source;
   if (source?.kind !== "connector" || source.binding === undefined) return null;
   const instance = instances.find((entry) => entry.id === source.binding);
@@ -225,7 +238,7 @@ export function resolveWatchConnectorSourceError(
 /** Instance health as a widget error state, or null when the instance is fine. */
 export function watchConnectorHealthErrorState(
   instance: WatchConnectorInstance,
-): WatchWidgetErrorState | null {
+): KnownWatchWidgetErrorState | null {
   const health = instance.health;
   if (health.status === "healthy" || health.status === "unknown") return null;
   const lastGoodDataAt = health.lastFetchAt === null ? {} : { lastGoodDataAt: health.lastFetchAt };

@@ -226,6 +226,21 @@ it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(
   },
 );
 
+it("stops counting a notification the OS dismisses without focus", async () => {
+  await using app = setup();
+  app.start();
+  const pendingApproval = { hasPendingApprovals: true };
+  state.shells.set("one", shell(pendingApproval));
+  state.shells.set("two", shell(pendingApproval));
+  expect(state.badge).toHaveBeenLastCalledWith(2);
+  const [dismissed] = TestNotification.sent;
+  dismissed!.dispatchEvent(new Event("close"));
+  expect(state.badge).toHaveBeenLastCalledWith(1);
+  // A stale second close must not double-subtract.
+  dismissed!.dispatchEvent(new Event("close"));
+  expect(state.badge).toHaveBeenLastCalledWith(1);
+});
+
 it("holds a completion through a continuation gap and notifies once it settles", async () => {
   await using app = setup();
   app.start();

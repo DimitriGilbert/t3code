@@ -20,19 +20,26 @@ import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
-import { getClientSettings } from "../hooks/useSettings";
+import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironmentIds } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
-import { useThreadShells } from "../state/entities";
+import { useServerConfigs, useThreadShells } from "../state/entities";
 import { watchEnvironment } from "../state/watch";
-import { hasDesktopNotifications, setNotificationBadgeForSource } from "../threadNotifications";
+import {
+  hasDesktopNotifications,
+  hasNotificationSound,
+  playNotificationSound,
+  setNotificationBadgeForSource,
+  unlockNotificationAudio,
+} from "../threadNotifications";
 import { toastManager } from "./ui/toast";
 import { WATCH_NOTIFICATION_ICONS } from "./watch/notificationIcons";
 import {
   addWatchNotificationUnread,
   addWatchThresholdAlert,
+  evictWatchNotificationEnvironments,
   setWatchNotificationPrefs,
 } from "./watch/watchNotificationStore";
 
@@ -84,6 +91,8 @@ function sessionChannelFor(environmentId: EnvironmentId): SessionChannel {
  */
 export function WatchNotificationCoordinator() {
   const environmentIds = useEnvironmentIds();
+  const serverConfigs = useServerConfigs();
+  const notificationMode = useClientSettings((settings) => settings.notificationMode);
   const pending = useRef(
     new Map<string, { environmentId: EnvironmentId; notification: Notification }>(),
   );
@@ -92,22 +101,37 @@ export function WatchNotificationCoordinator() {
       pending.current.get(notification.tag)?.notification.close();
       pending.current.set(notification.tag, { environmentId, notification });
       setNotificationBadgeForSource(NATIVE_BADGE_SOURCE, pending.current.size);
+      // The OS can dismiss a notification without a click and without the
+      // window regaining focus; it must stop counting toward the badge. The
+      // identity check keeps a replaced tag's stale close event from evicting
+      // its successor.
+      notification.addEventListener("close", () => {
+        if (pending.current.get(notification.tag)?.notification !== notification) return;
+        pending.current.delete(notification.tag);
+        setNotificationBadgeForSource(NATIVE_BADGE_SOURCE, pending.current.size);
+      });
     },
     [],
   );
 
   useEffect(() => {
-    const activeIds = new Set(environmentIds);
+    const activeIds = new Set<string>(environmentIds);
     const count = pending.current.size;
     for (const [tag, { environmentId, notification }] of pending.current) {
       if (activeIds.has(environmentId)) continue;
       notification.close();
       pending.current.delete(tag);
-      sessionChannels.delete(environmentId);
     }
     if (count !== pending.current.size) {
       setNotificationBadgeForSource(NATIVE_BADGE_SOURCE, pending.current.size);
     }
+    // Removal is not the remount the session map exists to survive: drop the
+    // channel and every store entry for environments that left the catalog,
+    // whether or not they had a pending notification.
+    for (const environmentId of sessionChannels.keys()) {
+      if (!activeIds.has(environmentId)) sessionChannels.delete(environmentId);
+    }
+    evictWatchNotificationEnvironments(activeIds);
   }, [environmentIds]);
 
   useEffect(() => {
@@ -126,13 +150,30 @@ export function WatchNotificationCoordinator() {
     };
   }, []);
 
-  return environmentIds.map((environmentId) => (
-    <WatchEnvironmentNotifications
-      key={environmentId}
-      environmentId={environmentId}
-      onNativeNotification={onNativeNotification}
-    />
-  ));
+  // Browsers gate audio playback behind a user gesture — same unlock path as
+  // the thread notification coordinator.
+  useEffect(() => {
+    if (!hasNotificationSound(notificationMode)) return;
+    document.addEventListener("pointerdown", unlockNotificationAudio);
+    document.addEventListener("keydown", unlockNotificationAudio);
+    return () => {
+      document.removeEventListener("pointerdown", unlockNotificationAudio);
+      document.removeEventListener("keydown", unlockNotificationAudio);
+    };
+  }, [notificationMode]);
+
+  // Only environments whose server declares the watch screen get a
+  // notification stream — older servers lack the WS methods entirely, so
+  // subscribing them would be a doomed call per session per environment.
+  return environmentIds
+    .filter((environmentId) => serverConfigs.get(environmentId)?.watchScreen === true)
+    .map((environmentId) => (
+      <WatchEnvironmentNotifications
+        key={environmentId}
+        environmentId={environmentId}
+        onNativeNotification={onNativeNotification}
+      />
+    ));
 }
 
 function WatchEnvironmentNotifications(props: {
@@ -201,6 +242,9 @@ function WatchEnvironmentNotifications(props: {
       appAtomRegistry.subscribe(streamAtom, (result) => {
         const item = Option.getOrNull(AsyncResult.value(result));
         if (item === null) return;
+        // An envelope kind this build does not know (a newer server's
+        // decode) carries nothing this client can act on — skip it.
+        if (isUnknownUnionMember(item)) return;
         const channel = sessionChannelFor(environmentId);
         if (item.type === "prefs") {
           channel.prefs = item.prefs;
@@ -284,10 +328,19 @@ function deliverNotification(input: {
   const { delivery, presentation, notification, threadId, environmentId } = input;
   const settings = getClientSettings();
 
-  // The unread badge is a surface of whichever channel actually delivered —
-  // with in-app toasts or desktop notifications disabled, nothing accrues.
+  // The unread badge is the lowest-intrusion surface: every notification a
+  // channel accepted accrues it, even with toasts and desktop alerts off.
+  addWatchNotificationUnread(environmentId, notification.notificationId);
+
+  // Sound is its own surface — "sound"-only mode still gets the audible cue
+  // even though toasts and desktop notifications stay silent.
+  if (hasNotificationSound(settings.notificationMode)) {
+    void playNotificationSound(presentation.toastType === "success" ? "completion" : "input", () =>
+      hasNotificationSound(getClientSettings().notificationMode),
+    );
+  }
+
   if (delivery.inApp && settings.inAppNotificationsEnabled) {
-    addWatchNotificationUnread(environmentId, notification.notificationId);
     const openThread =
       threadId === undefined
         ? undefined
@@ -317,7 +370,6 @@ function deliverNotification(input: {
   }
 
   if (delivery.desktopNative && hasDesktopNotifications(settings.notificationMode)) {
-    addWatchNotificationUnread(environmentId, notification.notificationId);
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       try {
         const native = new Notification(presentation.title, {

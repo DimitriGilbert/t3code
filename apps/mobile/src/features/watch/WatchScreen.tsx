@@ -71,7 +71,8 @@ import {
  * `watchPageMobileWidgets` (canonical order → `mobileHidden` filtered →
  * `mobileOrder`), and the only writes mobile makes are reorder/hide through
  * `setMobileProjection`, guarded by `mobileRevision`. Desktop placement is
- * never read for layout and never written.
+ * never written; its only read is `mobileWidgetHeight`, which sizes a
+ * widget's row from `placement.h`.
  */
 
 const NEVER_NEEDS_RELOAD_ATOM = Atom.make(false).pipe(

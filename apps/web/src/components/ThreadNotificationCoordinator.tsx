@@ -64,6 +64,15 @@ export function startThreadNotifications(
     pending.get(notification.tag)?.notification.close();
     pending.set(notification.tag, { environmentId, notification });
     setNotificationBadge(pending.size);
+    // The OS can dismiss a notification without a click and without the
+    // window regaining focus; it must stop counting toward the badge. The
+    // identity check keeps a replaced tag's stale close event from evicting
+    // its successor.
+    notification.addEventListener("close", () => {
+      if (pending.get(notification.tag)?.notification !== notification) return;
+      pending.delete(notification.tag);
+      setNotificationBadge(pending.size);
+    });
   };
   const clearPending = () => {
     for (const { notification } of pending.values()) notification.close();

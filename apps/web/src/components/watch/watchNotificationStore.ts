@@ -22,7 +22,7 @@ interface WatchNotificationSurfaceState {
   readonly prefs: Readonly<Record<string, WatchNotificationPrefs>>;
 }
 
-const useWatchNotificationSurfaceStore = create<WatchNotificationSurfaceState>(() => ({
+export const useWatchNotificationSurfaceStore = create<WatchNotificationSurfaceState>(() => ({
   unread: {},
   thresholdAlerts: {},
   prefs: {},
@@ -35,6 +35,59 @@ export function setWatchNotificationPrefs(
   useWatchNotificationSurfaceStore.setState((state) => ({
     prefs: { ...state.prefs, [environmentId]: prefs },
   }));
+}
+
+/**
+ * Roll back a failed optimistic prefs write. Guards on the store still
+ * holding `expected`, so a newer write is never reverted by an older write's
+ * late failure.
+ */
+export function revertWatchNotificationPrefs(
+  environmentId: EnvironmentId,
+  expected: WatchNotificationPrefs,
+  previous: WatchNotificationPrefs | null,
+) {
+  useWatchNotificationSurfaceStore.setState((state) => {
+    if (state.prefs[environmentId] !== expected) return state;
+    const prefs = { ...state.prefs };
+    if (previous === null) {
+      delete prefs[environmentId];
+    } else {
+      prefs[environmentId] = previous;
+    }
+    return { prefs };
+  });
+}
+
+/**
+ * Environment removal is not a remount: sweep every per-environment surface
+ * entry that no longer belongs to a catalog environment.
+ */
+export function evictWatchNotificationEnvironments(activeEnvironmentIds: ReadonlySet<string>) {
+  useWatchNotificationSurfaceStore.setState((state) => {
+    const prune = <V>(record: Readonly<Record<string, V>>): Readonly<Record<string, V>> => {
+      let changed = false;
+      const next: Record<string, V> = {};
+      for (const key of Object.keys(record)) {
+        if (activeEnvironmentIds.has(key)) {
+          next[key] = record[key] as V;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : record;
+    };
+    const unread = prune(state.unread);
+    const thresholdAlerts = prune(state.thresholdAlerts);
+    const prefs = prune(state.prefs);
+    if (
+      unread === state.unread &&
+      thresholdAlerts === state.thresholdAlerts &&
+      prefs === state.prefs
+    )
+      return state;
+    return { unread, thresholdAlerts, prefs };
+  });
 }
 
 export function addWatchNotificationUnread(
@@ -108,6 +161,18 @@ export function useWatchUnreadCount(environmentId: EnvironmentId | null): number
   return useWatchNotificationSurfaceStore((state) =>
     environmentId === null ? 0 : (state.unread[environmentId]?.size ?? 0),
   );
+}
+
+/**
+ * Unread across every environment. The sidebar badge aggregates — it exists
+ * to say "something happened somewhere", not to mirror the resolved screen.
+ */
+export function useWatchUnreadTotal(): number {
+  return useWatchNotificationSurfaceStore((state) => {
+    let total = 0;
+    for (const unread of Object.values(state.unread)) total += unread.size;
+    return total;
+  });
 }
 
 export function useWatchNotificationPrefs(

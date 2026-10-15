@@ -1,4 +1,4 @@
-// @effect-diagnostics globalTimers:off - The bridge runs in the client, outside an Effect runtime.
+// @effect-diagnostics globalTimers:off globalDate:off - The bridge runs in the client, outside an Effect runtime; its rate budget and re-open cooldown need wall-clock time and timers.
 import type {
   WatchConnectorInstanceId,
   WatchWidgetBridgeManifest,
@@ -20,11 +20,39 @@ import * as Predicate from "effect/Predicate";
  * connector instance id resolved from the widget row's config — a
  * frame-supplied instance id is never trusted and any value other than the
  * widget's configured binding is a violation.
+ *
+ * Known residual (r9-F1): on web, no platform primitive stops the sandboxed
+ * document from navigating its own frame, and that navigation request can
+ * carry anything the widget could see — `deliver` items, `hostContext`,
+ * whatever it computed — out to an arbitrary origin. Detection is post-mortem
+ * (the frame's load watchdog plus the prelude's pagehide notice, which closes
+ * the post-delivery gap but cannot stop the request). Keep secrets and
+ * credentials out of widget-visible data; treat everything posted into the
+ * document as disclosable. Mobile's deny-all load gate does not have this hole.
  */
 
 const MAX_MESSAGE_BYTES = 256 * 1024;
 /** Requests a widget may have in flight at once; more are refused, not queued. */
 const MAX_PENDING_REQUESTS = 16;
+/**
+ * Feeds one widget may hold open at once — comfortably below the 64-name
+ * manifest-declaration ceiling, since every open name is a live stream.
+ */
+const MAX_OPEN_SUBSCRIPTIONS = 16;
+/**
+ * Cooldown before a just-closed subscription name may open again: a
+ * subscribe→unsubscribe→subscribe loop otherwise restarts the platform feed
+ * at the widget's message rate.
+ */
+const REOPEN_DEBOUNCE_MS = 250;
+/**
+ * Inbound message budget: every `receive` spends a token, so a flooding
+ * widget can't sustain host-thread work (violation reports included) past
+ * this rate. Burst covers a widget's mount-time subscribe flurry.
+ */
+const MESSAGE_RATE_LIMIT = { capacity: 48, refillPerSecond: 48 } as const;
+/** Distinct (code, name) violations surfaced to the shell before dedupe drops them. */
+const MAX_REPORTED_VIOLATIONS = 64;
 const encoder = new TextEncoder();
 
 export const WATCH_APP_METHODS = {
@@ -38,6 +66,12 @@ export const WATCH_APP_NOTIFICATIONS = {
   data: "t3.watch/data",
   dataError: "t3.watch/data-error",
   hostContext: "t3.watch/context",
+  /**
+   * The one notification that travels frame → host: the prelude's last word
+   * when its document starts to unload, so the host disposes before the
+   * navigation completes instead of when the next `load` fires.
+   */
+  navigating: "t3.watch/navigating",
 } as const;
 
 type JsonRpcId = string | number;
@@ -47,6 +81,7 @@ export type WatchAppBridgeViolationCode =
   | "undeclaredSubscription"
   | "undeclaredAction"
   | "foreignInstance"
+  | "subscriptionLimit"
   | "navigatedAway";
 
 export interface WatchAppBridgeViolation {
@@ -76,6 +111,13 @@ export interface WatchAppHostHandlers {
     readonly instanceId: WatchConnectorInstanceId | undefined;
   }) => Promise<void>;
   readonly closeSubscription: (input: { readonly name: string }) => void;
+  /**
+   * `arguments` is frame-controlled except `instanceId`: the bridge applies
+   * the same foreign-instance check as subscribe before this runs, so a
+   * surviving `instanceId` can only equal the widget's own binding. Every
+   * other argument is unvetted — handlers must not treat other id-shaped
+   * keys as host-authorized.
+   */
   readonly invokeAction: (input: {
     readonly name: string;
     readonly arguments: Record<string, unknown>;
@@ -94,6 +136,13 @@ export interface WatchAppHostOptions extends WatchAppHostHandlers {
   readonly connectorInstanceId: () => WatchConnectorInstanceId | undefined;
   /** Posts one JSON-RPC message to the widget document. */
   readonly post: (message: unknown) => void;
+  /** Inbound message budget; defaults to {@link MESSAGE_RATE_LIMIT}. */
+  readonly messageRateLimit?: {
+    readonly capacity: number;
+    readonly refillPerSecond: number;
+  };
+  /** Re-open cooldown per subscription name; defaults to {@link REOPEN_DEBOUNCE_MS}. */
+  readonly reopenDebounceMs?: number;
 }
 
 export interface WatchAppHost {
@@ -110,8 +159,20 @@ export interface WatchAppHost {
 }
 
 function jsonBytes(value: unknown): number {
+  // Strings need no stringify pass: UTF-16 code units lower-bound UTF-8
+  // bytes, so a string already past the cap is rejected without encoding.
+  if (typeof value === "string") {
+    return value.length > MAX_MESSAGE_BYTES
+      ? Number.POSITIVE_INFINITY
+      : encoder.encode(value).byteLength;
+  }
   try {
-    return encoder.encode(JSON.stringify(value) ?? "").byteLength;
+    const json = JSON.stringify(value) ?? "";
+    // Same trick after stringifying: an over-cap char count can only grow in
+    // bytes, so the encode pass is skipped for payloads that cannot fit.
+    return json.length > MAX_MESSAGE_BYTES
+      ? Number.POSITIVE_INFINITY
+      : encoder.encode(json).byteLength;
   } catch {
     return Number.POSITIVE_INFINITY;
   }
@@ -127,9 +188,34 @@ const errorMessage = (error: unknown) =>
 export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
   let disposed = false;
   let pending = 0;
-  /** Names with a live feed; opening and open names both count against the manifest. */
+  /** Names whose platform open is in flight. */
   const opening = new Set<string>();
-  const open = new Set<string>();
+  /** Names with a live feed, each keyed to the binding it was opened under. */
+  const open = new Map<string, WatchConnectorInstanceId | undefined>();
+  /** When each name last closed — the clock for the re-open cooldown. */
+  const lastClosedAt = new Map<string, number>();
+  const reopenDebounceMs = options.reopenDebounceMs ?? REOPEN_DEBOUNCE_MS;
+
+  // Every received message spends a token — including subscribes and
+  // unsubscribes, so open/close churn counts against the same budget as a
+  // ping flood. Once it runs dry the widget is dropped until it refills.
+  const rateLimit = options.messageRateLimit ?? MESSAGE_RATE_LIMIT;
+  let tokens = rateLimit.capacity;
+  let tokensFilledAt = Date.now();
+  const spendToken = () => {
+    const now = Date.now();
+    tokens = Math.min(
+      rateLimit.capacity,
+      tokens + ((now - tokensFilledAt) / 1000) * rateLimit.refillPerSecond,
+    );
+    tokensFilledAt = now;
+    if (tokens < 1) return false;
+    tokens -= 1;
+    return true;
+  };
+
+  /** (code, name) pairs already reported — a repeat report is host-thread churn. */
+  const reportedViolations = new Set<string>();
 
   const post = (message: unknown) => {
     if (!disposed) options.post(message);
@@ -140,6 +226,13 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
     post({ jsonrpc: "2.0", id, error: { code, message } });
 
   const violate = (violation: WatchAppBridgeViolation) => {
+    // A hostile frame can emit the same breach once per message and the shell
+    // turns each report into a render; the first report per (code, name) wins.
+    const key = `${violation.code}:${violation.name ?? ""}`;
+    if (reportedViolations.has(key) || reportedViolations.size >= MAX_REPORTED_VIOLATIONS) {
+      return;
+    }
+    reportedViolations.add(key);
     try {
       options.onViolation(violation);
     } catch {
@@ -147,26 +240,83 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
     }
   };
 
-  const answer = (id: JsonRpcId, run: () => Promise<unknown>) => {
+  // `run` starts inside Promise.resolve().then so a synchronously-throwing
+  // host handler rejects instead of escaping `receive` with `pending` spent.
+  const answer = (id: JsonRpcId, run: () => Promise<unknown>, onRefuse?: () => void) => {
     if (pending >= MAX_PENDING_REQUESTS) {
+      onRefuse?.();
       fail(id, -32000, "Too many requests in flight.");
       return;
     }
     pending += 1;
-    void run().then(
-      (result) => {
-        pending -= 1;
-        respond(id, result);
-      },
-      (error: unknown) => {
-        pending -= 1;
-        fail(id, -32000, errorMessage(error));
-      },
-    );
+    void Promise.resolve()
+      .then(run)
+      .then(
+        (result) => {
+          pending -= 1;
+          respond(id, result);
+        },
+        (error: unknown) => {
+          pending -= 1;
+          fail(id, -32000, errorMessage(error));
+        },
+      );
+  };
+
+  // `hostContext` is caller-supplied and runs synchronously — a throwing one
+  // must not escape `receive`/`updateHostContext` as an uncaught error.
+  const readHostContext = (): Record<string, unknown> | undefined => {
+    try {
+      return options.hostContext?.() ?? {};
+    } catch {
+      return undefined;
+    }
   };
 
   const closeName = (name: string) => {
-    if (open.delete(name)) options.closeSubscription({ name });
+    if (!open.delete(name)) return;
+    lastClosedAt.set(name, Date.now());
+    options.closeSubscription({ name });
+  };
+
+  // Feeds stay authorized against the binding they opened under: a rebind
+  // closes each stale feed (with an error notice so the widget can
+  // re-subscribe under the new binding) instead of streaming the old
+  // instance's data indefinitely. Runs before every inbound request is
+  // handled and every outbound item posts.
+  const recheckBindings = () => {
+    if (open.size === 0) return;
+    const bound = options.connectorInstanceId();
+    for (const [name, instanceId] of open) {
+      if (instanceId === bound) continue;
+      open.delete(name);
+      options.closeSubscription({ name });
+      notify(WATCH_APP_NOTIFICATIONS.dataError, {
+        name,
+        error: { message: "The widget's connector binding changed; this feed was closed." },
+      });
+    }
+  };
+
+  // A frame-supplied instance id is never trusted: anything other than the
+  // widget row's configured binding is a containment breach, not an argument.
+  const foreignInstance = (
+    id: JsonRpcId,
+    name: string,
+    bound: WatchConnectorInstanceId | undefined,
+    requested: unknown,
+  ): boolean => {
+    if (requested === undefined || requested === bound) return false;
+    violate({
+      code: "foreignInstance",
+      name,
+      message:
+        bound === undefined
+          ? `The widget asked for connector instance "${String(requested)}" but has no connector binding.`
+          : `The widget asked for connector instance "${String(requested)}"; its binding is "${bound}".`,
+    });
+    fail(id, -32000, "The requested connector instance is not this widget's binding.");
+    return true;
   };
 
   const handleSubscribe = (id: JsonRpcId, params: Record<PropertyKey, unknown>) => {
@@ -185,46 +335,59 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
       return;
     }
     const bound = options.connectorInstanceId();
-    const requested = params.instanceId;
-    // A frame-supplied instance id is never trusted: anything other than the
-    // widget row's configured binding is a containment breach, not an argument.
-    if (requested !== undefined && requested !== bound) {
-      violate({
-        code: "foreignInstance",
-        name,
-        message:
-          bound === undefined
-            ? `The widget asked for connector instance "${String(requested)}" but has no connector binding.`
-            : `The widget asked for connector instance "${String(requested)}"; its binding is "${bound}".`,
-      });
-      fail(id, -32000, "The requested connector instance is not this widget's binding.");
-      return;
-    }
+    if (foreignInstance(id, name, bound, params.instanceId)) return;
     if (open.has(name) || opening.has(name)) {
       respond(id, {});
       return;
     }
+    if (open.size + opening.size >= MAX_OPEN_SUBSCRIPTIONS) {
+      violate({
+        code: "subscriptionLimit",
+        name,
+        message: `The widget already holds ${MAX_OPEN_SUBSCRIPTIONS} open subscriptions.`,
+      });
+      fail(id, -32000, "Too many open subscriptions.");
+      return;
+    }
     opening.add(name);
-    answer(id, () =>
-      options.openSubscription({ name, instanceId: bound }).then(
-        () => {
-          // An unsubscribe that landed while the open was in flight already
-          // dropped the name from `opening`; the just-opened feed is closed
-          // back rather than tracked, or a dead feed leaks past the widget's
-          // own release.
-          const wanted = opening.delete(name);
-          if (disposed || !wanted) {
-            options.closeSubscription({ name });
-            return {};
-          }
-          open.add(name);
-          return {};
-        },
-        (error: unknown) => {
-          opening.delete(name);
-          throw error;
-        },
-      ),
+    // A just-closed name waits out the re-open cooldown so a
+    // subscribe→unsubscribe→subscribe loop can't restart the platform feed at
+    // message rate. `answer` may refuse on the pending cap — its cleanup drops
+    // `name` from `opening` so it isn't stranded as a phantom subscription.
+    const closedAt = lastClosedAt.get(name);
+    const cooldown =
+      closedAt === undefined ? 0 : Math.max(0, reopenDebounceMs - (Date.now() - closedAt));
+    answer(
+      id,
+      () =>
+        (cooldown === 0
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => setTimeout(resolve, cooldown))
+        )
+          .then(() =>
+            // Released while the cooldown ran — skip the platform open.
+            opening.has(name) ? options.openSubscription({ name, instanceId: bound }) : undefined,
+          )
+          .then(
+            () => {
+              // An unsubscribe that landed while the open was in flight already
+              // dropped the name from `opening`; the just-opened feed is closed
+              // back rather than tracked, or a dead feed leaks past the widget's
+              // own release.
+              const wanted = opening.delete(name);
+              if (disposed || !wanted) {
+                options.closeSubscription({ name });
+                return {};
+              }
+              open.set(name, bound);
+              return {};
+            },
+            (error: unknown) => {
+              opening.delete(name);
+              throw error;
+            },
+          ),
+      () => opening.delete(name),
     );
   };
 
@@ -233,9 +396,15 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
       case "ping":
         respond(id, {});
         return;
-      case WATCH_APP_METHODS.hostContext:
-        respond(id, options.hostContext?.() ?? {});
+      case WATCH_APP_METHODS.hostContext: {
+        const context = readHostContext();
+        if (context === undefined) {
+          fail(id, -32000, "Host context is unavailable.");
+        } else {
+          respond(id, context);
+        }
         return;
+      }
       case WATCH_APP_METHODS.subscribe:
         handleSubscribe(id, params);
         return;
@@ -270,6 +439,12 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
           fail(id, -32602, "t3.watch/action arguments must be an object.");
           return;
         }
+        // Symmetric with subscribe: an `instanceId` argument is checked
+        // against the widget's binding before the handler ever sees it.
+        const bound = options.connectorInstanceId();
+        if (foreignInstance(id, name, bound, (args as Record<string, unknown>).instanceId)) {
+          return;
+        }
         answer(id, () =>
           options.invokeAction({ name, arguments: args as Record<string, unknown> }),
         );
@@ -280,40 +455,57 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
     }
   };
 
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    opening.clear();
+    // Deleting each visited key is safe while iterating a Map.
+    for (const name of open.keys()) closeName(name);
+  };
+
   return {
     receive: (data) => {
-      if (disposed || !Predicate.isObject(data) || data.jsonrpc !== "2.0") return;
+      if (disposed || !spendToken()) return;
       if (jsonBytes(data) > MAX_MESSAGE_BYTES) {
-        if (isId(data.id) && typeof data.method === "string") {
+        if (Predicate.isObject(data) && isId(data.id) && typeof data.method === "string") {
           fail(data.id, -32600, "Message too large.");
         }
         return;
       }
-      // Only requests move the bridge; notifications and host-bound replies
-      // from the frame carry no meaning on this protocol.
+      if (!Predicate.isObject(data) || data.jsonrpc !== "2.0") return;
       const method = data.method;
-      if (typeof method !== "string" || !isId(data.id)) return;
+      if (typeof method !== "string") return;
+      // The prelude's last word before its document unloads — dispose now
+      // rather than at the next `load`, closing the window where a departing
+      // page still passes the source check and receives posts.
+      if (method === WATCH_APP_NOTIFICATIONS.navigating) {
+        dispose();
+        return;
+      }
+      // Only requests move the bridge; other notifications and host-bound
+      // replies from the frame carry no meaning on this protocol.
+      if (!isId(data.id)) return;
+      recheckBindings();
       const params = Predicate.isObject(data.params) ? data.params : {};
       handleRequest(data.id, method, params);
     },
     deliver: (name, item) => {
+      recheckBindings();
       if (!open.has(name)) return;
       notify(WATCH_APP_NOTIFICATIONS.data, { name, item });
     },
     deliverError: (name, message) => {
+      recheckBindings();
       if (!open.has(name)) return;
       notify(WATCH_APP_NOTIFICATIONS.dataError, { name, error: { message } });
     },
     updateHostContext: () => {
-      notify(WATCH_APP_NOTIFICATIONS.hostContext, options.hostContext?.() ?? {});
+      const context = readHostContext();
+      // A throwing context provider gets no push, not a crashed bridge.
+      if (context === undefined) return;
+      notify(WATCH_APP_NOTIFICATIONS.hostContext, context);
     },
-    dispose: () => {
-      if (disposed) return;
-      disposed = true;
-      opening.clear();
-      // Deleting each visited name is safe while iterating a Set.
-      for (const name of open) closeName(name);
-    },
+    dispose,
   };
 }
 
@@ -323,9 +515,12 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
  * The fixed document prelude: defines `globalThis.T3` (`h`/`Fragment` for the
  * JSX pragma, `render`, and the bridge client) before the bundle runs, and the
  * transport both sides of the bridge share — `ReactNativeWebView` inside the
- * mobile WebView, `window.parent` postMessage in a real frame. Because the same
- * prelude text renders on both surfaces, the generated document is
- * byte-identical between web srcdoc and mobile `source.html`.
+ * mobile WebView, `window.parent` postMessage in a real frame. It also posts
+ * `t3.watch/navigating` on `pagehide`/`beforeunload` — the document's last
+ * word before a navigation tears it down, so the host disposes at unload
+ * rather than at the next `load`. Because the same prelude text renders on
+ * both surfaces, the generated document is byte-identical between web srcdoc
+ * and mobile `source.html`.
  *
  * Keep this free of backticks, `${`, and `</script>`; its SHA-256 authorizes it
  * in the document CSP via `WATCH_APP_PRELUDE_SCRIPT_HASH` (asserted by tests).
@@ -382,6 +577,9 @@ window.__t3WatchAppReceive=function(message){handle(message);};
 }else{
 window.addEventListener("message",function(event){handle(event.data);});
 }
+function notifyNavigating(){post({jsonrpc:"2.0",method:"t3.watch/navigating"});}
+window.addEventListener("pagehide",notifyNavigating);
+window.addEventListener("beforeunload",notifyNavigating);
 function append(parent,child){
 if(child===null||child===undefined||child===false||child===true){return;}
 if(Array.isArray(child)){for(var i=0;i<child.length;i++){append(parent,child[i]);}return;}
@@ -482,17 +680,22 @@ if(index>=0){contextListeners.splice(index,1);}
  * script-src lists alongside the artifact hash. Verified against the prelude
  * text by test — a prelude edit without a hash bump breaks every widget.
  */
-export const WATCH_APP_PRELUDE_SCRIPT_HASH = "CdagwFeT2zrnJ9at5dJL8lYKhbHhY/ebVKkG++FDvdg=";
+export const WATCH_APP_PRELUDE_SCRIPT_HASH = "PL9ZBlDZFotFyBREjiOzmgW0VCzYypNLTEFBzinDYH4=";
 
 const SCRIPT_HASH_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /**
  * The frame document's Content-Security-Policy, sent as a meta tag so the same
  * policy governs a srcdoc iframe (which cannot carry response headers) and the
- * mobile WebView. Zero network: `default-src 'none'`, `connect-src 'none'`, no
- * `img-src`/`font-src`. `style-src 'unsafe-inline'` permits the inline base
- * style and widget-authored inline styles — a deliberate tradeoff recorded in
- * the plan; scripts get no such allowance and are hash-authorized only.
+ * mobile WebView. No fetch channels: `default-src 'none'`,
+ * `connect-src 'none'`, no `img-src`/`font-src` — but CSP governs subresource
+ * loads, not browsing-context navigation. The sandboxed frame can still
+ * navigate *itself* (and the navigation URL can carry widget-visible data
+ * out); containment for that is the frame's post-mortem load watchdog plus
+ * the prelude's pagehide notice, not this policy. `style-src 'unsafe-inline'`
+ * permits the inline base style and widget-authored inline styles — a
+ * deliberate tradeoff recorded in the plan; scripts get no such allowance and
+ * are hash-authorized only.
  */
 export function watchAppContentSecurityPolicy(scriptHash: string): string {
   if (!SCRIPT_HASH_PATTERN.test(scriptHash)) {

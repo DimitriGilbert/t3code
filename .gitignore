@@ -27,6 +27,7 @@ squashfs-root/
 .vercel
 .gstack/
 .plans/
+.review/
 /audits/
 dist-electron/
 .electron-runtime/

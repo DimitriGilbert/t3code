@@ -21,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClientRequest } from "effect/http";
+import { getPublicSuffix } from "tldts";
 
 import * as ServerConfig from "../../config.ts";
 
@@ -122,6 +123,59 @@ const makeBundle = (
   };
 };
 
+// ── Manifest admission ───────────────────────────────────────────────────
+
+/**
+ * A pack id also names its install directory under `connectorsDir`, so it is
+ * restricted to one path-safe segment — and is never a dot-only name like
+ * `"."` or `".."`, which would alias or traverse the parent even where a
+ * caller later sanitizes.
+ */
+const PACK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const DOT_ONLY_ID = /^\.+$/;
+
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const isHostname = (host: string): boolean =>
+  host.length > 0 && host.length <= 253 && host.split(".").every((label) => HOST_LABEL.test(label));
+
+/**
+ * A declared egress host is a bare hostname or a `*.` wildcard over a
+ * registrable suffix. `"*"`, a bare `"*."`, and wildcards over a public
+ * suffix (`*.com`, `*.co.uk`) would allowlist swaths of the internet, so
+ * they are refused here — at the only door manifests come through.
+ */
+const isDeclaredEgressHost = (entry: string): boolean => {
+  const host = entry.toLowerCase();
+  if (host.startsWith("*.")) {
+    const suffix = host.slice(2);
+    // The whole suffix being a public suffix means `*` covers a TLD.
+    return isHostname(suffix) && getPublicSuffix(suffix, { allowPrivateDomains: true }) !== suffix;
+  }
+  return !host.includes("*") && isHostname(host);
+};
+
+/**
+ * Manifest rules beyond the wire schema — the invariants the install layout
+ * and egress gate rely on — checked once at bundle acceptance for local and
+ * URL origins alike.
+ */
+const validatePackManifest = (manifest: WatchConnectorPackManifest): WatchConnectorError | null => {
+  if (!PACK_ID_PATTERN.test(manifest.id) || DOT_ONLY_ID.test(manifest.id)) {
+    return connectorError(
+      "manifestInvalid",
+      `Pack manifest id "${manifest.id}" is not a valid pack identifier.`,
+    );
+  }
+  const badEntry = manifest.egressHosts.find((entry) => !isDeclaredEgressHost(entry));
+  if (badEntry !== undefined) {
+    return connectorError(
+      "manifestInvalid",
+      `Pack manifest egressHosts entry "${badEntry}" is not a usable host declaration.`,
+    );
+  }
+  return null;
+};
+
 // ── Local-path installs ──────────────────────────────────────────────────
 
 /** Reads a pack directory into a normalized bundle. Symlinks are refused: an
@@ -148,7 +202,9 @@ export const readLocalBundle = Effect.fn("ConnectorPackStore.readLocalBundle")(f
       ),
     );
 
-  const files: Record<string, string> = {};
+  // Null-prototype map: an entry literally named `__proto__` would otherwise
+  // hit the Object prototype setter and silently corrupt the file set.
+  const files = Object.create(null) as Record<string, string>;
   let totalBytes = 0;
   for (const entry of entries) {
     const fullPath = path.join(root, entry);
@@ -233,6 +289,8 @@ export const readLocalBundle = Effect.fn("ConnectorPackStore.readLocalBundle")(f
       ),
     ),
   );
+  const manifestError = validatePackManifest(manifest);
+  if (manifestError !== null) return yield* manifestError;
   // The raw manifest.json bytes stay in the file set, so the content hash
   // pins exactly what was on disk; manifestHash binds tokens to the decoded,
   // canonically-encoded manifest.
@@ -376,43 +434,60 @@ export class ConnectorPackFetch extends Context.Service<
 const packFetchFailure = (message: string, cause?: unknown) =>
   connectorError("fetchFailed", message, cause === undefined ? {} : { cause });
 
+/**
+ * Resolves `host` once into every address it stands for — IP literals return
+ * as-is. The caller range-checks the list ({@link isLocalAddress}) and pins
+ * the connection to it ({@link pinnedLookup}), so a name that re-resolves to
+ * something else later (DNS rebinding) changes nothing. Shared by the pack
+ * install path and the runtime egress gate.
+ */
+export const resolveHostAddresses = async (
+  host: string,
+): Promise<ReadonlyArray<PackFetchAddress>> => {
+  const literalFamily = NodeNet.isIP(host);
+  if (literalFamily === 4 || literalFamily === 6) {
+    return [{ address: host, family: literalFamily }];
+  }
+  const addresses = await NodeDnsPromises.lookup(host, { all: true, verbatim: true });
+  return addresses.map((entry): PackFetchAddress => ({
+    address: entry.address,
+    family: entry.family === 6 ? 6 : 4,
+  }));
+};
+
 const resolveHost = (host: string) =>
-  Effect.gen(function* () {
-    const literalFamily = NodeNet.isIP(host);
-    if (literalFamily === 4 || literalFamily === 6) {
-      const entry: PackFetchAddress = { address: host, family: literalFamily };
-      return [entry];
-    }
-    const addresses = yield* Effect.tryPromise({
-      try: () => NodeDnsPromises.lookup(host, { all: true, verbatim: true }),
-      catch: (cause) => packFetchFailure(`Could not resolve ${host}.`, cause),
-    });
-    return addresses.map((entry): PackFetchAddress => ({
-      address: entry.address,
-      family: entry.family === 6 ? 6 : 4,
-    }));
+  Effect.tryPromise({
+    try: () => resolveHostAddresses(host),
+    catch: (cause) => packFetchFailure(`Could not resolve ${host}.`, cause),
   });
+
+/**
+ * A `lookup` for Node's http(s) request options pinned to `addresses` — the
+ * list the caller already resolved and range-checked, so the socket cannot
+ * be rebound to a later, unchecked DNS answer.
+ */
+export const pinnedLookup =
+  (addresses: ReadonlyArray<PackFetchAddress>): NodeNet.LookupFunction =>
+  (_hostname, options, callback) => {
+    if (addresses.length === 0) {
+      callback(new Error("No checked addresses for the pinned connection."), "", 0);
+      return;
+    }
+    if (options.all === true) {
+      callback(
+        null,
+        addresses.map((entry) => ({ address: entry.address, family: entry.family })),
+      );
+      return;
+    }
+    callback(null, addresses[0]!.address, addresses[0]!.family);
+  };
 
 /** One GET whose socket lookup is pinned to `addresses` — the list already range-checked by the caller. */
 const pinnedGet = (url: string, addresses: ReadonlyArray<PackFetchAddress>) =>
   Effect.scoped(
     Effect.gen(function* () {
-      const agent = yield* NodeHttpClient.makeAgent({
-        lookup: (_host, options, callback) => {
-          if (addresses.length === 0) {
-            callback(new Error("No checked addresses for pack fetch."), "", 0);
-            return;
-          }
-          if (options.all) {
-            callback(
-              null,
-              addresses.map((a) => ({ address: a.address, family: a.family })),
-            );
-            return;
-          }
-          callback(null, addresses[0]!.address, addresses[0]!.family);
-        },
-      });
+      const agent = yield* NodeHttpClient.makeAgent({ lookup: pinnedLookup(addresses) });
       const httpClient = yield* NodeHttpClient.makeNodeHttp.pipe(
         Effect.provideService(NodeHttpClient.HttpAgent, agent),
       );
@@ -565,6 +640,8 @@ export const fetchUrlBundle = Effect.fn("ConnectorPackStore.fetchUrlBundle")(fun
         }),
       ),
     );
+    const manifestError = validatePackManifest(manifest);
+    if (manifestError !== null) return yield* manifestError;
     return makeBundle(manifest, wire.files);
   }
 });
@@ -602,11 +679,30 @@ export const urlResolvesLocal = Effect.fn("ConnectorPackStore.urlResolvesLocal")
 
 const packDirName = (packId: string) => packId.replace(/[^A-Za-z0-9._-]/g, "_");
 
-const installedPackDir = Effect.fn(function* (packId: string, contentHash: string) {
+/**
+ * Resolves `segments` under `connectorsDir` — and refuses the result unless
+ * it stays inside. `packDirName` keeps `.`, so an id like `".."` still
+ * traverses after sanitizing; this is the check that runs on the resolved
+ * path before any write or remove.
+ */
+const connectorsSubdir = Effect.fn("ConnectorPackStore.connectorsSubdir")(function* (
+  segments: ReadonlyArray<string>,
+) {
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
-  return path.join(config.connectorsDir, packDirName(packId), contentHash);
+  const base = path.resolve(config.connectorsDir);
+  const resolved = path.resolve(base, ...segments);
+  if (!resolved.startsWith(`${base}${path.sep}`)) {
+    return yield* connectorError(
+      "confinementRejected",
+      `Resolved pack directory ${resolved} escapes the connectors directory.`,
+    );
+  }
+  return resolved;
 });
+
+const installedPackDir = (packId: string, contentHash: string) =>
+  connectorsSubdir([packDirName(packId), contentHash]);
 
 /** Fetch the bundle for an install origin: local directory or https URL. */
 export const fetchOrigin = Effect.fn("ConnectorPackStore.fetchOrigin")(function* (
@@ -689,9 +785,7 @@ export const removeInstalled = Effect.fn("ConnectorPackStore.removeInstalled")(f
   packId: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const config = yield* ServerConfig.ServerConfig;
-  const dir = path.join(config.connectorsDir, packDirName(packId));
+  const dir = yield* connectorsSubdir([packDirName(packId)]);
   yield* fs
     .remove(dir, { force: true, recursive: true })
     .pipe(

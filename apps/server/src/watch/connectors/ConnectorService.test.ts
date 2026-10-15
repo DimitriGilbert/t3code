@@ -12,8 +12,10 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -418,6 +420,54 @@ it.effect("validates config against the manifest auth schema and stores secrets 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("rejects config entries keyed by a declared secret name at create and update", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    // No authSchema: the rejection must come from the secret-key check, not
+    // schema validation. `field` names the offending key.
+    const dir = yield* writePackDir(manifestBody({ authSchema: undefined }));
+    const { request } = yield* svc.requestInstall({
+      origin: { kind: "localPath", path: dir },
+    });
+    const prepared = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    const { pack } = yield* svc.confirmInstall({
+      requestId: request.id,
+      confirmationToken: prepared.confirmationToken,
+    });
+
+    const createResult = yield* svc
+      .createInstance({
+        packId: pack.packId,
+        config: { repo: "t3", apiKey: "plaintext" },
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(createResult));
+    if (Result.isFailure(createResult)) {
+      assert.equal(createResult.failure.reason, "configInvalid");
+      assert.equal(createResult.failure.field, "apiKey");
+    }
+
+    const { instance } = yield* svc.createInstance({
+      packId: pack.packId,
+      config: { repo: "t3" },
+      secrets: { apiKey: "s3cr3t" },
+    });
+    const updateResult = yield* svc
+      .setInstanceConfig({
+        instanceId: instance.id,
+        config: { repo: "t3", apiKey: "plaintext" },
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(updateResult));
+    if (Result.isFailure(updateResult)) {
+      assert.equal(updateResult.failure.reason, "configInvalid");
+      assert.equal(updateResult.failure.field, "apiKey");
+    }
+    // The refused writes left nothing behind.
+    assert.deepEqual((yield* svc.list({})).instances[0]?.config, { repo: "t3" });
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("emits the connector list on subscribe and after each change", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -620,6 +670,123 @@ it.effect("a failing migrateConfig keeps the instance config and flags it unheal
     assert.deepEqual(pinned?.config, { repo: "t3" });
     assert.equal(pinned?.health.status, "unhealthy");
     assert.match(pinned?.health.lastError ?? "", /migrateConfig\(1 → 2\) failed/);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("migrateConfig cannot launder secret material into config_json on re-pin", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const sql = yield* SqlClient.SqlClient;
+    const { pack } = yield* installPack;
+    const { instance } = yield* svc.createInstance({
+      packId: pack.packId,
+      config: { repo: "t3" },
+      secrets: { apiKey: "s3cr3t" },
+    });
+    // The migration gets no `ctx.secrets` — the scrub is the second line:
+    // a declared-key entry and an entry equal to a resolved secret value are
+    // both stripped before the migrated config persists.
+    const dirV2 = yield* writePackDir(manifestBody({ schemaVersion: 2, authSchema: undefined }), {
+      "connector.js": migrateConnector(
+        `(from, to, ctx) => ({ repo: ctx.config.repo, apiKey: "s3cr3t", note: "s3cr3t" })`,
+      ),
+    });
+    const { request } = yield* svc.requestUpgrade({
+      packId: pack.packId,
+      origin: { kind: "localPath", path: dirV2 },
+      instanceId: instance.id,
+    });
+    const { confirmationToken } = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    yield* svc.confirmUpgrade({ requestId: request.id, confirmationToken });
+
+    const { instances } = yield* svc.list({});
+    const pinned = instances.find((row) => row.id === instance.id);
+    assert.equal(pinned?.schemaVersion, 2);
+    assert.deepEqual(pinned?.config, { repo: "t3" });
+    const rows = yield* sql<{ config_json: string }>`
+      SELECT config_json FROM watch_connector_instances
+      WHERE instance_id = ${instance.id}
+    `;
+    assert.notInclude(rows[0]?.config_json ?? "", "s3cr3t");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a re-pin prunes configured keys and stored values the manifest dropped", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const secrets = yield* ServerSecretStore.ServerSecretStore;
+    const dir = yield* writePackDir(manifestBody({ secretKeys: ["apiKey", "legacyKey"] }));
+    const { request } = yield* svc.requestInstall({
+      origin: { kind: "localPath", path: dir },
+    });
+    const prepared = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    const { pack } = yield* svc.confirmInstall({
+      requestId: request.id,
+      confirmationToken: prepared.confirmationToken,
+    });
+    const { instance } = yield* svc.createInstance({
+      packId: pack.packId,
+      config: { repo: "t3" },
+      secrets: { apiKey: "a", legacyKey: "l" },
+    });
+    assert.deepEqual(instance.configuredSecretKeys, ["apiKey", "legacyKey"]);
+    const storeName = (key: string) => `watch-connector.${instance.id.replaceAll(":", "_")}.${key}`;
+
+    const dirV2 = yield* writePackDir(manifestBody({ schemaVersion: 2, secretKeys: ["apiKey"] }));
+    const upgrade = yield* svc.requestUpgrade({
+      packId: pack.packId,
+      origin: { kind: "localPath", path: dirV2 },
+      instanceId: instance.id,
+    });
+    const { confirmationToken } = yield* svc.prepareInstallConfirm({
+      requestId: upgrade.request.id,
+    });
+    yield* svc.confirmUpgrade({ requestId: upgrade.request.id, confirmationToken });
+
+    const { instances } = yield* svc.list({});
+    const pinned = instances.find((row) => row.id === instance.id);
+    assert.equal(pinned?.schemaVersion, 2);
+    // The row stops advertising the dropped key and the value is gone.
+    assert.deepEqual(pinned?.configuredSecretKeys, ["apiKey"]);
+    assert.isTrue(Option.isNone(yield* secrets.get(storeName("legacyKey"))));
+    assert.isTrue(Option.isSome(yield* secrets.get(storeName("apiKey"))));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("clearSecretKeys still revokes configured keys the manifest dropped", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const sql = yield* SqlClient.SqlClient;
+    const { pack } = yield* installPack;
+    const { instance } = yield* svc.createInstance({
+      packId: pack.packId,
+      config: { repo: "t3" },
+      secrets: { apiKey: "s3cr3t" },
+    });
+    // Simulate a pre-fix row: `legacyKey` was configured under an older
+    // manifest that declared it, and the re-pin predates pruning. The clear
+    // must still reach it — the configured set is revocable even when the
+    // pinned manifest no longer names the key.
+    yield* sql`
+      UPDATE watch_connector_instances
+      SET secret_keys_json = '["apiKey","legacyKey"]'
+      WHERE instance_id = ${instance.id}
+    `;
+    const { instance: updated } = yield* svc.setInstanceConfig({
+      instanceId: instance.id,
+      config: { repo: "t3" },
+      clearSecretKeys: ["legacyKey"],
+    });
+    assert.deepEqual(updated.configuredSecretKeys, ["apiKey"]);
+    // A key neither declared nor configured is still refused.
+    yield* expectFailure(
+      "secretKeyUndeclared",
+      svc.setInstanceConfig({
+        instanceId: instance.id,
+        config: { repo: "t3" },
+        clearSecretKeys: ["neverSeen"],
+      }),
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -921,4 +1088,331 @@ it.effect("refuses a manifest whose declared widget file is not in the bundle", 
       svc.confirmInstall({ requestId: request.id, confirmationToken }),
     );
   }).pipe(Effect.provide(layerTest)),
+);
+
+// ── Confirm-path integrity ───────────────────────────────────────────────
+
+it.effect("rejects different content under an already-approved (pack, version) pin", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const { pack } = yield* installPack;
+
+    // Same schemaVersion, different manifest (egress policy changed): the
+    // upsert must refuse rather than retcon the approved pin. New bytes
+    // need a new schemaVersion.
+    const dir = yield* writePackDir(
+      manifestBody({ schemaVersion: 1, egressHosts: ["other.example.com"] }),
+    );
+    const { request } = yield* svc.requestInstall({
+      origin: { kind: "localPath", path: dir },
+    });
+    const { confirmationToken } = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    yield* expectFailure(
+      "versionAlreadyApproved",
+      svc.confirmInstall({ requestId: request.id, confirmationToken }),
+    );
+
+    // The approved row was untouched — still the original manifest.
+    const listed = yield* svc.list({});
+    assert.deepEqual(listed.packs[0]?.manifest.egressHosts, ["packs.example.com"]);
+    assert.equal(listed.packs[0]?.packId, pack.packId);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects an archived-version revive whose content differs from the pin", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const { pack } = yield* installPack;
+    yield* svc.uninstall({ packId: pack.packId });
+
+    // Reinstalling the same version revives it — but only with identical
+    // bytes. Different content is not a revive, it's a pin overwrite.
+    const dir = yield* writePackDir(
+      manifestBody({ schemaVersion: 1, egressHosts: ["other.example.com"] }),
+    );
+    const { request } = yield* svc.requestInstall({
+      origin: { kind: "localPath", path: dir },
+    });
+    const { confirmationToken } = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    yield* expectFailure(
+      "versionAlreadyApproved",
+      svc.confirmInstall({ requestId: request.id, confirmationToken }),
+    );
+
+    const archived = yield* svc.list({ includeArchived: true });
+    assert.isNotNull(archived.packs[0]?.archivedAt ?? null);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a cancel landing mid-confirm refuses with requestNotPending and rolls back", () => {
+  let fetches = 0;
+  let sqlClient: SqlClient.SqlClient | undefined;
+  const layer = layerTestWithFetch(
+    stubFetch({
+      get: () =>
+        Effect.gen(function* () {
+          fetches += 1;
+          if (fetches === 2 && sqlClient !== undefined) {
+            // The human cancelled while confirm was re-fetching the origin.
+            yield* sqlClient`
+              UPDATE watch_connector_install_requests
+              SET status = 'cancelled', resolved_at = '2025-01-01T00:00:00Z'
+              WHERE status = 'pending'
+            `;
+          }
+          return okResponse(wireBundle());
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WatchConnectorError({
+                reason: "fetchFailed",
+                message: "Interleaved cancel failed.",
+                cause,
+              }),
+          ),
+        ),
+    }),
+  );
+  return Effect.gen(function* () {
+    sqlClient = yield* SqlClient.SqlClient;
+    const svc = yield* ConnectorService.ConnectorService;
+    const sql = yield* SqlClient.SqlClient;
+    const { request } = yield* svc.requestInstall({
+      origin: { kind: "httpsUrl", url: "https://packs.example.com/pack.json" },
+    });
+    const { confirmationToken } = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    yield* expectFailure(
+      "requestNotPending",
+      svc.confirmInstall({ requestId: request.id, confirmationToken }),
+    );
+
+    // The write transaction rolled back with the guard: no pack approved,
+    // and the cancelled status the human chose was not overwritten.
+    assert.equal((yield* svc.list({})).packs.length, 0);
+    const rows = yield* sql<{ readonly status: string }>`
+      SELECT status FROM watch_connector_install_requests
+      WHERE request_id = ${request.id}
+    `;
+    assert.equal(rows[0]?.status, "cancelled");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("prepare refuses when the request was cancelled during the deferred fetch", () => {
+  let sqlClient: SqlClient.SqlClient | undefined;
+  const layer = layerTestWithFetch(
+    stubFetch({
+      resolve: () => Effect.succeed([{ address: "10.0.0.7", family: 4 }]),
+      get: () =>
+        Effect.gen(function* () {
+          // A cancel lands while prepare's private fetch is in flight.
+          if (sqlClient !== undefined) {
+            yield* sqlClient`
+              UPDATE watch_connector_install_requests
+              SET status = 'cancelled', resolved_at = '2025-01-01T00:00:00Z'
+              WHERE status = 'pending'
+            `;
+          }
+          return okResponse(wireBundle());
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WatchConnectorError({
+                reason: "fetchFailed",
+                message: "Interleaved cancel failed.",
+                cause,
+              }),
+          ),
+        ),
+    }),
+  );
+  return Effect.gen(function* () {
+    sqlClient = yield* SqlClient.SqlClient;
+    const svc = yield* ConnectorService.ConnectorService;
+    const sql = yield* SqlClient.SqlClient;
+    const { request } = yield* svc.requestInstall({
+      origin: { kind: "httpsUrl", url: "https://internal.example.net/pack.json" },
+    });
+    assert.isTrue(request.localUrl);
+    yield* expectFailure(
+      "requestNotPending",
+      svc.prepareInstallConfirm({ requestId: request.id, allowLocalUrl: true }),
+    );
+
+    // The resolved row was not mutated by the fetch results.
+    const rows = yield* sql<{ readonly manifest_json: string | null; readonly status: string }>`
+      SELECT manifest_json, status
+      FROM watch_connector_install_requests
+      WHERE request_id = ${request.id}
+    `;
+    assert.equal(rows[0]?.status, "cancelled");
+    assert.isNull(rows[0]?.manifest_json);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect(
+  "uninstall cancels a deferred request whose origin could serve the pack, and purge deletes it",
+  () => {
+    const url = "https://packs.example.com/pack.json";
+    let resolves = 0;
+    const layer = layerTestWithFetch(
+      stubFetch({
+        resolve: () =>
+          Effect.sync(() => {
+            resolves += 1;
+            // Public for the install request/fetch/confirm refetch (three
+            // resolves), private afterwards — the same URL then classifies
+            // as a deferred (local_url) request.
+            return [{ address: resolves <= 3 ? "93.184.216.34" : "10.0.0.7", family: 4 as const }];
+          }),
+        get: () => Effect.succeed(okResponse(wireBundle())),
+      }),
+    );
+    return Effect.gen(function* () {
+      const svc = yield* ConnectorService.ConnectorService;
+      const sql = yield* SqlClient.SqlClient;
+      const { request } = yield* svc.requestInstall({ origin: { kind: "httpsUrl", url } });
+      const prepared = yield* svc.prepareInstallConfirm({ requestId: request.id });
+      const { pack } = yield* svc.confirmInstall({
+        requestId: request.id,
+        confirmationToken: prepared.confirmationToken,
+      });
+
+      // A deferred install request to the URL this pack was approved from —
+      // pack_id is NULL until prepare fetches it, so pack-scoped
+      // cancellation alone can never see it.
+      const deferred = yield* svc.requestInstall({ origin: { kind: "httpsUrl", url } });
+      assert.isTrue(deferred.request.localUrl);
+      assert.isNull(deferred.request.packId);
+
+      yield* svc.uninstall({ packId: pack.packId });
+      const afterUninstall = yield* sql<{ readonly status: string }>`
+        SELECT status FROM watch_connector_install_requests
+        WHERE request_id = ${deferred.request.id}
+      `;
+      assert.equal(afterUninstall[0]?.status, "cancelled");
+
+      // Purge's "request history" claim now covers the deferred row too.
+      const purgePrep = yield* svc.preparePurge({ packId: pack.packId });
+      yield* svc.purgeInstanceData({
+        packId: pack.packId,
+        confirmationToken: purgePrep.confirmationToken,
+      });
+      const remaining = yield* sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM watch_connector_install_requests
+      `;
+      assert.equal(remaining[0]?.n, 0);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("caps pending install requests per pack", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const dir = yield* writePackDir(manifestBody());
+    for (let i = 0; i < 10; i++) {
+      yield* svc.requestInstall({ origin: { kind: "localPath", path: dir } });
+    }
+    yield* expectFailure(
+      "watchLimitExceeded",
+      svc.requestInstall({ origin: { kind: "localPath", path: dir } }),
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("recordHealth merges deltas so a poller write cannot erase lastRollback", () =>
+  Effect.gen(function* () {
+    const svc = yield* ConnectorService.ConnectorService;
+    const { instance, request } = yield* upgradeToV2();
+    const { confirmationToken } = yield* svc.prepareInstallConfirm({ requestId: request.id });
+    yield* svc.confirmUpgrade({ requestId: request.id, confirmationToken });
+    const { instance: rolled } = yield* svc.rollback({
+      instanceId: instance.id,
+      schemaVersion: 1,
+    });
+    assert.equal(rolled.health.lastRollback?.toSchemaVersion, 1);
+
+    // A poller-shaped write — the delta carries no lastRollback — must not
+    // erase the audit record, and fields it doesn't name keep their values.
+    yield* svc.recordHealth(instance.id, {
+      status: "healthy",
+      lastError: null,
+      lastFetchAt: "2025-06-01T00:00:00Z",
+      consecutiveFailures: 0,
+    });
+
+    const { instances } = yield* svc.list({});
+    const current = instances.find((row) => row.id === instance.id);
+    assert.equal(current?.health.status, "healthy");
+    assert.equal(current?.health.lastFetchAt, "2025-06-01T00:00:00Z");
+    assert.equal(current?.health.lastRollback?.fromSchemaVersion, 2);
+    assert.equal(current?.health.lastRollback?.toSchemaVersion, 1);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("recordHealth re-pushes when lastFetchAt crosses the coarse notify bucket", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const svc = yield* ConnectorService.ConnectorService;
+      const { pack } = yield* installPack;
+      const { instance } = yield* svc.createInstance({
+        packId: pack.packId,
+        config: { repo: "t3" },
+      });
+
+      // Sliding(1) coalesces publishes made before the subscriber drains,
+      // so each emitting write is paced on a gate its emission completes —
+      // a wrong emit shifts the gate order and shows up in the payloads.
+      const emissionIndex = yield* Ref.make(0);
+      const gates = yield* Effect.forEach([0, 1, 2, 3, 4], () => Deferred.make<void>());
+      const collected = yield* svc.subscribeList({}).pipe(
+        Stream.tap(() =>
+          Ref.getAndUpdate(emissionIndex, (n) => n + 1).pipe(
+            Effect.flatMap((n) =>
+              n < gates.length ? Deferred.succeed(gates[n]!, undefined) : Effect.void,
+            ),
+          ),
+        ),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild({ startImmediately: true }),
+      );
+
+      yield* Deferred.await(gates[0]!); // initial snapshot — subscription is live
+
+      // A real health delta (status unknown → healthy): emits.
+      yield* svc.recordHealth(instance.id, {
+        status: "healthy",
+        lastError: null,
+        lastFetchAt: "2025-06-01T00:00:00Z",
+        consecutiveFailures: 0,
+      });
+      yield* Deferred.await(gates[1]!);
+
+      // Same 15-minute bucket, no field delta — must NOT emit.
+      yield* svc.recordHealth(instance.id, { lastFetchAt: "2025-06-01T00:05:00Z" });
+      // Bucket crossing (the 00:15 boundary): emits.
+      yield* svc.recordHealth(instance.id, { lastFetchAt: "2025-06-01T00:20:00Z" });
+      yield* Deferred.await(gates[2]!);
+
+      // Same bucket as the crossing — must NOT emit.
+      yield* svc.recordHealth(instance.id, { lastFetchAt: "2025-06-01T00:25:00Z" });
+      // Real deltas emit.
+      yield* svc.recordHealth(instance.id, { status: "unhealthy", lastError: "boom" });
+      yield* Deferred.await(gates[3]!);
+      yield* svc.recordHealth(instance.id, { status: "healthy", lastError: null });
+      yield* Deferred.await(gates[4]!);
+
+      const emissions = yield* Fiber.join(collected);
+      const healthAt = (index: number) =>
+        emissions[index]?.instances.find((row) => row.id === instance.id)?.health;
+      assert.equal(emissions.length, 5);
+      assert.equal(healthAt(1)?.lastFetchAt, "2025-06-01T00:00:00Z");
+      // If the in-bucket +5m write had emitted, this slot would carry it.
+      assert.equal(healthAt(2)?.lastFetchAt, "2025-06-01T00:20:00Z");
+      assert.equal(healthAt(3)?.status, "unhealthy");
+      assert.equal(healthAt(3)?.lastError, "boom");
+      assert.equal(healthAt(3)?.lastFetchAt, "2025-06-01T00:25:00Z");
+      assert.equal(healthAt(4)?.status, "healthy");
+    }),
+  ).pipe(Effect.provide(layerTest)),
 );

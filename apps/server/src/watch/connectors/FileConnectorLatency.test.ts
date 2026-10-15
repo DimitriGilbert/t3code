@@ -5,9 +5,11 @@ import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  isUnknownUnionMember,
   type WatchConnectorStreamItem,
   type WatchConnectorSubscribeInput,
   type WatchNotificationEvent,
+  type WatchWidgetErrorState,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -137,10 +139,16 @@ interface ClankerRunRow {
 
 const isRecord = Predicate.isObject;
 
+/** Typed cause — or the unknown wire `cause` — out of a stream error item. */
+const streamErrorCause = (error: WatchWidgetErrorState): string =>
+  isUnknownUnionMember(error) ? error.value : error.cause;
+
 /** Narrows a snapshot item's `data` to the fixture pack's clanker-runs shape. */
 const clankerRuns = (item: WatchConnectorStreamItem): ReadonlyArray<ClankerRunRow> => {
-  assert.equal(item.type, "snapshot");
-  if (item.type !== "snapshot") return [];
+  if (!("type" in item) || item.type !== "snapshot") {
+    assert.equal("type" in item ? item.type : undefined, "snapshot");
+    return [];
+  }
   const data = item.snapshot.data;
   assert.isTrue(isRecord(data), "snapshot data is not an object");
   assert.equal((data as { kind?: unknown }).kind, "clanker-runs");
@@ -162,8 +170,10 @@ const awaitRunSnapshot = (
   Effect.gen(function* () {
     while (true) {
       const item = yield* Queue.take(seen);
-      if (item.type === "error") {
-        assert.fail(`expected a snapshot for ${runId}, got an error item: ${item.error.cause}`);
+      if ("type" in item && item.type === "error") {
+        assert.fail(
+          `expected a snapshot for ${runId}, got an error item: ${streamErrorCause(item.error)}`,
+        );
       }
       const run = clankerRuns(item).find((entry) => entry.runId === runId);
       if (run !== undefined && (predicate === undefined || predicate(run))) {
@@ -177,8 +187,8 @@ const awaitSnapshot = (seen: Queue.Queue<WatchConnectorStreamItem>) =>
   Effect.gen(function* () {
     while (true) {
       const item = yield* Queue.take(seen);
-      if (item.type === "error") {
-        assert.fail(`expected a snapshot, got an error item: ${item.error.cause}`);
+      if ("type" in item && item.type === "error") {
+        assert.fail(`expected a snapshot, got an error item: ${streamErrorCause(item.error)}`);
       }
       return item;
     }
@@ -189,7 +199,7 @@ const awaitErrorCause = (seen: Queue.Queue<WatchConnectorStreamItem>) =>
   Effect.gen(function* () {
     while (true) {
       const item = yield* Queue.take(seen);
-      if (item.type === "error") return item.error.cause;
+      if ("type" in item && item.type === "error") return streamErrorCause(item.error);
     }
   });
 

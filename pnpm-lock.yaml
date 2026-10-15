@@ -904,9 +904,6 @@ importers:
       effect:
         specifier: 4.0.5
         version: 4.0.5
-      esbuild:
-        specifier: 0.28.2
-        version: 0.28.2
       jose:
         specifier: 'catalog:'
         version: 6.2.2
@@ -931,6 +928,9 @@ importers:
       undici:
         specifier: 'catalog:'
         version: 8.11.2
+      tsc-rs:
+        specifier: 0.6.0
+        version: 0.6.0
       yaml:
         specifier: ^2.9.0
         version: 2.9.0

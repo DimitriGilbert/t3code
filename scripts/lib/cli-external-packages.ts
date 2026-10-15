@@ -13,12 +13,12 @@ export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   "@clerk/electron-passkeys",
   "node-gyp-build",
   "node-addon-api",
-  // esbuild loads through createRequire (see WidgetTranspileService): its JS
-  // wrapper resolves the @esbuild/<os>-<arch> platform binary package by real
-  // path, so both the wrapper and every platform sibling stay external — an
-  // inlined require cannot find the staged binary on disk.
-  "esbuild",
-  "@esbuild/",
+  // tsc-rs loads through createRequire (see WidgetTranspileService): its JS
+  // API resolves the @tsc-rs/<os>-<arch> native compiler binary package by
+  // real path, so both the wrapper and every platform sibling stay external —
+  // an inlined require cannot find the staged binary on disk.
+  "tsc-rs",
+  "@tsc-rs/",
   // ws's optional accelerators. Nothing in this repo declares them, so they are
   // not in the staged production install and the packaged app does not ship
   // them either way -- ws wraps the require in try/catch and falls back to its

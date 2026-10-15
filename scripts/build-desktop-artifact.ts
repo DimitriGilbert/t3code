@@ -1589,13 +1589,15 @@ export function createStageWorkspaceConfig(input: {
           cpu: hostCpu,
         };
 
-  // esbuild's postinstall exists to acquire the platform binary on the
-  // installing machine — which here is the build host, not the artifact's
-  // target. Left enabled it resolves (or npm-downloads) @esbuild/<host>,
-  // polluting a cross-platform stage with a binary that cannot run there.
-  // The target's @esbuild/<os>-<arch> optional package is already pinned by
-  // supportedArchitectures, so the postinstall has nothing to do.
-  const stagedAllowBuilds = { ...allowBuilds, esbuild: false };
+  // tsc-rs's postinstall rewrites its bin launcher to exec the platform
+  // binary on the installing machine — which here is the build host, not the
+  // artifact's target, so the rewrite is at best useless (the launcher is
+  // only used by the tsc-rs CLI bin, which the packaged server never runs:
+  // the JS API resolves the target's binary itself through
+  // @tsc-rs/<os>-<arch>) and at worst warns on a host whose platform package
+  // supportedArchitectures did not install. The repo's own allowBuilds
+  // carries `tsc-rs: true` for development, so it must be pinned off here.
+  const stagedAllowBuilds = { ...allowBuilds, "tsc-rs": false };
 
   return {
     supportedArchitectures,

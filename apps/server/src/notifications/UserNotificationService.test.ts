@@ -12,6 +12,7 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  WatchNotificationError,
   type WatchNotificationEvent,
   WatchNotificationId,
   WatchPageId,
@@ -298,9 +299,12 @@ it.effect("resumes from its last-sequence checkpoint without re-emitting", () =>
         assert.equal(items.length, 2);
         const item = items.find(
           (candidate): candidate is Extract<typeof candidate, { type: "notification" }> =>
-            candidate.type === "notification",
+            "type" in candidate && candidate.type === "notification",
         );
-        assert.equal(items[0]?.type, "prefs");
+        assert.equal(
+          items[0] !== undefined && "type" in items[0] ? items[0].type : undefined,
+          "prefs",
+        );
         if (item !== undefined && knownNotification(item.notification)) {
           assert.equal(item.notification.notificationId, "watch-notification:run.failed:run:two");
         } else {
@@ -405,12 +409,12 @@ it.effect("stores prefs reversibly and records muted deliveries", () =>
     yield* notifications.setPrefs(defaults);
     const items = Array.from(yield* Fiber.join(itemsFiber));
     assert.equal(items.length, 2);
-    if (items[0]?.type === "prefs") {
+    if (items[0] !== undefined && "type" in items[0] && items[0].type === "prefs") {
       assert.deepEqual(items[0].prefs.mutedEventTypes, ["widget.threshold"]);
     } else {
       assert.fail("first notification stream item was not prefs");
     }
-    if (items[1]?.type === "prefs") {
+    if (items[1] !== undefined && "type" in items[1] && items[1].type === "prefs") {
       assert.deepEqual(items[1].prefs, defaults);
     } else {
       assert.fail("second notification stream item was not the prefs update");
@@ -564,4 +568,286 @@ it.effect("surfaces the decode message when a history row is unreadable", () =>
     const error = yield* notifications.history({}).pipe(Effect.flip);
     assert.equal(error.message, "Could not decode notification history.");
   }).pipe(Effect.provide(layerTest)),
+);
+
+// Live clock: a crashed tap waits out the capped restart backoff.
+it.live("restarts the tap after the event stream dies mid-drain", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:stream-crash");
+    yield* setupThread(threadId, "project:stream-crash", now);
+
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const real = yield* EventSink.EventSinkV2;
+        let streamCalls = 0;
+        const crashingSink: EventSink.EventSinkV2Shape = {
+          ...real,
+          stream: (input) => {
+            streamCalls += 1;
+            // One stream of the first merged tap defects on subscribe; the
+            // supervised worker must reseed and re-subscribe.
+            return streamCalls === 2
+              ? Stream.die(new Error("injected stream failure"))
+              : real.stream(input);
+          },
+        };
+        yield* Effect.gen(function* () {
+          const notifications = yield* UserNotificationService.UserNotificationService;
+          yield* notifications.awaitStarted();
+          const stored = yield* writeEvents([
+            runUpdatedEvent(
+              makeRun("run:one", threadId, "completed", now, 1),
+              now,
+              "event:run.completed",
+            ),
+          ]);
+          yield* notifications.awaitProcessed(stored[0]!.sequence, "run.updated");
+          // Two subscriptions per tap lifetime — a third call proves the
+          // crashed tap re-subscribed instead of dying for good.
+          assert.isAtLeast(streamCalls, 3);
+          assert.deepEqual(
+            (yield* notifications.history({})).entries.map((entry) =>
+              notificationType(entry.notification),
+            ),
+            ["thread.completed"],
+          );
+        }).pipe(
+          Effect.provide(UserNotificationService.layer),
+          Effect.provideService(EventSink.EventSinkV2, crashingSink),
+        );
+      }),
+    );
+  }).pipe(Effect.provide(layerInfra)),
+);
+
+// Live clock: a never-seeding worker waits out the bounded retry budget.
+it.live("fails awaitStarted when the worker can never seed its cursors", () =>
+  Effect.gen(function* () {
+    const real = yield* EventSink.EventSinkV2;
+    const brokenSink: EventSink.EventSinkV2Shape = {
+      ...real,
+      latestSequence: () => Effect.fail(new EventSink.EventSinkStreamError({ cause: "injected" })),
+    };
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const notifications = yield* UserNotificationService.UserNotificationService;
+        // The worker dies before `started` completes: awaiters observe the
+        // death instead of hanging on a Deferred nobody can resolve.
+        const error = yield* notifications.awaitStarted().pipe(Effect.flip);
+        assert.instanceOf(error, WatchNotificationError);
+        const dead = yield* notifications.awaitProcessed(1, "run.updated").pipe(Effect.flip);
+        assert.instanceOf(dead, WatchNotificationError);
+      }).pipe(
+        Effect.provide(UserNotificationService.layer),
+        Effect.provideService(EventSink.EventSinkV2, brokenSink),
+      ),
+    );
+  }).pipe(Effect.provide(layerInfra)),
+);
+
+// Live clock: the crashed first seed attempt waits out one backoff delay.
+it.live("seeds every cursor atomically — a failed insert rolls back all types", () =>
+  Effect.gen(function* () {
+    const realSql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:atomic-seed");
+    yield* setupThread(threadId, "project:atomic-seed", now);
+
+    let seedInsertCalls = 0;
+    // Fail the first attempt's `runtime-request.updated` seed insert: without
+    // the transaction the `run.updated` row would commit at an older head.
+    const flakySql = new Proxy(realSql, {
+      apply(target, thisArg, args) {
+        const text = (args[0] as ReadonlyArray<string>).join(" ");
+        if (
+          text.includes("INSERT INTO watch_notification_cursors") &&
+          text.includes("DO NOTHING") &&
+          args.includes("runtime-request.updated")
+        ) {
+          seedInsertCalls += 1;
+          if (seedInsertCalls === 1) {
+            return Effect.die(new Error("injected cursor-seed failure"));
+          }
+        }
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const notifications = yield* UserNotificationService.UserNotificationService;
+        yield* notifications.awaitStarted();
+      }).pipe(
+        Effect.provide(UserNotificationService.layer),
+        Effect.provideService(SqlClient.SqlClient, flakySql),
+      ),
+    );
+    assert.isAtLeast(seedInsertCalls, 2);
+
+    // Both types landed in one pass: same head boundary, same seed timestamp.
+    const cursors = yield* realSql<{
+      readonly event_type: string;
+      readonly last_sequence: number;
+      readonly updated_at: string;
+    }>`SELECT event_type, last_sequence, updated_at FROM watch_notification_cursors`;
+    assert.equal(cursors.length, 2);
+    assert.equal(new Set(cursors.map((row) => row.last_sequence)).size, 1);
+    assert.equal(new Set(cursors.map((row) => row.updated_at)).size, 1);
+  }).pipe(Effect.provide(layerInfra)),
+);
+
+// Live clock: each replay spends the one delayed mapping retry.
+it.live("dead-letters a permanently failing event so the cursor can pass", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const blockedThreadId = ThreadId.make("thread:poison");
+    const okThreadId = ThreadId.make("thread:ok-poison");
+    const failingReads = new Set<string>([blockedThreadId]);
+    const readCalls = new Map<string, number>();
+    yield* setupThread(blockedThreadId, "project:poison", now);
+    yield* setupThread(okThreadId, "project:ok-poison", now);
+
+    const withFlakyReads = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const real = yield* ProjectionStore.ProjectionStoreV2;
+        return yield* effect.pipe(
+          Effect.provide(UserNotificationService.layer),
+          Effect.provideService(ProjectionStore.ProjectionStoreV2, {
+            ...real,
+            getThread: (threadId) => {
+              readCalls.set(threadId, (readCalls.get(threadId) ?? 0) + 1);
+              return failingReads.has(threadId)
+                ? Effect.fail(new ProjectionStore.ProjectionStoreReadError({ threadId }))
+                : real.getThread(threadId);
+            },
+          }),
+        );
+      });
+
+    const deadLetterAttempts = (sequence: number) =>
+      sql<{ readonly attempts: number | null }>`
+        SELECT json_extract(notification_json, '$.attempts') AS attempts
+        FROM watch_notifications
+        WHERE notification_id = ${`dead-letter:run.updated:${sequence}`}
+      `.pipe(Effect.map((rows) => rows[0]?.attempts ?? 0));
+
+    const runCursor = () =>
+      sql<{ readonly last_sequence: number }>`
+        SELECT last_sequence FROM watch_notification_cursors
+        WHERE event_type = 'run.updated'
+      `.pipe(Effect.map((rows) => rows[0]?.last_sequence ?? -1));
+
+    // Lifetime 1: the poisoned event fails, the healthy one records, the
+    // cursor clamps below the poisoned sequence.
+    const [blockedSequence, okSequence] = yield* Effect.scoped(
+      withFlakyReads(
+        Effect.gen(function* () {
+          const notifications = yield* UserNotificationService.UserNotificationService;
+          yield* notifications.awaitStarted();
+          const blocked = yield* writeEvents([
+            runUpdatedEvent(
+              makeRun("run:poison", blockedThreadId, "completed", now, 1),
+              now,
+              "event:run.poison",
+            ),
+          ]);
+          const ok = yield* writeEvents([
+            runUpdatedEvent(
+              makeRun("run:ok-poison", okThreadId, "completed", now, 1),
+              now,
+              "event:run.ok-poison",
+            ),
+          ]);
+          yield* notifications.awaitProcessed(ok[0]!.sequence, "run.updated");
+          return [blocked[0]!.sequence, ok[0]!.sequence] as const;
+        }),
+      ),
+    );
+    assert.equal(yield* deadLetterAttempts(blockedSequence), 1);
+    assert.isBelow(yield* runCursor(), blockedSequence);
+
+    // Lifetime 2 replays the gap: the poisoned event fails a second time and
+    // the already-recorded healthy event is deduped before the projection
+    // read — the flaky getThread must not see it again.
+    const okReadCount = readCalls.get(okThreadId) ?? 0;
+    yield* Effect.scoped(
+      withFlakyReads(
+        Effect.gen(function* () {
+          const notifications = yield* UserNotificationService.UserNotificationService;
+          yield* notifications.awaitStarted();
+          yield* notifications.awaitProcessed(okSequence, "run.updated");
+        }),
+      ),
+    );
+    assert.equal(yield* deadLetterAttempts(blockedSequence), 2);
+    assert.isBelow(yield* runCursor(), blockedSequence);
+    assert.equal(readCalls.get(okThreadId) ?? 0, okReadCount);
+
+    // Lifetime 3: the third lifetime attempt dead-letters the event — the
+    // cursor passes and the tap keeps working for later events.
+    yield* Effect.scoped(
+      withFlakyReads(
+        Effect.gen(function* () {
+          const notifications = yield* UserNotificationService.UserNotificationService;
+          yield* notifications.awaitStarted();
+          const late = yield* writeEvents([
+            runUpdatedEvent(
+              makeRun("run:late-poison", okThreadId, "completed", now, 2),
+              now,
+              "event:run.late-poison",
+            ),
+          ]);
+          yield* notifications.awaitProcessed(late[0]!.sequence, "run.updated");
+        }),
+      ),
+    );
+    assert.equal(yield* deadLetterAttempts(blockedSequence), 3);
+    assert.isAtLeast(yield* runCursor(), blockedSequence);
+    assert.deepEqual(
+      (yield* sql<{ readonly notification_id: string }>`
+        SELECT notification_id FROM watch_notifications
+        WHERE type <> 'dead-letter'
+        ORDER BY notification_id ASC
+      `).map((row) => row.notification_id),
+      [
+        "watch-notification:run.completed:run:late-poison",
+        "watch-notification:run.completed:run:ok-poison",
+      ],
+    );
+  }).pipe(Effect.provide(layerInfra)),
+);
+
+// Live clock: the age cutoff is computed from the wall clock.
+it.live("prunes history by age and caps it at the newest rows", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO watch_notifications (notification_id, type, notification_json, recorded_at, source_sequence)
+      VALUES ('watch-notification:ancient', 'thread.completed', '{}', '2000-01-01T00:00:00.000Z', NULL)
+    `;
+    // Marker rows share the table: retention must prune them too.
+    yield* sql`
+      INSERT INTO watch_notifications (notification_id, type, notification_json, recorded_at, source_sequence)
+      VALUES ('dead-letter:run.updated:7', 'dead-letter', '{"attempts":3}', '2000-01-01T00:00:00.000Z', 7)
+    `;
+    yield* sql`
+      WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1005)
+      INSERT INTO watch_notifications (notification_id, type, notification_json, recorded_at, source_sequence)
+      SELECT 'watch-notification:bulk-' || n, 'thread.completed', '{}', '2999-01-01T00:00:00.000Z', NULL FROM seq
+    `;
+    const pruned = yield* UserNotificationService.pruneHistory;
+    // Two aged-out rows plus five rows over the 1000-row cap.
+    assert.equal(pruned, 7);
+    const count = yield* sql<{ readonly remaining: number }>`
+      SELECT COUNT(*) AS remaining FROM watch_notifications
+    `;
+    assert.equal(count[0]?.remaining, 1000);
+    const aged = yield* sql`
+      SELECT notification_id FROM watch_notifications
+      WHERE notification_id IN ('watch-notification:ancient', 'dead-letter:run.updated:7')
+    `;
+    assert.equal(aged.length, 0);
+  }).pipe(Effect.provide(layerInfra)),
 );

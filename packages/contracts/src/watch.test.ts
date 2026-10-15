@@ -5,6 +5,7 @@ import { UnknownUnionMember } from "./baseSchemas.ts";
 import {
   WatchNotificationEvent,
   WatchNotificationPrefs,
+  WatchConnectorStreamItem,
   WatchNotificationStreamItem,
   WatchNotificationsHistoryResult,
   WatchPage,
@@ -26,6 +27,7 @@ const decodeNotificationEvent = Schema.decodeUnknownSync(WatchNotificationEvent)
 const decodeNotificationPrefs = Schema.decodeUnknownSync(WatchNotificationPrefs);
 const encodeNotificationPrefs = Schema.encodeSync(WatchNotificationPrefs);
 const decodeNotificationStreamItem = Schema.decodeUnknownSync(WatchNotificationStreamItem);
+const decodeConnectorStreamItem = Schema.decodeUnknownSync(WatchConnectorStreamItem);
 const decodeNotificationHistoryResult = Schema.decodeUnknownSync(WatchNotificationsHistoryResult);
 const decodeWidgetErrorState = Schema.decodeUnknownSync(WatchWidgetErrorState);
 
@@ -164,12 +166,12 @@ describe("WatchNotificationPrefs", () => {
 });
 
 describe("WatchNotificationStreamItem", () => {
-  it("decodes prefs and notification items", () => {
+  it("decodes prefs and notification items and degrades unknown envelope kinds", () => {
     const prefs = decodeNotificationStreamItem({
       type: "prefs",
       prefs: { mutedEventTypes: [], mutedPageIds: [], snoozedUntil: null },
     });
-    expect(prefs.type).toBe("prefs");
+    expect("type" in prefs && prefs.type).toBe("prefs");
     const notification = decodeNotificationStreamItem({
       type: "notification",
       notification: {
@@ -180,7 +182,28 @@ describe("WatchNotificationStreamItem", () => {
         projectId: "project:1",
       },
     });
-    expect(notification.type).toBe("notification");
+    expect("type" in notification && notification.type).toBe("notification");
+    expect(decodeNotificationStreamItem({ type: "futureKind", data: {} })).toBeInstanceOf(
+      UnknownUnionMember,
+    );
+  });
+});
+
+describe("WatchConnectorStreamItem", () => {
+  it("decodes snapshot and error items and degrades unknown envelope kinds", () => {
+    const snapshot = decodeConnectorStreamItem({
+      type: "snapshot",
+      snapshot: { instanceId: "watch-connector:1", fetchedAt: NOW, data: { n: 1 } },
+    });
+    expect("type" in snapshot && snapshot.type).toBe("snapshot");
+    const error = decodeConnectorStreamItem({
+      type: "error",
+      error: { cause: "connectorDown" },
+    });
+    expect("type" in error && error.type).toBe("error");
+    expect(decodeConnectorStreamItem({ type: "futureKind", data: {} })).toBeInstanceOf(
+      UnknownUnionMember,
+    );
   });
 });
 
@@ -206,7 +229,7 @@ describe("WatchNotificationsHistoryResult", () => {
 });
 
 describe("WatchWidgetErrorState", () => {
-  it("decodes each typed cause", () => {
+  it("decodes each typed cause and degrades unknown causes", () => {
     for (const cause of [
       "connectorDown",
       "credentialsInvalid",
@@ -216,8 +239,11 @@ describe("WatchWidgetErrorState", () => {
       "projectMissing",
       "transpileFailed",
     ]) {
-      expect(decodeWidgetErrorState({ cause }).cause).toBe(cause);
+      const decoded = decodeWidgetErrorState({ cause });
+      expect("cause" in decoded && decoded.cause).toBe(cause);
     }
-    expect(() => decodeWidgetErrorState({ cause: "unknownThing" })).toThrow();
+    // A cause this build does not know is an UnknownUnionMember, not a
+    // stream-killing decode failure.
+    expect(decodeWidgetErrorState({ cause: "unknownThing" })).toBeInstanceOf(UnknownUnionMember);
   });
 });

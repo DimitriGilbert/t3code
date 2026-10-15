@@ -4,10 +4,10 @@ import {
   type WatchConnectorInstanceId,
   type WatchConnectorStreamItem,
   type WatchConnectorSubscribeInput,
-  type WatchConnectorThresholdRule,
-  type WatchConnectorsListResult,
+  WatchConnectorThresholdRule,
   type WatchNotificationEvent,
   WatchNotificationId,
+  WatchWidgetConfig,
   type WatchWidgetErrorState,
   type WatchWidgetId,
 } from "@t3tools/contracts";
@@ -31,6 +31,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../../config.ts";
 import { UserNotificationService } from "../../notifications/UserNotificationService.ts";
@@ -53,8 +54,10 @@ import * as PackStore from "./PackStore.ts";
  * `fs.watch` signal. Every run re-reads the installed pack and re-verifies the
  * recorded content hash, and health transitions emit `connector.unhealthy` /
  * `connector.authExpired` through the notification service. Widget-declared
- * thresholds are evaluated here on each *changed* snapshot — a crossing emits
- * `widget.threshold` once, not per poll.
+ * thresholds — read from the widget row's stored `config.settings.thresholds`
+ * at subscribe time, never from the subscription payload — are evaluated here
+ * on each *changed* snapshot; a crossing emits `widget.threshold` once, not
+ * per poll.
  */
 
 /** Absolute floor — instance config can never push polling below this. */
@@ -65,6 +68,21 @@ export const DEFAULT_POLL_FLOOR_MS = 5_000;
 export const MAX_BACKOFF_MS = 15 * 60_000;
 /** Minimum gap between pushed stream items; bursts coalesce to the latest. */
 export const MIN_PUSH_INTERVAL_MS = 1_000;
+/**
+ * Minimum gap between a completed run and the next *forced* run. Tied to the
+ * push cadence on purpose: a forced run more frequent than `MIN_PUSH_INTERVAL_MS`
+ * can rarely publish what it fetched anyway, and without it a busy watched
+ * directory sustains a full pack-eval per debounced signal (~4/sec). Scheduled
+ * polls already honor their own (larger) interval.
+ */
+export const MIN_FORCED_RUN_GAP_MS = MIN_PUSH_INTERVAL_MS;
+/**
+ * Repeat `connector.unhealthy`/`connector.authExpired` notifications for the
+ * same health status are suppressed inside this window — a source flapping
+ * healthy↔unhealthy every interval produces one alert per cooldown, not one
+ * per edge. `health_json` keeps recording every run regardless.
+ */
+export const HEALTH_NOTIFICATION_COOLDOWN_MS = 5 * 60_000;
 /** A single run's fetch+transform budget. */
 const RUN_TIMEOUT = Duration.seconds(60);
 
@@ -93,6 +111,12 @@ const resolvePath = (data: unknown, path: string): unknown => {
 
 const valuesEqual = (a: unknown, b: unknown): boolean =>
   a === b || JSON.stringify(a) === JSON.stringify(b);
+
+const WidgetConfigJson = Schema.fromJsonString(WatchWidgetConfig);
+const decodeWidgetConfigJson = Schema.decodeUnknownEffect(WidgetConfigJson);
+const decodeStoredThresholds = Schema.decodeUnknownOption(
+  Schema.Array(WatchConnectorThresholdRule),
+);
 
 /** One threshold rule against one snapshot. Comparisons are numeric; `eq`/`ne` compare JSON. */
 export const evalThresholdRule = (rule: WatchConnectorThresholdRule, data: unknown): boolean => {
@@ -207,8 +231,6 @@ interface Subscriber {
   readonly intervalMs: number | undefined;
   readonly widgetId: WatchWidgetId | undefined;
   readonly thresholds: ReadonlyArray<WatchConnectorThresholdRule>;
-  /** Per-rule latch — an alert emits only on the false→true edge. */
-  readonly thresholdFired: Array<boolean>;
 }
 
 interface InstanceRuntime {
@@ -236,6 +258,17 @@ interface InstanceRuntime {
   readonly lastPublishAt: Ref.Ref<number>;
   readonly schedule: Ref.Ref<{ lastRunAt: number; nextRunAt: number }>;
   /**
+   * False→true latch per `${widgetId}:${ruleIndex}`, owned by the run loop.
+   * Living on the runtime (not the subscriber) means a widget resubscribing
+   * while its condition stayed true does not re-alert; the latch releases
+   * only when the rule reads false on a later snapshot.
+   */
+  readonly thresholdLatches: Ref.Ref<Map<string, boolean>>;
+  /** The last published error item — identical failures are not repushed. */
+  readonly lastError: Ref.Ref<WatchWidgetErrorState | undefined>;
+  /** Health status → Clock time of its last emitted notification (flap cooldown). */
+  readonly healthNotifiedAt: Ref.Ref<Map<string, number>>;
+  /**
    * The egress impl behind `ctx.fetch`, pinned by whoever opened the runtime.
    * In production this is the default `fetch`; tests inject a stub. It is
    * pinned (not re-read per run) so a restart cannot silently swap the
@@ -259,7 +292,9 @@ export class ConnectorPoller extends Context.Service<
      * Widget-facing connector data subscription. Emits the cached snapshot
      * immediately when one exists, then transformed snapshots and typed error
      * states as poll runs complete. The declared `refreshPolicy` contributes
-     * to the instance's shared interval.
+     * to the instance's shared interval. A `widgetId` must name a real widget
+     * row bound to this instance; its stored thresholds drive `widget.threshold`
+     * alerts.
      */
     readonly subscribe: (
       input: WatchConnectorSubscribeInput,
@@ -277,6 +312,7 @@ export const layer = Layer.effect(
     const connectors = yield* ConnectorService.ConnectorService;
     const notifications = yield* UserNotificationService;
     const crypto = yield* Crypto.Crypto;
+    const sql = yield* SqlClient.SqlClient;
     const packRuntime = Layer.mergeAll(
       Layer.succeed(FileSystem.FileSystem, yield* FileSystem.FileSystem),
       Layer.succeed(Path.Path, yield* Path.Path),
@@ -303,6 +339,66 @@ export const layer = Layer.effect(
           ),
         );
 
+    /**
+     * Resolves a `widgetId` subscribe to the rules evaluated on snapshots.
+     * The named widget row must exist and its connector source must bind the
+     * subscribed instance; the rules are the row's stored
+     * `config.settings.thresholds`, never the wire payload — no client or
+     * agent RPC can raise an alert or retarget one at an arbitrary widget.
+     */
+    const resolveWidgetThresholds = (
+      widgetId: WatchWidgetId,
+      instanceId: WatchConnectorInstanceId,
+    ) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ readonly config_json: string }>`
+          SELECT config_json FROM watch_widgets WHERE widget_id = ${widgetId}
+        `;
+        const row = rows[0];
+        if (row === undefined) {
+          return yield* new WatchConnectorError({
+            message: `Watch widget "${widgetId}" does not exist.`,
+            reason: "configInvalid",
+            field: "widgetId",
+            instanceId,
+          });
+        }
+        const config = yield* decodeWidgetConfigJson(row.config_json).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WatchConnectorError({
+                message: `Watch widget "${widgetId}" has an unreadable stored config.`,
+                reason: "configInvalid",
+                field: "widgetId",
+                instanceId,
+                cause,
+              }),
+          ),
+        );
+        if (config.source?.kind !== "connector" || config.source.binding !== instanceId) {
+          return yield* new WatchConnectorError({
+            message: `Watch widget "${widgetId}" is not bound to connector instance "${instanceId}".`,
+            reason: "configInvalid",
+            field: "widgetId",
+            instanceId,
+          });
+        }
+        // `settings` is widget-kind-owned free-form config: a malformed
+        // `thresholds` value declares no rules rather than failing the stream.
+        return Option.getOrElse(decodeStoredThresholds(config.settings?.["thresholds"]), () => []);
+      }).pipe(
+        Effect.mapError((cause) =>
+          isConnectorError(cause)
+            ? cause
+            : new WatchConnectorError({
+                message: "Could not load the subscribing widget's config.",
+                reason: "fetchFailed",
+                instanceId,
+                cause,
+              }),
+        ),
+      );
+
     const effectiveIntervalMs = (rt: InstanceRuntime) =>
       Effect.gen(function* () {
         const floor = yield* Ref.get(rt.floorMs);
@@ -318,9 +414,9 @@ export const layer = Layer.effect(
     /**
      * One fetch→transform pass for an instance: pack is re-read from disk and
      * re-verified against the pinned content hash every run, the entry module
-     * is evaluated in a fresh realm, and secrets resolve per-call so rotation
-     * needs no restart. Output is serialized and size-capped — raw files and
-     * raw responses stay server-side.
+     * is invoked inside a fresh worker thread, and secrets resolve per-call
+     * so rotation needs no restart. Output is serialized and size-capped —
+     * raw files and raw responses stay server-side.
      */
     const runPipeline = (rt: InstanceRuntime) =>
       Effect.gen(function* () {
@@ -380,8 +476,9 @@ export const layer = Layer.effect(
         const json = yield* PackModule.serializeSnapshot(data);
         return { json, data };
       }).pipe(
-        // Pack code runs unconfined (v1 — no isolate), so a hung fetch cannot
-        // be killed; the timeout bounds how long the *run* waits on it.
+        // Pack code runs in a worker thread the run owns: the timeout bounds
+        // the wait AND the work — interruption terminates the worker, so a
+        // hung or spinning pack cannot outlive the run deadline.
         Effect.timeout(RUN_TIMEOUT),
         Effect.mapError(classifyFailure),
       );
@@ -398,16 +495,24 @@ export const layer = Layer.effect(
         yield* PubSub.publish(rt.items, item);
       });
 
-    /** Threshold crossings — only changed snapshots reach here, each rule latched per subscriber. */
+    /**
+     * Threshold crossings — only changed snapshots reach here. The latch is
+     * keyed `${widgetId}:${ruleIndex}` on the runtime, so it survives a widget
+     * resubscribe (remount, reconnect): a rule that stayed true cannot
+     * re-alert, while a genuinely new crossing always emits under a fresh
+     * notification id.
+     */
     const evalThresholds = (rt: InstanceRuntime, data: unknown, nowIso: string) =>
       Effect.gen(function* () {
+        const latches = yield* Ref.get(rt.thresholdLatches);
         for (const sub of (yield* Ref.get(rt.subscribers)).values()) {
           if (sub.widgetId === undefined) continue;
           for (let index = 0; index < sub.thresholds.length; index += 1) {
             const rule = sub.thresholds[index]!;
+            const key = `${sub.widgetId}:${index}`;
             const hit = evalThresholdRule(rule, data);
-            if (hit && sub.thresholdFired[index] !== true) {
-              sub.thresholdFired[index] = true;
+            if (hit && latches.get(key) !== true) {
+              latches.set(key, true);
               yield* emitNotification({
                 type: "widget.threshold",
                 notificationId: WatchNotificationId.make(
@@ -419,7 +524,7 @@ export const layer = Layer.effect(
                 ...(rule.summary === undefined ? {} : { summary: rule.summary }),
               });
             } else if (!hit) {
-              sub.thresholdFired[index] = false;
+              latches.delete(key);
             }
           }
         }
@@ -462,6 +567,9 @@ export const layer = Layer.effect(
               fetchedAt: nowIso,
               item,
             });
+            // A published snapshot supersedes any error the stream showed —
+            // the next failure must push its item even if byte-identical.
+            yield* Ref.set(rt.lastError, undefined);
             yield* publishItem(rt, item);
             yield* evalThresholds(rt, result.success.data, nowIso);
           }
@@ -487,24 +595,36 @@ export const layer = Layer.effect(
               Effect.logWarning("Could not record connector health", { cause }),
             ),
           );
-        // Health transitions emit once, on the edge — repeated failures do not spam.
+        // Health transitions emit once, on the edge — but a flapping source
+        // still produces an edge every other run, so a status that already
+        // notified inside the cooldown window is recorded in health_json
+        // without another user notification.
         if (previousStatus !== failure.health) {
-          const type =
-            failure.health === "authExpired" ? "connector.authExpired" : "connector.unhealthy";
-          yield* emitNotification({
-            type,
-            notificationId: WatchNotificationId.make(
-              `watch-notification:${type}:${rt.instanceId}:${nowIso}`,
-            ),
-            createdAt: nowIso,
-            instanceId: rt.instanceId,
-          });
+          const notifiedAt = yield* Ref.get(rt.healthNotifiedAt);
+          const lastNotified = notifiedAt.get(failure.health);
+          if (lastNotified === undefined || now - lastNotified >= HEALTH_NOTIFICATION_COOLDOWN_MS) {
+            notifiedAt.set(failure.health, now);
+            const type =
+              failure.health === "authExpired" ? "connector.authExpired" : "connector.unhealthy";
+            yield* emitNotification({
+              type,
+              notificationId: WatchNotificationId.make(
+                `watch-notification:${type}:${rt.instanceId}:${nowIso}`,
+              ),
+              createdAt: nowIso,
+              instanceId: rt.instanceId,
+            });
+          }
         }
         const last = yield* Ref.get(rt.lastSnapshot);
-        yield* publishItem(rt, {
-          type: "error",
-          error: errorState(failure, rt.instanceId, last?.fetchedAt),
-        });
+        const error = errorState(failure, rt.instanceId, last?.fetchedAt);
+        // `lastGoodDataAt` is pinned to the last success, so repeated runs of
+        // the same failure produce an identical item — publish only on change.
+        const lastError = yield* Ref.get(rt.lastError);
+        if (lastError === undefined || !valuesEqual(error, lastError)) {
+          yield* Ref.set(rt.lastError, error);
+          yield* publishItem(rt, { type: "error", error });
+        }
       });
 
     /**
@@ -534,8 +654,18 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         while (true) {
           const schedule = yield* Ref.get(rt.schedule);
-          const waitMs = Math.max(0, schedule.nextRunAt - (yield* Clock.currentTimeMillis));
-          const woke = yield* Queue.take(rt.wakes).pipe(Effect.timeoutOption(waitMs));
+          // The deadline sleep computes its duration *inside* the racing
+          // fiber so it always lands on `nextRunAt` absolutely — a fiber
+          // scheduled late (event-loop stall, or a test clock that jumped
+          // between the schedule read and the sleep registration) still
+          // wakes at the deadline instead of "waitMs from whenever it ran".
+          const woke = yield* Effect.raceFirst(
+            Effect.asSome(Queue.take(rt.wakes)),
+            Clock.currentTimeMillis.pipe(
+              Effect.andThen((now) => Effect.sleep(Math.max(0, schedule.nextRunAt - now))),
+              Effect.as(Option.none<"wake">()),
+            ),
+          );
           const wanted = yield* Ref.getAndSet(rt.forceRequest, 0);
           const completed = yield* Ref.get(rt.runGeneration);
           if (Option.isSome(woke) && wanted <= completed) {
@@ -549,7 +679,9 @@ export const layer = Layer.effect(
               const interval = yield* effectiveIntervalMs(rt);
               yield* Ref.update(rt.schedule, (s) => ({
                 ...s,
-                nextRunAt: s.lastRunAt + interval,
+                // Never push a nearer deadline out — a forced run deferred to
+                // the run-gap floor below keeps its slot over this reschedule.
+                nextRunAt: Math.min(s.nextRunAt, s.lastRunAt + interval),
               }));
             }
             continue;
@@ -563,6 +695,24 @@ export const layer = Layer.effect(
             schedule.nextRunAt > (yield* Clock.currentTimeMillis)
           ) {
             continue;
+          }
+          // A forced run inside the minimum run gap coalesces into a run at
+          // the gap deadline instead of starting immediately — otherwise a
+          // directory written at ~300ms cadence drives a full fetch +
+          // pack-eval per debounced signal. `completed > 0` means a run
+          // already finished on this runtime (the first run is never gated),
+          // and `lastRunAt` bases the gap on the last *successful* run —
+          // failures are already deferred by the backoff branch above.
+          if (wanted > completed && completed > 0) {
+            const gapRemaining =
+              schedule.lastRunAt + MIN_FORCED_RUN_GAP_MS - (yield* Clock.currentTimeMillis);
+            if (gapRemaining > 0) {
+              yield* Ref.update(rt.schedule, (s) => ({
+                ...s,
+                nextRunAt: Math.min(s.nextRunAt, schedule.lastRunAt + MIN_FORCED_RUN_GAP_MS),
+              }));
+              continue;
+            }
           }
           // A defect in one run must not kill the poll loop — typed failures
           // are handled in runOnce; this only guards bugs, and the next
@@ -629,6 +779,9 @@ export const layer = Layer.effect(
           // real timestamp lands.
           lastPublishAt: yield* Ref.make(0 - MIN_PUSH_INTERVAL_MS),
           lastSnapshot: yield* Ref.make<CachedSnapshot | undefined>(undefined),
+          thresholdLatches: yield* Ref.make(new Map<string, boolean>()),
+          lastError: yield* Ref.make<WatchWidgetErrorState | undefined>(undefined),
+          healthNotifiedAt: yield* Ref.make(new Map<string, number>()),
           schedule: yield* Ref.make({ lastRunAt: 0, nextRunAt: Number.MAX_SAFE_INTEGER }),
           egressFetch,
           scope: yield* Scope.make(),
@@ -694,18 +847,26 @@ export const layer = Layer.effect(
         }),
       );
 
+    /**
+     * Removal, the emptiness check, and the teardown itself all hold one
+     * `lifecycle` permit — a `joinRuntime` can never squeeze between "last
+     * subscriber gone" and "runtime destroyed" and inherit a doomed runtime.
+     */
     const leaveRuntime = (rt: InstanceRuntime, subscriberId: string) =>
       Effect.gen(function* () {
-        const remaining = yield* Ref.modify(rt.subscribers, (map) => {
-          const next = new Map(map);
-          next.delete(subscriberId);
-          return [next.size, next] as const;
-        });
-        if (remaining === 0) {
-          yield* lifecycle.withPermits(1)(teardownRuntime(rt));
-          return;
-        }
-        yield* wake(rt, false);
+        const tornDown = yield* lifecycle.withPermits(1)(
+          Effect.gen(function* () {
+            const remaining = yield* Ref.modify(rt.subscribers, (map) => {
+              const next = new Map(map);
+              next.delete(subscriberId);
+              return [next.size, next] as const;
+            });
+            if (remaining > 0) return false;
+            yield* teardownRuntime(rt);
+            return true;
+          }),
+        );
+        if (!tornDown) yield* wake(rt, false);
       });
 
     /**
@@ -713,26 +874,36 @@ export const layer = Layer.effect(
      * instance loses its runtime (subscribers get `connectorMissing`), a
      * config write (`updated_at`) restarts it. `subscribeList` re-emits the
      * full list on every change, so this is a diff, not a watcher of watchers.
+     *
+     * The stream's list payload is only a dirty signal — it was read before
+     * the diff acquired `lifecycle`, so a runtime built in the gap would be
+     * torn down as "missing" against that stale snapshot. The diff re-reads
+     * the table inside the permit: every runtime in the map was built by a
+     * `joinRuntime` holding the same permit, so its instance row is already
+     * committed (or genuinely gone) by the time this `list` runs.
      */
-    const reconcile = (list: WatchConnectorsListResult) =>
-      lifecycle.withPermits(1)(
-        Effect.gen(function* () {
-          const live = new Map<string, string>();
-          for (const instance of list.instances) {
-            if (instance.archivedAt === null) live.set(instance.id, instance.updatedAt);
+    const reconcile = lifecycle.withPermits(1)(
+      Effect.gen(function* () {
+        const list = yield* connectors.list({ includeArchived: true });
+        const live = new Map<string, string>();
+        for (const instance of list.instances) {
+          if (instance.archivedAt === null) live.set(instance.id, instance.updatedAt);
+        }
+        for (const [instanceId, rt] of yield* Ref.get(runtimes)) {
+          const updatedAt = live.get(instanceId);
+          if (updatedAt === undefined) {
+            yield* teardownRuntime(rt, { missing: true });
+          } else if (updatedAt !== rt.updatedAt) {
+            yield* restartRuntime(rt, updatedAt);
           }
-          for (const [instanceId, rt] of yield* Ref.get(runtimes)) {
-            const updatedAt = live.get(instanceId);
-            if (updatedAt === undefined) {
-              yield* teardownRuntime(rt, { missing: true });
-            } else if (updatedAt !== rt.updatedAt) {
-              yield* restartRuntime(rt, updatedAt);
-            }
-          }
-        }),
-      );
+        }
+      }),
+    );
 
-    yield* Stream.runForEach(connectors.subscribeList({ includeArchived: true }), reconcile).pipe(
+    yield* Stream.runForEach(
+      connectors.subscribeList({ includeArchived: true }),
+      () => reconcile,
+    ).pipe(
       Effect.catchCause((cause) =>
         Effect.logError("Connector poller reconcile worker stopped", { cause }),
       ),
@@ -771,14 +942,20 @@ export const layer = Layer.effect(
           // Resolved in the caller's context so tests can inject a stub; the
           // first subscriber pins the runtime's egress impl.
           const egressFetch = yield* HttpTransport.ConnectorEgressFetch;
+          // A claimed widgetId is verified against the stored widget row and
+          // the rules come from that row's config — a widget that does not
+          // exist or binds another instance cannot subscribe.
+          const thresholds =
+            input.widgetId === undefined
+              ? []
+              : yield* resolveWidgetThresholds(input.widgetId, input.instanceId);
           const rt = yield* joinRuntime(
             infoResult.success,
             subscriberId,
             {
               intervalMs: input.refreshPolicy?.intervalMs,
               widgetId: input.widgetId,
-              thresholds: input.thresholds ?? [],
-              thresholdFired: (input.thresholds ?? []).map(() => false),
+              thresholds,
             },
             egressFetch,
           );

@@ -13,6 +13,7 @@ import {
   type WatchNotificationsHistoryResult,
   type WatchNotificationsSetPrefsResult,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -33,11 +34,22 @@ import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
  * User-facing notification feed. A scoped worker taps the post-commit
  * orchestration event stream (one unbounded subscription per consumed event
  * type, merged), maps domain events into `WatchNotification`s, records every
- * one of them into the append-only `watch_notifications` history table, and
- * publishes it to subscribers exactly once — dedupe is by deterministic
- * `notificationId` (`INSERT ... ON CONFLICT DO NOTHING`), so a replayed event
- * can never double-emit. Per-type `last_sequence` cursors resume the tap
- * after a restart.
+ * one of them into the `watch_notifications` history table, and publishes it
+ * to subscribers exactly once — dedupe is by deterministic `notificationId`
+ * (`INSERT ... ON CONFLICT DO NOTHING`), so a replayed event can never
+ * double-emit. Per-type `last_sequence` cursors resume the tap after a
+ * restart.
+ *
+ * The worker is supervised: a crash (typed failure or defect) reseeds the
+ * resume point from the durable cursors and re-subscribes under capped
+ * backoff, and only so many consecutive restarts before the worker is
+ * declared dead — `started`/`dead` fail so awaiters observe the death instead
+ * of hanging. Events that keep failing to map are dead-lettered after
+ * {@link DEAD_LETTER_MAX_ATTEMPTS} lifetime attempts so one poisoned event
+ * cannot wedge its type's cursor forever. History is bounded: rows older
+ * than {@link RETENTION_MAX_AGE} or beyond the newest
+ * {@link RETENTION_MAX_ROWS} are pruned periodically (and dead-letter marker
+ * rows share the same retention).
  *
  * Delivery is deliberately not decided here: mute/snooze are client-side,
  * per-channel predicates (`@t3tools/client-runtime/state/watchNotifications`)
@@ -69,22 +81,24 @@ export class UserNotificationService extends Context.Service<
     ) => Effect.Effect<{ readonly recorded: boolean }, WatchNotificationError>;
     /**
      * Resolves once the worker's resume cursors are initialized and its tap is
-     * live: anything committed afterwards is guaranteed to reach it. Tests use
-     * it to order writes against startup without sleeping.
+     * live: anything committed afterwards is guaranteed to reach it. Fails if
+     * the worker is declared dead (retries exhausted or scope closed) before
+     * — or after — it ever started. Tests use it to order writes against
+     * startup without sleeping.
      */
-    readonly awaitStarted: () => Effect.Effect<void>;
+    readonly awaitStarted: () => Effect.Effect<void, WatchNotificationError>;
     /**
      * Resolves once the worker has finished handling this event type at a
      * sequence at least this high — whether it recorded, skipped, or dropped
      * the event after its retry. The merged tap does not order event types
      * against each other, so waiting on a global high-water mark cannot prove
      * an earlier event of another type ran. Tests use it to observe the tap
-     * without sleeping.
+     * without sleeping. Fails if the worker is declared dead first.
      */
     readonly awaitProcessed: (
       sequence: number,
       eventType: OrchestrationV2DomainEvent["type"],
-    ) => Effect.Effect<void>;
+    ) => Effect.Effect<void, WatchNotificationError>;
   }
 >()("t3/notifications/UserNotificationService") {}
 
@@ -98,6 +112,40 @@ const HISTORY_DEFAULT_LIMIT = 100;
 const HISTORY_MAX_LIMIT = 500;
 /** Delay before the one mapping retry: rides out a transient projection read. */
 const MAPPING_RETRY_DELAY = Duration.millis(250);
+
+/**
+ * Worker supervision. A crash — typed failure or defect — restarts the whole
+ * tap (the resume point is re-read from the durable cursors, so nothing
+ * committed mid-crash is lost) under exponential backoff capped at a few
+ * seconds. After {@link WORKER_MAX_RESTARTS} consecutive deaths the worker is
+ * declared dead: `started` and `dead` fail so `awaitStarted`/`awaitProcessed`
+ * callers observe the death instead of hanging. Interruption is never
+ * retried — that is scope shutdown.
+ */
+const WORKER_MAX_RESTARTS = 5;
+const WORKER_RESTART_SCHEDULE = Schedule.exponential("100 millis").pipe(
+  Schedule.modifyDelay(({ duration }) =>
+    Effect.succeed(Duration.min(duration, Duration.seconds(2))),
+  ),
+  Schedule.jittered,
+);
+
+/**
+ * Lifetime attempts before an event that keeps failing to map or record is
+ * dead-lettered and the cursor is allowed to pass it. Attempts persist in a
+ * marker row (one per event, keyed `dead-letter:{eventType}:{sequence}`) so
+ * the count survives restarts — a deterministically poisoned event would
+ * otherwise wedge its type's cursor at `sequence - 1` on every boot and
+ * re-scan an ever-growing tail. Markers carry `type = 'dead-letter'`, which
+ * no `WatchNotificationEvent` can use, and are excluded from `history`.
+ */
+const DEAD_LETTER_MAX_ATTEMPTS = 3;
+const DEAD_LETTER_TYPE = "dead-letter";
+
+/** History retention: rows older than this or beyond the newest N go. */
+const RETENTION_MAX_AGE = Duration.days(30);
+const RETENTION_MAX_ROWS = 1000;
+const RETENTION_INTERVAL = Duration.hours(1);
 
 /** Domain event types the worker taps, one unbounded subscription each, merged. */
 const CONSUMED_EVENT_TYPES = [
@@ -139,6 +187,38 @@ interface WatchNotificationCursorRow {
 const deterministicNotificationId = (key: string) =>
   WatchNotificationId.make(`watch-notification:${key}`);
 
+/** Marker row key, outside the `watch-notification:` emit namespace. */
+const deadLetterId = (eventType: string, sequence: number) =>
+  `dead-letter:${eventType}:${sequence}`;
+
+/**
+ * Enforces the history bound: rows older than `RETENTION_MAX_AGE` go first,
+ * then whatever exceeds the newest `RETENTION_MAX_ROWS` (the recorded_at
+ * index order). The worker runs this once at start and then on
+ * `RETENTION_INTERVAL`; exported for tests. Dead-letter markers prune like
+ * any row — by the time one ages out its cursor has long passed the event.
+ */
+export const pruneHistory = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const cutoff = iso(DateTime.subtractDuration(yield* localNow, RETENTION_MAX_AGE));
+  const aged = yield* sql`
+    DELETE FROM watch_notifications
+    WHERE recorded_at < ${cutoff}
+    RETURNING notification_id
+  `;
+  const overflow = yield* sql`
+    DELETE FROM watch_notifications
+    WHERE rowid IN (
+      SELECT rowid
+      FROM watch_notifications
+      ORDER BY recorded_at DESC, notification_id DESC
+      LIMIT -1 OFFSET ${RETENTION_MAX_ROWS}
+    )
+    RETURNING notification_id
+  `;
+  return aged.length + overflow.length;
+});
+
 export const layer = Layer.effect(
   UserNotificationService,
   Effect.gen(function* () {
@@ -161,7 +241,9 @@ export const layer = Layer.effect(
      * lifetime replays the gap. Dedupe makes re-emitting the survivors a no-op.
      */
     const blockedSince = yield* Ref.make(new Map<OrchestrationV2DomainEvent["type"], number>());
-    const started = yield* Deferred.make<void>();
+    const started = yield* Deferred.make<void, WatchNotificationError>();
+    /** Failed once the worker is declared dead so awaitProcessed can stop waiting. */
+    const dead = yield* Deferred.make<void, WatchNotificationError>();
 
     /**
      * Records one notification; publishes it only when the insert won its
@@ -205,6 +287,20 @@ export const layer = Layer.effect(
         }),
       );
 
+    /** Cheap dedupe probe: replayed events skip the projection read entirely. */
+    const notificationRecorded = (notificationId: WatchNotificationId) =>
+      sql`
+        SELECT notification_id FROM watch_notifications
+        WHERE notification_id = ${notificationId}
+      `.pipe(Effect.map((rows) => rows.length > 0));
+
+    const missingThread = (stored: OrchestrationV2StoredEvent) =>
+      Effect.logInfo("Skipped watch notification for a missing thread", {
+        eventType: stored.event.type,
+        sequence: stored.sequence,
+        threadId: stored.event.threadId,
+      }).pipe(Effect.as([] as WatchNotificationEvent[]));
+
     /**
      * Maps one stored domain event to the notifications it raises. Only
      * transitions into an interesting state map, and each maps under a
@@ -217,21 +313,23 @@ export const layer = Layer.effect(
       if (event.type === "run.updated") {
         const run = event.payload;
         if (run.status !== "completed" && run.status !== "failed") return [];
+        const notificationId = deterministicNotificationId(`run.${run.status}:${run.id}`);
+        if (yield* notificationRecorded(notificationId)) return [];
         const thread = yield* threadFor(event.threadId);
-        if (thread === null) return [];
+        if (thread === null) return yield* missingThread(stored);
         const createdAt = iso(yield* localNow);
         return [
           run.status === "completed"
             ? ({
                 type: "thread.completed",
-                notificationId: deterministicNotificationId(`run.completed:${run.id}`),
+                notificationId,
                 createdAt,
                 threadId: event.threadId,
                 projectId: thread.projectId,
               } satisfies WatchNotificationEvent)
             : ({
                 type: "thread.failed",
-                notificationId: deterministicNotificationId(`run.failed:${run.id}`),
+                notificationId,
                 createdAt,
                 threadId: event.threadId,
                 projectId: thread.projectId,
@@ -239,14 +337,16 @@ export const layer = Layer.effect(
         ];
       }
       if (event.type === "runtime-request.updated" && event.payload.status === "pending") {
+        const notificationId = deterministicNotificationId(
+          `runtime-request.pending:${event.payload.id}`,
+        );
+        if (yield* notificationRecorded(notificationId)) return [];
         const thread = yield* threadFor(event.threadId);
-        if (thread === null) return [];
+        if (thread === null) return yield* missingThread(stored);
         return [
           {
             type: "thread.awaitingInput",
-            notificationId: deterministicNotificationId(
-              `runtime-request.pending:${event.payload.id}`,
-            ),
+            notificationId,
             createdAt: iso(yield* localNow),
             threadId: event.threadId,
             projectId: thread.projectId,
@@ -278,8 +378,96 @@ export const layer = Layer.effect(
         return next;
       });
 
+    /** `stored` is handled — it must not clamp the cursor anymore. */
+    const clearBlocked = (stored: OrchestrationV2StoredEvent) =>
+      Ref.update(blockedSince, (seen) => {
+        if (seen.get(stored.event.type) !== stored.sequence) return seen;
+        const next = new Map(seen);
+        next.delete(stored.event.type);
+        return next;
+      });
+
+    /**
+     * The cursor only moves up to the last fully handled sequence: it can
+     * never cross an event still marked blocked, so a restart replays it.
+     */
+    const advanceCursorFor = (stored: OrchestrationV2StoredEvent) =>
+      Effect.gen(function* () {
+        const blockedAt = (yield* Ref.get(blockedSince)).get(stored.event.type);
+        yield* advanceCursor(
+          stored.event.type,
+          blockedAt === undefined ? stored.sequence : Math.min(stored.sequence, blockedAt - 1),
+        );
+      });
+
+    /** Lifetime attempts already spent on this event, from its marker row. */
+    const deadLetterAttempts = (stored: OrchestrationV2StoredEvent) =>
+      sql<{ readonly attempts: number | null }>`
+        SELECT json_extract(notification_json, '$.attempts') AS attempts
+        FROM watch_notifications
+        WHERE notification_id = ${deadLetterId(stored.event.type, stored.sequence)}
+      `.pipe(Effect.map((rows) => rows[0]?.attempts ?? 0));
+
+    /**
+     * One more lifetime attempt on a failing event. Below the cap the event
+     * stays blocked — transient failures replay on restart. At the cap the
+     * event is declared poisoned: the wedge lifts and the cursor may pass.
+     * Total by construction — a failing marker write just keeps the event
+     * blocked for this lifetime.
+     */
+    const noteEventFailure = (stored: OrchestrationV2StoredEvent, cause: Cause.Cause<unknown>) =>
+      Effect.gen(function* () {
+        const recordedAt = iso(yield* localNow);
+        const attempts = yield* sql<{ readonly attempts: number }>`
+          INSERT INTO watch_notifications (notification_id, type, notification_json, recorded_at, source_sequence)
+          VALUES (
+            ${deadLetterId(stored.event.type, stored.sequence)},
+            ${DEAD_LETTER_TYPE},
+            ${'{"attempts":1}'},
+            ${recordedAt},
+            ${stored.sequence}
+          )
+          ON CONFLICT(notification_id) DO UPDATE SET
+            notification_json = json_set(
+              watch_notifications.notification_json,
+              '$.attempts',
+              COALESCE(json_extract(watch_notifications.notification_json, '$.attempts'), 0) + 1
+            ),
+            recorded_at = excluded.recorded_at
+          RETURNING json_extract(notification_json, '$.attempts') AS attempts
+        `.pipe(
+          Effect.map((rows) => rows[0]?.attempts ?? 1),
+          Effect.orElseSucceed(() => 1),
+        );
+        yield* Effect.logWarning("Failed to process event for watch notifications", {
+          eventType: stored.event.type,
+          sequence: stored.sequence,
+          attempts,
+          cause,
+        });
+        if (attempts < DEAD_LETTER_MAX_ATTEMPTS) {
+          yield* markBlocked(stored);
+          return;
+        }
+        yield* clearBlocked(stored);
+        yield* advanceCursorFor(stored).pipe(
+          Effect.catchCause((cursorCause) =>
+            Effect.logWarning("Could not advance the cursor past a dead-lettered event", {
+              sequence: stored.sequence,
+              cause: cursorCause,
+            }),
+          ),
+        );
+      });
+
     const processStoredEvent = (stored: OrchestrationV2StoredEvent) =>
       Effect.gen(function* () {
+        // Dead-lettered across a previous lifetime: let the cursor pass
+        // without paying the mapping read again.
+        if ((yield* deadLetterAttempts(stored)) >= DEAD_LETTER_MAX_ATTEMPTS) {
+          yield* advanceCursorFor(stored);
+          return;
+        }
         // Mapping is the read that can fail transiently (ProjectionStoreV2 is
         // a live store), so it gets one delayed retry. If it still fails the
         // event is skipped for this session and marked blocked — the durable
@@ -290,34 +478,12 @@ export const layer = Layer.effect(
         );
         for (const notification of notifications) {
           yield* recordNotification(notification, stored.sequence).pipe(
-            Effect.catchCause((cause) =>
-              Effect.andThen(
-                markBlocked(stored),
-                Effect.logWarning("Failed to record watch notification", {
-                  sequence: stored.sequence,
-                  cause,
-                }),
-              ),
-            ),
+            Effect.catchCause((cause) => noteEventFailure(stored, cause)),
           );
         }
-        // The cursor only moves up to the last fully handled sequence: it can
-        // never cross a blocked event, so a restart replays it.
-        const blockedAt = (yield* Ref.get(blockedSince)).get(stored.event.type);
-        yield* advanceCursor(
-          stored.event.type,
-          blockedAt === undefined ? stored.sequence : Math.min(stored.sequence, blockedAt - 1),
-        );
+        yield* advanceCursorFor(stored);
       }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.andThen(
-            markBlocked(stored),
-            Effect.logWarning("Failed to process event for watch notifications", {
-              sequence: stored.sequence,
-              cause,
-            }),
-          ),
-        ),
+        Effect.catchCause((cause) => noteEventFailure(stored, cause)),
         Effect.ensuring(
           Effect.andThen(
             Ref.update(lastProcessed, (seen) => {
@@ -336,26 +502,43 @@ export const layer = Layer.effect(
         ),
       );
 
-    const worker = Effect.gen(function* () {
+    /**
+     * One worker lifetime: seed the resume cursors, declare the tap live,
+     * then drain the merged per-type subscriptions serially. A failure at any
+     * point — seed or stream — is caught by the supervision wrapper below and
+     * the whole lifetime re-runs; the seed is idempotent, so re-running it on
+     * restart is safe.
+     */
+    const workerRun = Effect.gen(function* () {
       // A type with no cursor yet has never been tapped: start it at the
       // current head so a migration onto an existing database does not
       // re-emit history as fresh notifications. Resume only replays what
-      // landed after the recorded cursor.
-      const head = yield* eventSink.latestSequence();
-      const startedAt = iso(yield* localNow);
-      for (const eventType of CONSUMED_EVENT_TYPES) {
-        yield* sql`
-          INSERT INTO watch_notification_cursors (event_type, last_sequence, updated_at)
-          VALUES (${eventType}, ${head}, ${startedAt})
-          ON CONFLICT(event_type) DO NOTHING
-        `;
-      }
-      const cursorRows = yield* sql<WatchNotificationCursorRow>`
-        SELECT event_type, last_sequence FROM watch_notification_cursors
-      `;
-      const cursors = new Map(cursorRows.map((row) => [row.event_type, row.last_sequence]));
+      // landed after the recorded cursor. The head read and every per-type
+      // seed commit in one transaction: "first boot" is a single consistent
+      // boundary for all types — a crash mid-seed cannot leave one type's
+      // cursor at an older head while another seeds past the gap.
+      const { head, cursors } = yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const head = yield* eventSink.latestSequence();
+          const startedAt = iso(yield* localNow);
+          for (const eventType of CONSUMED_EVENT_TYPES) {
+            yield* sql`
+              INSERT INTO watch_notification_cursors (event_type, last_sequence, updated_at)
+              VALUES (${eventType}, ${head}, ${startedAt})
+              ON CONFLICT(event_type) DO NOTHING
+            `;
+          }
+          const cursorRows = yield* sql<WatchNotificationCursorRow>`
+            SELECT event_type, last_sequence FROM watch_notification_cursors
+          `;
+          return {
+            head,
+            cursors: new Map(cursorRows.map((row) => [row.event_type, row.last_sequence])),
+          };
+        }),
+      );
       // Cursors are durable from here on: every commit after this point is
-      // replayed on the next boot.
+      // replayed on the next boot — or the next worker lifetime.
       yield* Deferred.succeed(started, undefined);
       // One unbounded subscription per consumed type (bounded subscribers may
       // drop under load — this worker must not), merged and processed
@@ -369,8 +552,55 @@ export const layer = Layer.effect(
         ),
         { concurrency: CONSUMED_EVENT_TYPES.length },
       ).pipe(Stream.mapEffect(processStoredEvent, { concurrency: 1 }), Stream.runDrain);
-    }).pipe(
-      Effect.catchCause((cause) => Effect.logError("Watch notification worker stopped", { cause })),
+    });
+
+    /**
+     * Supervised worker: a crash restarts the whole lifetime under capped
+     * backoff — a dead fiber must not silently end the tap (the
+     * ConnectorPoller defect-guard precedent). `sandbox` puts defects and
+     * interruption in the error channel so `retry` sees them; interruption is
+     * filtered back out — that is scope shutdown, not a crash. When retries
+     * run out the deferreds fail so `awaitStarted`/`awaitProcessed` callers
+     * observe the death instead of hanging.
+     */
+    const worker = workerRun.pipe(
+      Effect.sandbox,
+      Effect.tapError((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.void
+          : Effect.logWarning("Watch notification worker crashed; restarting", { cause }),
+      ),
+      Effect.retry({
+        while: (cause) => !Cause.hasInterrupts(cause),
+        schedule: WORKER_RESTART_SCHEDULE,
+        times: WORKER_MAX_RESTARTS,
+      }),
+      Effect.catch((cause) => Effect.failCause(cause)),
+      Effect.catchCause((cause) =>
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const error = notificationError(
+              "Watch notification worker stopped.",
+              Cause.squash(cause),
+            );
+            yield* Deferred.fail(started, error);
+            yield* Deferred.fail(dead, error);
+            if (!Cause.hasInterruptsOnly(cause)) {
+              yield* Effect.logError("Watch notification worker stopped", { cause });
+            }
+          }),
+        ),
+      ),
+      // The drain never returns in practice — but if it ever did, the tap is
+      // over and `dead` must still release awaiters.
+      Effect.ensuring(
+        Effect.uninterruptible(
+          Deferred.fail(
+            dead,
+            notificationError("Watch notification worker ended without an error."),
+          ),
+        ),
+      ),
     );
 
     const loadPrefs = sql<{ readonly prefs_json: string }>`
@@ -383,6 +613,13 @@ export const layer = Layer.effect(
     );
 
     yield* worker.pipe(Effect.forkScoped);
+    // History retention: prune once at start, then hourly (pruneSettled
+    // precedent). A failed pass logs and the interval carries on.
+    yield* pruneHistory.pipe(
+      Effect.catch((cause) => Effect.logWarning("Failed to prune watch notifications", { cause })),
+      Effect.repeat(Schedule.spaced(RETENTION_INTERVAL)),
+      Effect.forkScoped,
+    );
 
     return UserNotificationService.of({
       subscribe: () =>
@@ -404,6 +641,7 @@ export const layer = Layer.effect(
           const rows = yield* sql<WatchNotificationRow>`
             SELECT notification_json, recorded_at
             FROM watch_notifications
+            WHERE type <> ${DEAD_LETTER_TYPE}
             ORDER BY recorded_at DESC, notification_id DESC
             LIMIT ${limit}
           `.pipe(
@@ -449,16 +687,21 @@ export const layer = Layer.effect(
         recordNotification(notification, null).pipe(Effect.map((recorded) => ({ recorded }))),
       awaitStarted: () => Deferred.await(started),
       awaitProcessed: (sequence, eventType) =>
-        Effect.scoped(
-          Effect.gen(function* () {
-            const subscription = yield* PubSub.subscribe(processedPubSub);
-            if (((yield* Ref.get(lastProcessed)).get(eventType) ?? 0) >= sequence) return;
-            yield* Stream.fromSubscription(subscription).pipe(
-              Stream.filter((seen) => seen.eventType === eventType && seen.sequence >= sequence),
-              Stream.take(1),
-              Stream.runDrain,
-            );
-          }),
+        // A worker declared dead stops publishing — race `dead` so the wait
+        // observes the death instead of hanging.
+        Effect.raceFirst(
+          Deferred.await(dead),
+          Effect.scoped(
+            Effect.gen(function* () {
+              const subscription = yield* PubSub.subscribe(processedPubSub);
+              if (((yield* Ref.get(lastProcessed)).get(eventType) ?? 0) >= sequence) return;
+              yield* Stream.fromSubscription(subscription).pipe(
+                Stream.filter((seen) => seen.eventType === eventType && seen.sequence >= sequence),
+                Stream.take(1),
+                Stream.runDrain,
+              );
+            }),
+          ),
         ),
     });
   }),

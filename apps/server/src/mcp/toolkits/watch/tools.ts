@@ -51,6 +51,10 @@ const WatchNotificationsHistoryTool = Tool.make("t3_watch_notifications_history"
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 
+// An agent muting or snoozing suppresses delivery only: notification
+// history is append-only and records every emission regardless, so
+// agent-driven suppression stays tamper-evident. That residual is accepted
+// rather than prevented.
 const WatchNotificationsSetPrefsTool = Tool.make("t3_watch_notifications_prefs_update", {
   ...shared,
   description:

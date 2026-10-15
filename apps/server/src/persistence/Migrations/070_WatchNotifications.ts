@@ -4,8 +4,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  // Append-only notification history. `notification_id` is the unique key the
-  // server emits under, so a replayed domain event can never double-record.
+  // Notification history with a bounded retention: the service prunes rows
+  // past a max age and a max row count. `notification_id` is the unique key
+  // the server emits under, so a replayed domain event can never
+  // double-record; it also keys per-sequence dead-letter marker rows
+  // (`type = 'dead-letter'`, attempts in `notification_json`) that bound how
+  // often a poisoned event can fail before its cursor is allowed to pass.
   yield* sql`
     CREATE TABLE IF NOT EXISTS watch_notifications (
       notification_id TEXT PRIMARY KEY,

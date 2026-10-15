@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the test recomputes the
+// expected scriptHash over the served bundle bytes.
+import * as NodeCrypto from "node:crypto";
+
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -161,6 +165,37 @@ it.effect("rejects a source that imports anything", () =>
   ).pipe(Effect.provide(layerService(WidgetTranspileService.layerTranspiler))),
 );
 
+it.effect("rejects a non-literal dynamic import instead of shipping it", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      // `import(globalThis.X)` never reaches the resolver: esbuild lowers it
+      // to a throwing `__require` stub, and the residual-output check then
+      // rejects the artifact — the record is failed, not ready-but-broken.
+      const { source } = yield* service.publish(
+        input("const m = import(globalThis.X);\nT3.render(() => m);"),
+      );
+      assert.equal(source.status, "failed");
+      assert.isNull(source.scriptHash);
+      assert.equal(source.failure?.cause, "transpileFailed");
+      assert.include(source.failure?.detail ?? "", "import");
+    }),
+  ).pipe(Effect.provide(layerService(WidgetTranspileService.layerTranspiler))),
+);
+
+it.effect("fails the build when esbuild reports warnings", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      // `import.meta` under iife output is a silent empty-object
+      // substitution reported only as a warning — it must not ship.
+      const { source } = yield* service.publish(input("const url = import.meta.url;"));
+      assert.equal(source.status, "failed");
+      assert.include(source.failure?.detail ?? "", "import.meta");
+    }),
+  ).pipe(Effect.provide(layerService(WidgetTranspileService.layerTranspiler))),
+);
+
 it.effect("identical source and manifest reuse the artifact without retranspiling", () => {
   let calls = 0;
   return Effect.scoped(
@@ -233,7 +268,9 @@ it.effect("a transpile that exceeds the timeout records a failed record", () =>
       const service = yield* WidgetTranspileService.WidgetTranspileService;
       // The test clock never advances on its own, so the publish runs on a
       // fiber while the timeout horizon is pushed past it.
-      const publishing = yield* service.publish(input("const a = 1;")).pipe(Effect.forkChild);
+      const publishing = yield* service
+        .publish(input("const a = 1;"))
+        .pipe(Effect.forkChild({ startImmediately: true }));
       yield* TestClock.adjust(100);
       const { source } = yield* Fiber.join(publishing);
       assert.equal(source.status, "failed");
@@ -494,5 +531,283 @@ it.effect("remove deletes the artifact files and emits a tombstone", () =>
     }),
   ).pipe(
     Effect.provide(layerServiceWithDeps(layerTranspiler(() => Effect.succeed("T3.render();")))),
+  ),
+);
+
+/**
+ * A minimal `EsbuildModule` stand-in for `makeBuild`: only `context` and
+ * `formatMessagesSync` are exercised by the transpiler.
+ */
+const fakeEsbuildModule = (options: {
+  readonly rebuild: () => Promise<unknown>;
+  readonly cancel?: () => Promise<void>;
+  readonly dispose?: () => Promise<void>;
+}) =>
+  ({
+    context: () =>
+      Promise.resolve({
+        rebuild: options.rebuild,
+        cancel: options.cancel ?? (() => Promise.resolve()),
+        dispose: options.dispose ?? (() => Promise.resolve()),
+      }),
+    formatMessagesSync: (messages: ReadonlyArray<{ text?: string }>) =>
+      messages.map((message) => message.text ?? ""),
+  }) as unknown as WidgetTranspileService.EsbuildModule;
+
+it.effect("a timed-out build cancels and disposes the esbuild context", () => {
+  let cancels = 0;
+  let disposes = 0;
+  const fake = fakeEsbuildModule({
+    rebuild: () => new Promise<never>(() => {}),
+    cancel: () => {
+      cancels += 1;
+      return Promise.resolve();
+    },
+    dispose: () => {
+      disposes += 1;
+      return Promise.resolve();
+    },
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      // The test clock never advances on its own: the publish runs on a
+      // fiber while the timeout horizon is pushed past it.
+      const publishing = yield* service
+        .publish(input("const a = 1;"))
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(100);
+      const { source } = yield* Fiber.join(publishing);
+      assert.equal(source.status, "failed");
+      assert.include(source.failure?.detail ?? "", "exceeded the 50ms limit");
+      // Interruption routes to ctx.cancel() — via the rebuild abort signal
+      // and the scope finalizer — so the work stops, not just the wait.
+      assert.isTrue(cancels >= 1);
+      assert.equal(disposes, 1);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(layerTranspiler(WidgetTranspileService.makeBuild(fake)), {
+        transpileTimeoutMs: 50,
+      }),
+    ),
+  );
+});
+
+it.effect("a transient esbuild error records failed and does not latch", () => {
+  let builds = 0;
+  const fake = fakeEsbuildModule({
+    rebuild: () => {
+      builds += 1;
+      return builds === 1
+        ? Promise.reject(new Error("The service was stopped"))
+        : Promise.resolve({ outputFiles: [{ text: "T3.render();" }], warnings: [], errors: [] });
+    },
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const first = yield* service.publish(input("const a = 1;"));
+      assert.equal(first.source.status, "failed");
+      assert.equal(first.source.failure?.cause, "transpileFailed");
+      // A wedged service is not a missing binary — the detail must say so
+      // and the next publish must retry the transpiler instead of
+      // fast-failing from the latch.
+      assert.include(first.source.failure?.detail ?? "", "unexpectedly");
+      const second = yield* service.publish(input("const a = 2;"));
+      assert.equal(second.source.status, "ready");
+      assert.equal(builds, 2);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        Layer.effect(
+          WidgetTranspileService.WidgetSourceTranspiler,
+          Effect.map(
+            WidgetTranspileService.makeTranspile(WidgetTranspileService.makeBuild(fake)),
+            (transpile) => ({
+              transpile,
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+});
+
+it.effect("a missing platform binary still latches unavailable", () => {
+  let contexts = 0;
+  const fake = {
+    context: () => {
+      contexts += 1;
+      return Promise.reject(
+        new Error("spawn /app/node_modules/@esbuild/linux-x64/bin/esbuild ENOENT"),
+      );
+    },
+    formatMessagesSync: (messages: ReadonlyArray<{ text?: string }>) =>
+      messages.map((message) => message.text ?? ""),
+  } as unknown as WidgetTranspileService.EsbuildModule;
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const first = yield* service.publish(input("const a = 1;"));
+      assert.equal(first.source.status, "failed");
+      assert.include(first.source.failure?.detail ?? "", "platform binary");
+      const second = yield* service.publish(input("const a = 2;"));
+      assert.equal(second.source.status, "failed");
+      // The latch fast-fails the second publish without re-probing esbuild.
+      assert.equal(contexts, 1);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        Layer.effect(
+          WidgetTranspileService.WidgetSourceTranspiler,
+          Effect.map(
+            WidgetTranspileService.makeTranspile(WidgetTranspileService.makeBuild(fake)),
+            (transpile) => ({
+              transpile,
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+});
+
+it.effect("a ready cache hit does not spend the publish budget", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      yield* service.publish(input("const a = 1;"));
+      // Republishing the cached {source, manifest} returns the artifact
+      // without consuming the one-per-window admission slot.
+      const hit = yield* service.publish(input("const a = 1;"));
+      assert.equal(hit.source.status, "ready");
+      yield* expectSourceError("publishRateLimited", service.publish(input("const a = 2;")));
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        layerTranspiler((source) => Effect.succeed(`/* ${source} */`)),
+        { maxPublishesPerWindow: 1 },
+      ),
+    ),
+  ),
+);
+
+it.effect("evicts the oldest artifact pairs past the count cap", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+
+      const dir = serverConfig.widgetArtifactsDir;
+      const stamp = (artifactHash: string, ms: number) =>
+        Effect.all(
+          [
+            fs.utimes(path.join(dir, `${artifactHash}.js`), ms, ms),
+            fs.utimes(path.join(dir, `${artifactHash}.json`), ms, ms),
+          ],
+          { discard: true },
+        );
+
+      const first = yield* service.publish(input("const a = 1;"));
+      yield* stamp(first.source.artifactHash, 1_000);
+      const second = yield* service.publish(input("const b = 2;"));
+      yield* stamp(second.source.artifactHash, 2_000);
+      const third = yield* service.publish(input("const c = 3;"));
+      yield* stamp(third.source.artifactHash, 3_000);
+      // Crossing the two-pair cap evicts the oldest pairs — both of them.
+      const fourth = yield* service.publish(input("const d = 4;"));
+
+      for (const hash of [first, second].map(({ source }) => source.artifactHash)) {
+        assert.isFalse(yield* fs.exists(path.join(dir, `${hash}.js`)));
+        assert.isFalse(yield* fs.exists(path.join(dir, `${hash}.json`)));
+      }
+      for (const hash of [third, fourth].map(({ source }) => source.artifactHash)) {
+        assert.isTrue(yield* fs.exists(path.join(dir, `${hash}.js`)));
+        assert.isTrue(yield* fs.exists(path.join(dir, `${hash}.json`)));
+      }
+
+      // Eviction drops the cached record too: `get` reports the same
+      // missing-source state an explicit `remove` would.
+      const { source, bundle } = yield* service.get({ sourceId: first.source.sourceId });
+      assert.isNull(source);
+      assert.isNull(bundle);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerServiceWithDeps(
+        layerTranspiler(() => Effect.succeed("T3.render();")),
+        {
+          maxArtifacts: 2,
+        },
+      ),
+    ),
+  ),
+);
+
+it.effect("evicts the oldest artifact pair past the byte cap", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+
+      const first = yield* service.publish(input("const a = 1;"));
+      // A one-byte budget is below a single pair, but the pair just written
+      // is never evicted by the publish that created it — the next publish
+      // is what pushes the oldest out.
+      const second = yield* service.publish(input("const b = 2;"));
+
+      const dir = serverConfig.widgetArtifactsDir;
+      assert.isFalse(yield* fs.exists(path.join(dir, `${first.source.artifactHash}.js`)));
+      assert.isFalse(yield* fs.exists(path.join(dir, `${first.source.artifactHash}.json`)));
+      const { source, bundle } = yield* service.get({ sourceId: second.source.sourceId });
+      assert.equal(source?.status, "ready");
+      assert.isNotNull(bundle);
+    }),
+  ).pipe(
+    Effect.provide(
+      layerServiceWithDeps(
+        layerTranspiler(() => Effect.succeed("T3.render();")),
+        {
+          maxArtifactBytes: 1,
+        },
+      ),
+    ),
+  ),
+);
+
+it.effect("escapes </script> in the artifact and hashes the escaped bytes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* WidgetTranspileService.WidgetTranspileService;
+      const { source } = yield* service.publish(input("const html = '</script>';"));
+      assert.equal(source.status, "ready");
+
+      const { bundle } = yield* service.get({ sourceId: source.sourceId });
+      if (bundle === null) assert.fail("expected the emitted bundle");
+      assert.notInclude(bundle, "</script");
+      assert.include(bundle, "<\\/script");
+      // The CSP hash covers the escaped bytes exactly as served.
+      assert.equal(
+        source.scriptHash,
+        NodeCrypto.createHash("sha256").update(bundle, "utf8").digest("base64"),
+      );
+      // `\/` is the same character as `/` to the parser — the artifact
+      // still parses as a self-contained function body.
+      assert.doesNotThrow(() => new Function(bundle));
+    }),
+  ).pipe(
+    Effect.provide(
+      layerService(
+        layerTranspiler(() => Effect.succeed('var html = "</script>";\nT3.render(() => html);')),
+      ),
+    ),
   ),
 );

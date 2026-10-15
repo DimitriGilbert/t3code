@@ -219,11 +219,39 @@ function spreadOrderKeys(count: number): ReadonlyArray<string> {
 /** Key sorting strictly after `last` — an extension always outranks its prefix. */
 const orderKeyAfter = (last: string) => `${last}n`;
 
+/**
+ * `orderKeyBetween` that steps past keys held by rows outside the rewrite
+ * set — archived pages keep their keys, so a minted key landing on one
+ * collides in the `order_key` ordering. Each retry mints closer to `after`,
+ * so the reserved set can only be hit finitely many times. Mirrors the
+ * client-side `planPinnedReorder` reserved-keys loop (threadSort.ts).
+ */
+const orderKeyBetweenUnreserved = (
+  before: string | null,
+  after: string | null,
+  reserved: ReadonlySet<string>,
+): string | null => {
+  let key = orderKeyBetween(before, after);
+  while (key !== null && reserved.has(key)) key = orderKeyBetween(key, after);
+  return key;
+};
+
+/** `spreadOrderKeys` that skips reserved keys; the extra slots absorb the removals. */
+const spreadOrderKeysUnreserved = (
+  count: number,
+  reserved: ReadonlySet<string>,
+): ReadonlyArray<string> =>
+  spreadOrderKeys(count + reserved.size)
+    .filter((key) => !reserved.has(key))
+    .slice(0, count);
+
 // ── Layout geometry ──────────────────────────────────────────────────────
 
 const GRID_COLUMNS = 12;
 
 const placementInBounds = (placement: WatchWidgetPlacement): boolean =>
+  placement.x >= 0 &&
+  placement.y >= 0 &&
   placement.w >= 1 &&
   placement.h >= 1 &&
   placement.x + placement.w <= GRID_COLUMNS &&
@@ -531,6 +559,54 @@ export const layer = Layer.effect(
       return rows[0]?.order_key ?? null;
     });
 
+    /**
+     * Keys archived rows still hold. Reorder/duplicate mint keys against the
+     * live set only, so without reserving these a new key can collide with a
+     * parked row — and a later restore lands two pages on one key.
+     */
+    const archivedOrderKeys = (afterKey?: string) =>
+      sql<{ order_key: string }>`
+        SELECT order_key FROM watch_pages
+        WHERE ${sql.and([
+          sql`archived_at IS NOT NULL`,
+          ...(afterKey === undefined ? [] : [sql`order_key > ${afterKey}`]),
+        ])}
+      `.pipe(Effect.map((rows) => new Set(rows.map((row) => row.order_key))));
+
+    /**
+     * A `pack:` marker renders as "installed by connector pack X" chrome, so
+     * it is only written when the pack actually registered this widget kind's
+     * source — a caller cannot mint the badge for an arbitrary `agent:` kind.
+     * The join through `watch_connector_packs` follows
+     * `ConnectorService.selectWidgetSourceRows`: an archived pack's sources
+     * are not live, so they cannot be freshly mounted under `pack:` either.
+     */
+    const assertPackProvenance = (
+      pageId: WatchPageId,
+      kind: string,
+      provenance: `pack:${string}`,
+    ) =>
+      Effect.gen(function* () {
+        const packId = provenance.slice("pack:".length);
+        const sourceId = kind.slice("agent:".length);
+        const rows = yield* sql<{ source_id: string }>`
+          SELECT s.source_id
+          FROM watch_pack_widget_sources s
+          JOIN watch_connector_packs p
+            ON p.pack_id = s.pack_id AND p.schema_version = s.schema_version
+          WHERE s.pack_id = ${packId}
+            AND s.source_id = ${sourceId}
+            AND p.archived_at IS NULL
+          LIMIT 1
+        `;
+        if (rows.length === 0) {
+          return yield* watchError(
+            `Pack provenance "${provenance}" does not match a live widget source registered for "${kind}".`,
+            { pageId },
+          );
+        }
+      });
+
     const list: WatchPageService["Service"]["list"] = (input) =>
       Effect.gen(function* () {
         const includeArchived = input.includeArchived === true;
@@ -572,22 +648,23 @@ export const layer = Layer.effect(
         const now = yield* localNow;
         const nowIso = iso(now);
         const id = yield* newPageId;
-        const lastKey = yield* lastOrderKey;
-        const orderKey = lastKey === null ? "n" : orderKeyAfter(lastKey);
-        yield* sql`
-          INSERT INTO watch_pages ${sql.insert({
-            page_id: id,
-            name: input.name,
-            scope,
-            project_id: projectId,
-            order_key: orderKey,
-            revision: 1,
-            mobile_revision: 1,
-            archived_at: null,
-            created_at: nowIso,
-            updated_at: nowIso,
-          })}
-        `;
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            // The max-key read and the insert share one transaction:
+            // `order_key` has no UNIQUE constraint, so two concurrent
+            // creates reading the same `lastKey` would mint the same key.
+            const lastKey = yield* lastOrderKey;
+            const orderKey = lastKey === null ? "n" : orderKeyAfter(lastKey);
+            yield* insertPageRow({
+              id,
+              name: input.name,
+              scope,
+              projectId,
+              orderKey,
+              nowIso,
+            });
+          }),
+        );
         const page = yield* findPage(id);
         if (page === null) {
           return yield* watchError("Watch page not found after create.", { pageId: id });
@@ -646,6 +723,9 @@ export const layer = Layer.effect(
         yield* sql.withTransaction(
           Effect.gen(function* () {
             const pageRows = yield* selectPageRows({ includeArchived: false });
+            // Archived rows keep their keys: a minted or respread key must
+            // step past them or a later restore lands two pages on one key.
+            const reservedKeys = yield* archivedOrderKeys();
             const pages = yield* Effect.forEach(pageRows, decodePageRow, { concurrency: 1 });
             const movedIndex = pages.findIndex((page) => page.id === input.pageId);
             if (movedIndex < 0) {
@@ -664,7 +744,11 @@ export const layer = Layer.effect(
             }
             const previous = insertIndex === 0 ? null : remaining[insertIndex - 1]!;
             const next = insertIndex >= remaining.length ? null : remaining[insertIndex]!;
-            const orderKey = orderKeyBetween(previous?.orderKey ?? null, next?.orderKey ?? null);
+            const orderKey = orderKeyBetweenUnreserved(
+              previous?.orderKey ?? null,
+              next?.orderKey ?? null,
+              reservedKeys,
+            );
             if (orderKey !== null) {
               yield* sql`
                 UPDATE watch_pages
@@ -678,7 +762,7 @@ export const layer = Layer.effect(
                 pages[movedIndex]!,
                 ...remaining.slice(insertIndex),
               ];
-              const keys = spreadOrderKeys(reordered.length);
+              const keys = spreadOrderKeysUnreserved(reordered.length, reservedKeys);
               yield* Effect.forEach(
                 reordered,
                 (page, index) =>
@@ -779,9 +863,18 @@ export const layer = Layer.effect(
               ORDER BY order_key ASC, page_id ASC
               LIMIT 1
             `;
-            const orderKey =
-              orderKeyBetween(source.orderKey, nextRows[0]?.order_key ?? null) ??
-              orderKeyAfter(source.orderKey);
+            // Archived rows between source and the next live page hold keys
+            // the copy must not mint — reserved keys step past them.
+            const reservedKeys = yield* archivedOrderKeys(source.orderKey);
+            let orderKey = orderKeyBetweenUnreserved(
+              source.orderKey,
+              nextRows[0]?.order_key ?? null,
+              reservedKeys,
+            );
+            if (orderKey === null) {
+              orderKey = orderKeyAfter(source.orderKey);
+              while (reservedKeys.has(orderKey)) orderKey = orderKeyAfter(orderKey);
+            }
             yield* insertPageRow({
               id: newId,
               name: `${source.name} copy`,
@@ -851,10 +944,14 @@ export const layer = Layer.effect(
     const restore: WatchPageService["Service"]["restore"] = (input) =>
       Effect.gen(function* () {
         const nowIso = iso(yield* localNow);
+        // Both revisions bump: a mobile projection writer holding the
+        // pre-archive `mobileRevision` must invalidate the same way a stale
+        // desktop `expectedRevision` does.
         const rows = yield* sql<{ page_id: string }>`
           UPDATE watch_pages
           SET archived_at = NULL,
               revision = revision + 1,
+              mobile_revision = mobile_revision + 1,
               updated_at = ${nowIso}
           WHERE page_id = ${input.pageId} AND archived_at IS NOT NULL
           RETURNING page_id
@@ -927,9 +1024,11 @@ export const layer = Layer.effect(
         const scope = projectId === null ? template.scope : "project";
         const nowIso = iso(yield* localNow);
         const newId = yield* newPageId;
-        const lastKey = yield* lastOrderKey;
         yield* sql.withTransaction(
           Effect.gen(function* () {
+            // Same read-in-transaction rule as `create`: `order_key` is not
+            // UNIQUE, so the max-key read must see the latest committed row.
+            const lastKey = yield* lastOrderKey;
             yield* insertPageRow({
               id: newId,
               name: template.name,
@@ -1006,6 +1105,9 @@ export const layer = Layer.effect(
         const nowIso = iso(yield* localNow);
         yield* sql.withTransaction(
           Effect.gen(function* () {
+            if (input.provenance !== undefined) {
+              yield* assertPackProvenance(input.pageId, input.kind, input.provenance);
+            }
             // Membership changes the mobile projection too, so both revisions move.
             yield* bumpPageRevision(input.pageId, input.expectedRevision, nowIso, {
               bumpMobile: true,
@@ -1089,18 +1191,38 @@ export const layer = Layer.effect(
     const configureWidget: WatchPageService["Service"]["configureWidget"] = (input) =>
       Effect.gen(function* () {
         const nowIso = iso(yield* localNow);
+        // Archived pages are immutable: the EXISTS gate keeps a queued or
+        // stale config write from landing on a parked page and resurrecting
+        // with it on restore — the same guard every sibling write gets from
+        // `bumpPageRevision`'s `archived_at IS NULL`.
         const rows = yield* sql<{ widget_id: string }>`
           UPDATE watch_widgets
           SET config_json = ${encodeWidgetConfigJson(input.config)},
               revision = revision + 1,
               updated_at = ${nowIso}
-          WHERE widget_id = ${input.widgetId} AND revision = ${input.expectedRevision}
+          WHERE widget_id = ${input.widgetId}
+            AND revision = ${input.expectedRevision}
+            AND EXISTS (
+              SELECT 1 FROM watch_pages
+              WHERE watch_pages.page_id = watch_widgets.page_id
+                AND watch_pages.archived_at IS NULL
+            )
           RETURNING widget_id
         `;
         if (rows.length === 0) {
           const widget = yield* findWidget(input.widgetId);
           if (widget === null) {
             return yield* watchError("Watch widget not found.", { widgetId: input.widgetId });
+          }
+          const page = yield* findPage(widget.pageId);
+          if (page === null) {
+            return yield* watchError("Watch page not found.", { pageId: widget.pageId });
+          }
+          if (page.archivedAt !== null) {
+            return yield* watchError("Watch page is archived.", {
+              pageId: widget.pageId,
+              widgetId: input.widgetId,
+            });
           }
           return yield* new WatchPageRevisionConflictError({
             pageId: widget.pageId,
@@ -1235,6 +1357,19 @@ export const layer = Layer.effect(
 
     const moveToPage: WatchPageService["Service"]["moveToPage"] = (input) =>
       Effect.gen(function* () {
+        // A move onto the same page is a no-op: the two revision bumps below
+        // would both hit the one row, so the second would miss on the
+        // just-bumped revision and report a phantom conflict.
+        if (input.sourcePageId === input.destinationPageId) {
+          const widget = yield* findWidget(input.widgetId);
+          if (widget === null || widget.pageId !== input.sourcePageId) {
+            return yield* watchError("Watch widget not found on source page.", {
+              pageId: input.sourcePageId,
+              widgetId: input.widgetId,
+            });
+          }
+          return { widget };
+        }
         const conflict = findLayoutConflict([{ id: input.widgetId, placement: input.placement }]);
         if (conflict !== null) {
           return yield* new WatchLayoutCollisionError({

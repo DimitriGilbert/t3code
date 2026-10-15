@@ -43,14 +43,28 @@ import * as ServerConfig from "../config.ts";
  * manifest shape, source-size, and rate-limit violations reject the call.
  *
  * Emitted code contract (the hardened host document owns the other half):
- * the bundle is a self-contained IIFE — imports of any kind are rejected at
- * build time, so a source can never smuggle filesystem contents into the
- * artifact or defer to modules that do not exist in the frame. JSX compiles
- * to the `T3` host global (`T3.h`, `T3.Fragment`), which the generated
- * document defines before the bundle runs.
+ * the bundle is a self-contained IIFE. Imports esbuild can resolve (static
+ * `import`/`export … from`, `require("x")`, literal `import("x")`) are
+ * rejected at build time by the no-imports plugin. Non-literal forms never
+ * reach resolution, so three more defenses apply: `supported` with
+ * `"dynamic-import": false` lowers `import(expr)` to a throwing `__require`
+ * stub, any esbuild warning fails the build (the `import.meta` substitution
+ * warns), and output still containing `import(`, `import.meta`, or
+ * `__require` is rejected — a source can never smuggle filesystem contents
+ * into the artifact or defer to modules that do not exist in the frame.
+ * `</script` sequences are escaped to `<\/script` so the bundle cannot
+ * close its own inline script tag; `scriptHash` covers the escaped bytes
+ * actually served. JSX compiles to the `T3` host global (`T3.h`,
+ * `T3.Fragment`), which the generated document defines before the bundle
+ * runs.
+ *
+ * The artifact directory is bounded by count and byte caps: publishing a
+ * new pair evicts the oldest pairs through the same removal path as
+ * `remove` — files, cached record, tombstone — so the store cannot grow
+ * without bound, and `get`/`publish` already tolerate missing files.
  */
 
-type EsbuildModule = typeof import("esbuild");
+export type EsbuildModule = typeof import("esbuild");
 
 // esbuild stays external to the CLI bundle: its JS wrapper locates a
 // per-platform `@esbuild/<os>-<arch>` binary on the real filesystem. Inside a
@@ -97,7 +111,9 @@ export class WidgetTranspileError extends Schema.TaggedError<WidgetTranspileErro
     /**
      * `unavailable` marks the esbuild module or its platform binary as
      * missing/broken — latched by `makeTranspile` so later publishes fast-fail
-     * instead of re-probing. `failed` is a per-source build diagnostic.
+     * instead of re-probing. `failed` is a per-source build diagnostic *or*
+     * any other non-diagnostic rejection (a wedged service, spawn pressure);
+     * only the verifiably-permanent missing-binary signature latches.
      */
     reason: Schema.Literals(["unavailable", "failed"]),
     detail: Schema.String,
@@ -114,8 +130,9 @@ export class WidgetSourceTranspiler extends Context.Service<
 /**
  * Latches the first `unavailable` transpile failure: a missing or mismatched
  * `@esbuild/*` platform binary cannot appear mid-process, so re-probing on
- * every publish would just respawn a broken service. Per-source build
- * diagnostics pass through every time.
+ * every publish would just respawn a broken service. Only that signature is
+ * classified `unavailable` — transient esbuild rejections and per-source
+ * build diagnostics are `failed` and pass through every time.
  */
 export const makeTranspile = (
   build: (source: string) => Effect.Effect<string, WidgetTranspileError>,
@@ -136,7 +153,12 @@ export const makeTranspile = (
       ),
   );
 
-/** Sources are one self-contained file: any import would resolve server-side files into the artifact. */
+/**
+ * Sources are one self-contained file: a resolvable import would pull
+ * server-side modules into the artifact. Non-literal imports never reach
+ * this hook — they are handled by `supported.dynamic-import` and the
+ * residual-output check in `makeBuild`.
+ */
 const noImportsPlugin: Esbuild.Plugin = {
   name: "t3-watch-widget-no-imports",
   setup(build) {
@@ -168,12 +190,46 @@ const widgetBuildOptions = (source: string): Esbuild.BuildOptions => ({
   jsxFragment: "T3.Fragment",
   write: false,
   charset: "utf8",
+  // Non-literal `import(expr)` never reaches the no-imports resolver, so the
+  // dynamic-import feature is dropped entirely: esbuild lowers it to a
+  // throwing `__require` stub, and the residual-output check in `makeBuild`
+  // then rejects the artifact — the emitted code can never hold a live
+  // module-specifier fetch.
+  supported: { "dynamic-import": false },
   // Diagnostics are captured into the source record, so esbuild must not
   // echo them to the server log.
   logLevel: "silent",
   legalComments: "none",
   plugins: [noImportsPlugin],
 });
+
+/**
+ * Import-shaped residue in the emitted artifact means one of the
+ * non-literal forms slipped past the resolver and its lowering: a verbatim
+ * `import(`, an `import.meta`, or esbuild's `__require` shim. Rather than
+ * ship a live module specifier in hash-authorized code, `makeBuild` fails
+ * the build.
+ */
+const FORBIDDEN_ARTIFACT_PATTERN = /\bimport\s*\(|import\.meta|\b__require\b/;
+
+/**
+ * `</script` in artifact bytes would close the host document's inline
+ * script tag early — at best a dead widget under the CSP hash, at worst a
+ * vector under a weaker embedding. `\/` is the same character as `/` to the
+ * JS parser, so escaping is a runtime no-op. It runs in `publish` before
+ * `scriptHash` is computed, so the hash covers the bytes actually served.
+ */
+const escapeScriptCloseTags = (text: string) => text.replace(/<\/script/gi, "<\\/script");
+
+/**
+ * The only non-diagnostic rejection worth latching `unavailable`: a missing
+ * or mismatched `@esbuild/*` platform binary cannot appear mid-process, and
+ * its signature is `ENOENT` on the spawned binary or the wrapper's
+ * `@esbuild/<pkg>` message. Everything else — `EMFILE`/`EAGAIN` spawn
+ * pressure, a wedged service, a panic on pathological input — is a
+ * per-source `failed` so the next publish retries cleanly.
+ */
+const MISSING_BINARY_PATTERN = /ENOENT|@esbuild\//;
 
 const isBuildDiagnostics = (
   cause: unknown,
@@ -182,18 +238,39 @@ const isBuildDiagnostics = (
 
 const causeMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
-const formatDiagnostics = (esbuild: EsbuildModule, cause: { readonly errors: unknown }) => {
+const formatDiagnostics = (
+  esbuild: EsbuildModule,
+  messages: ReadonlyArray<Esbuild.PartialMessage>,
+  kind: "error" | "warning",
+) => {
   try {
     const formatted = esbuild
-      .formatMessagesSync([...(cause.errors as Array<Esbuild.PartialMessage>)], {
-        kind: "error",
-      })
+      .formatMessagesSync([...messages], { kind })
       .join("\n")
       .trim();
     return formatted === "" ? "esbuild build failed." : formatted;
   } catch {
-    return causeMessage(cause);
+    return "esbuild build failed.";
   }
+};
+
+const toBuildError = (esbuild: EsbuildModule, cause: unknown): WidgetTranspileError => {
+  if (isBuildDiagnostics(cause)) {
+    return new WidgetTranspileError({
+      reason: "failed",
+      detail: formatDiagnostics(esbuild, cause.errors, "error"),
+    });
+  }
+  const detail = causeMessage(cause);
+  return MISSING_BINARY_PATTERN.test(detail)
+    ? new WidgetTranspileError({
+        reason: "unavailable",
+        detail: `The esbuild platform binary could not run: ${detail}.`,
+      })
+    : new WidgetTranspileError({
+        reason: "failed",
+        detail: `The widget build failed unexpectedly: ${detail}.`,
+      });
 };
 
 const loadEsbuild = Effect.try({
@@ -205,39 +282,77 @@ const loadEsbuild = Effect.try({
     }),
 });
 
+/**
+ * One source's build, run through an `esbuild.context` so interruption can
+ * cancel the work: `ctx.cancel()` fires both from the `tryPromise` abort
+ * signal and again in the release finalizer (cancel is idempotent), so a
+ * `transpileTimeoutMs` expiry or fiber interrupt actually stops the esbuild
+ * service's work instead of abandoning a promise it keeps running.
+ * Exported so tests can drive it with a fake esbuild module.
+ */
+export const makeBuild =
+  (esbuild: EsbuildModule) =>
+  (source: string): Effect.Effect<string, WidgetTranspileError> =>
+    Effect.gen(function* () {
+      const result = yield* Effect.scoped(
+        Effect.acquireRelease(
+          Effect.tryPromise({
+            try: () => esbuild.context(widgetBuildOptions(source)),
+            catch: (cause) => toBuildError(esbuild, cause),
+          }),
+          (ctx) =>
+            Effect.promise(async () => {
+              await ctx.cancel();
+              await ctx.dispose();
+            }),
+        ).pipe(
+          Effect.flatMap((ctx) =>
+            Effect.tryPromise({
+              try: (signal) => {
+                const abort = () => void ctx.cancel();
+                signal.addEventListener("abort", abort, { once: true });
+                return ctx.rebuild().finally(() => signal.removeEventListener("abort", abort));
+              },
+              catch: (cause) => toBuildError(esbuild, cause),
+            }),
+          ),
+        ),
+      );
+      const output = result.outputFiles?.[0]?.text;
+      if (output === undefined) {
+        return yield* new WidgetTranspileError({
+          reason: "failed",
+          detail: "esbuild produced no output.",
+        });
+      }
+      // Warnings are silent degradations of the artifact contract (e.g. the
+      // `import.meta` → empty-object substitution), so they fail the build.
+      if (result.warnings.length > 0) {
+        return yield* new WidgetTranspileError({
+          reason: "failed",
+          detail: formatDiagnostics(esbuild, result.warnings, "warning"),
+        });
+      }
+      if (FORBIDDEN_ARTIFACT_PATTERN.test(output)) {
+        return yield* new WidgetTranspileError({
+          reason: "failed",
+          detail:
+            "The emitted widget bundle still contains an import or require shim; the artifact was rejected.",
+        });
+      }
+      return output;
+    });
+
 export const layerTranspiler = Layer.effect(
   WidgetSourceTranspiler,
   Effect.gen(function* () {
     // The module require and the first build are the two lazy probes for the
-    // platform binary; both cache their failure (Effect.cached keeps the
-    // error, makeTranspile latches it) so a packaged server with a missing
-    // @esbuild/* degrades to transpileFailed instead of crashing.
+    // platform binary; a missing one caches its failure (Effect.cached keeps
+    // the error, makeTranspile latches it) so a packaged server with a
+    // missing @esbuild/* degrades to transpileFailed instead of crashing.
     const esbuildModule = yield* Effect.cached(loadEsbuild);
     const build = (source: string) =>
-      Effect.gen(function* () {
-        const esbuild = yield* esbuildModule;
-        const result = yield* Effect.tryPromise({
-          try: () => esbuild.build(widgetBuildOptions(source)),
-          catch: (cause) =>
-            isBuildDiagnostics(cause)
-              ? new WidgetTranspileError({
-                  reason: "failed",
-                  detail: formatDiagnostics(esbuild, cause),
-                })
-              : new WidgetTranspileError({
-                  reason: "unavailable",
-                  detail: `The esbuild platform binary could not run: ${causeMessage(cause)}.`,
-                }),
-        });
-        const output = result.outputFiles?.[0]?.text;
-        if (output === undefined) {
-          return yield* new WidgetTranspileError({
-            reason: "failed",
-            detail: "esbuild produced no output.",
-          });
-        }
-        return output;
-      });
+      Effect.flatMap(esbuildModule, (esbuild) => makeBuild(esbuild)(source));
     return { transpile: yield* makeTranspile(build) };
   }),
 );
@@ -251,6 +366,21 @@ export interface WidgetTranspileLimits {
   readonly publishWindowMs: number;
   /** Cap on `manifest.subscriptions`/`manifest.actions` entries each. */
   readonly maxBridgeDeclarations: number;
+  /**
+   * Artifact-store bound: `<hash>.js`+`.json` pairs past this count evict
+   * oldest-first (meta mtime) through the same removal path as `remove`.
+   */
+  readonly maxArtifacts: number;
+  /**
+   * Byte cap across artifact pairs, applied alongside `maxArtifacts`. The
+   * pair just written is never evicted by the publish that created it.
+   */
+  readonly maxArtifactBytes: number;
+  /**
+   * Cap on decoded source records held in memory. The map is only a
+   * memoized view of the sidecar metas — evicted entries reload from disk.
+   */
+  readonly maxCachedRecords: number;
 }
 
 const DEFAULT_LIMITS: WidgetTranspileLimits = {
@@ -259,6 +389,9 @@ const DEFAULT_LIMITS: WidgetTranspileLimits = {
   maxPublishesPerWindow: 30,
   publishWindowMs: 60_000,
   maxBridgeDeclarations: 64,
+  maxArtifacts: 256,
+  maxArtifactBytes: 64 * 1024 * 1024,
+  maxCachedRecords: 256,
 };
 
 export class WidgetTranspileService extends Context.Service<
@@ -286,6 +419,7 @@ export class WidgetTranspileService extends Context.Service<
      * and sidecar meta, drops the cached record, and emits a `null` tombstone
      * so live subscribers re-render the missing-source state. A sourceId that
      * cannot name an artifact still drops its record — it just has no files.
+     * Artifact-store eviction runs the same path for over-cap pairs.
      */
     readonly remove: (
       input: WatchWidgetSourceGetInput,
@@ -340,6 +474,25 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           Effect.orElseSucceed((): string | null => null),
         );
 
+      /**
+       * The records map is bounded: delete-then-set keeps insertion order
+       * "least recently written first", so the cap drops the coldest
+       * entries. Records are only a memoized view of the sidecar metas —
+       * dropped entries reload from disk on the next lookup.
+       */
+      const cacheRecord = (sourceId: WatchWidgetSourceId, record: WatchWidgetSourceRecord) =>
+        Ref.update(records, (map) => {
+          const next = new Map(map);
+          next.delete(sourceId);
+          next.set(sourceId, record);
+          while (next.size > limits.maxCachedRecords) {
+            const oldest = next.keys().next().value;
+            if (oldest === undefined) break;
+            next.delete(oldest);
+          }
+          return next;
+        });
+
       const loadRecord = Effect.fnUntraced(function* (sourceId: WatchWidgetSourceId) {
         const memoized = (yield* Ref.get(records)).get(sourceId);
         if (memoized !== undefined) return memoized;
@@ -354,7 +507,7 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           .readFileString(metaPath(artifactHash))
           .pipe(Effect.flatMap(decodeRecordJson), Effect.option);
         if (Option.isNone(record)) return null;
-        yield* Ref.update(records, (map) => new Map(map).set(sourceId, record.value));
+        yield* cacheRecord(sourceId, record.value);
         return record.value;
       });
 
@@ -364,8 +517,90 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
        * degrades back to `transpileFailed` here instead of lying to the host.
        */
       const storeRecord = Effect.fnUntraced(function* (record: WatchWidgetSourceRecord) {
-        yield* Ref.update(records, (map) => new Map(map).set(record.sourceId, record));
+        yield* cacheRecord(record.sourceId, record);
         yield* PubSub.publish(publishes, { sourceId: record.sourceId, record });
+      });
+
+      /**
+       * The shared removal path for `remove` and artifact eviction: the
+       * pair's files go first — if they cannot be deleted the record stays
+       * fetchable, matching the state a failed removal should leave — then
+       * the cached record drops and subscribers get a `null` tombstone.
+       */
+      const dropArtifact = (artifactHash: string, sourceId: WatchWidgetSourceId) =>
+        Effect.gen(function* () {
+          yield* Effect.all(
+            [
+              fs.remove(artifactPath(artifactHash), { force: true }),
+              fs.remove(metaPath(artifactHash), { force: true }),
+            ],
+            { concurrency: 1, discard: true },
+          );
+          yield* Ref.update(records, (map) => {
+            const next = new Map(map);
+            next.delete(sourceId);
+            return next;
+          });
+          yield* PubSub.publish(publishes, { sourceId, record: null });
+        });
+
+      /**
+       * Bounds the artifact directory: pairs past the count or byte caps are
+       * evicted oldest-first through `dropArtifact`, so agent-published
+       * sources get the same way out as `remove` — files gone, record
+       * dropped, subscribers tombstoned — without a dedicated RPC. A pair's
+       * age is its oldest file mtime; `keepHash` (the pair just written) is
+       * never evicted by the publish that created it.
+       */
+      const evictArtifacts = Effect.fnUntraced(function* (keepHash: string) {
+        const names = yield* fs.readDirectory(serverConfig.widgetArtifactsDir);
+        const hashes = new Set<string>();
+        for (const name of names) {
+          const hash = name.endsWith(".js")
+            ? name.slice(0, name.length - ".js".length)
+            : name.endsWith(".json")
+              ? name.slice(0, name.length - ".json".length)
+              : null;
+          if (hash !== null && ARTIFACT_HASH_PATTERN.test(hash)) hashes.add(hash);
+        }
+        const pairs: Array<{
+          readonly hash: string;
+          readonly mtimeMs: number;
+          readonly bytes: number;
+        }> = [];
+        for (const hash of hashes) {
+          const jsStat = yield* fs.stat(artifactPath(hash)).pipe(Effect.option);
+          const metaStat = yield* fs.stat(metaPath(hash)).pipe(Effect.option);
+          const stats = [jsStat, metaStat].flatMap((stat) =>
+            Option.isSome(stat) ? [stat.value] : [],
+          );
+          if (stats.length === 0) continue;
+          pairs.push({
+            hash,
+            mtimeMs: Math.min(
+              ...stats.map((stat) =>
+                Option.match(stat.mtime, {
+                  onNone: () => 0,
+                  onSome: (mtime) => mtime.getTime(),
+                }),
+              ),
+            ),
+            bytes: stats.reduce((sum, stat) => sum + Number(stat.size), 0),
+          });
+        }
+        pairs.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.hash < b.hash ? -1 : 1));
+        let count = pairs.length;
+        let bytes = pairs.reduce((sum, pair) => sum + pair.bytes, 0);
+        for (const victim of pairs) {
+          if (count <= limits.maxArtifacts && bytes <= limits.maxArtifactBytes) break;
+          if (victim.hash === keepHash) continue;
+          yield* dropArtifact(
+            victim.hash,
+            WatchWidgetSourceId.make(`${SOURCE_ID_PREFIX}${victim.hash}`),
+          ).pipe(Effect.orElseSucceed(() => undefined));
+          count -= 1;
+          bytes -= victim.bytes;
+        }
       });
 
       const publishInner = (input: WatchWidgetSourcePublishInput, enforcePublishLimit: boolean) =>
@@ -384,27 +619,6 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
               "sourceTooLarge",
               `Widget source exceeds the ${limits.maxSourceBytes}-byte limit.`,
             );
-          }
-          // The per-window cap bounds agent-authored churn only: trusted
-          // pack registration neither consumes nor is rejected by it.
-          if (enforcePublishLimit) {
-            const admitted = yield* Clock.currentTimeMillis.pipe(
-              Effect.flatMap((now) =>
-                Ref.modify(publishStamps, (stamps) => {
-                  const fresh = stamps.filter((stamp) => now - stamp < limits.publishWindowMs);
-                  if (fresh.length >= limits.maxPublishesPerWindow) {
-                    return [false, fresh] as const;
-                  }
-                  return [true, [...fresh, now]] as const;
-                }),
-              ),
-            );
-            if (!admitted) {
-              return yield* sourceError(
-                "publishRateLimited",
-                `Widget source publishes are limited to ${limits.maxPublishesPerWindow} per ${Math.round(limits.publishWindowMs / 1_000)}s.`,
-              );
-            }
           }
 
           // The cache key covers exactly what determines the artifact: the
@@ -429,9 +643,37 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
             }
           }
 
+          // The per-window cap bounds agent-authored churn only: trusted
+          // pack registration neither consumes nor is rejected by it. It
+          // sits after the ready-cache-hit early return so republishing an
+          // existing artifact is free — a retry loop cannot spend the budget
+          // without doing real transpile work.
+          if (enforcePublishLimit) {
+            const admitted = yield* Clock.currentTimeMillis.pipe(
+              Effect.flatMap((now) =>
+                Ref.modify(publishStamps, (stamps) => {
+                  const fresh = stamps.filter((stamp) => now - stamp < limits.publishWindowMs);
+                  if (fresh.length >= limits.maxPublishesPerWindow) {
+                    return [false, fresh] as const;
+                  }
+                  return [true, [...fresh, now]] as const;
+                }),
+              ),
+            );
+            if (!admitted) {
+              return yield* sourceError(
+                "publishRateLimited",
+                `Widget source publishes are limited to ${limits.maxPublishesPerWindow} per ${Math.round(limits.publishWindowMs / 1_000)}s.`,
+              );
+            }
+          }
+
           // `Effect.result` turns a build diagnostic into a value first, so
-          // the timeout bounds only a hung transpile; either way the outcome
-          // is written as a record — data, never an effect failure.
+          // the timeout bounds only a hung transpile — and the transpiler
+          // builds inside an `esbuild.context`, so interruption calls
+          // `ctx.cancel()` and the limit bounds the service's work rather
+          // than just this wait. Either way the outcome is written as a
+          // record — data, never an effect failure.
           const transpiled = yield* transpiler.transpile(input.source).pipe(
             Effect.result,
             Effect.timeoutOrElse({
@@ -448,31 +690,42 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
             }),
           );
 
-          const record: WatchWidgetSourceRecord = Result.isSuccess(transpiled)
-            ? {
+          // `</script` is escaped before hashing and writing so the artifact
+          // cannot close the host document's inline script tag; `scriptHash`
+          // then covers exactly the bytes the host serves.
+          const { bundle, record } = Result.match(transpiled, {
+            onSuccess: (output) => {
+              const bundle = escapeScriptCloseTags(output);
+              const record: WatchWidgetSourceRecord = {
                 sourceId,
                 source: input.source,
                 manifest: input.manifest,
                 artifactHash,
-                scriptHash: sha256Base64(transpiled.success),
+                scriptHash: sha256Base64(bundle),
                 status: "ready",
                 failure: null,
-              }
-            : {
+              };
+              return { bundle, record };
+            },
+            onFailure: (error) => {
+              const record: WatchWidgetSourceRecord = {
                 sourceId,
                 source: input.source,
                 manifest: input.manifest,
                 artifactHash,
                 scriptHash: null,
                 status: "failed",
-                failure: { cause: "transpileFailed", detail: transpiled.failure.detail },
+                failure: { cause: "transpileFailed", detail: error.detail },
               };
+              return { bundle: null, record };
+            },
+          });
 
           yield* Effect.gen(function* () {
-            if (Result.isSuccess(transpiled)) {
+            if (bundle !== null) {
               // The bundle lands before the meta that points at it: a crash
               // leaves an orphan file, never a ready meta without its bundle.
-              yield* writeFileAtomic(artifactPath(artifactHash), transpiled.success);
+              yield* writeFileAtomic(artifactPath(artifactHash), bundle);
             }
             yield* writeFileAtomic(metaPath(artifactHash), encodeRecordJson(record));
           }).pipe(
@@ -483,6 +736,12 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
               }),
             ),
           );
+
+          // Best-effort bound on the artifact dir: pairs past the count or
+          // byte caps evict oldest-first through the same removal path as
+          // `remove`. A sweep failure must not fail the publish — the pair
+          // is written and `get`/`publish` tolerate a crowded dir.
+          yield* evictArtifacts(artifactHash).pipe(Effect.orElseSucceed(() => undefined));
 
           yield* storeRecord(record);
           return { source: record };
@@ -502,19 +761,11 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
 
       const remove: WidgetTranspileService["Service"]["remove"] = (input) =>
         Effect.gen(function* () {
-          // Files go first: if they cannot be deleted the record stays
-          // fetchable — matching the state a failed removal should leave.
           const artifactHash = input.sourceId.startsWith(SOURCE_ID_PREFIX)
             ? input.sourceId.slice(SOURCE_ID_PREFIX.length)
             : null;
           if (artifactHash !== null && ARTIFACT_HASH_PATTERN.test(artifactHash)) {
-            yield* Effect.all(
-              [
-                fs.remove(artifactPath(artifactHash), { force: true }),
-                fs.remove(metaPath(artifactHash), { force: true }),
-              ],
-              { concurrency: 1, discard: true },
-            ).pipe(
+            yield* dropArtifact(artifactHash, input.sourceId).pipe(
               Effect.mapError((cause) =>
                 sourceError("artifactStoreFailed", "Could not remove the widget artifact.", {
                   sourceId: input.sourceId,
@@ -522,13 +773,14 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
                 }),
               ),
             );
+          } else {
+            yield* Ref.update(records, (map) => {
+              const next = new Map(map);
+              next.delete(input.sourceId);
+              return next;
+            });
+            yield* PubSub.publish(publishes, { sourceId: input.sourceId, record: null });
           }
-          yield* Ref.update(records, (map) => {
-            const next = new Map(map);
-            next.delete(input.sourceId);
-            return next;
-          });
-          yield* PubSub.publish(publishes, { sourceId: input.sourceId, record: null });
         }).pipe(
           Effect.mapError((cause) =>
             isSourceError(cause)

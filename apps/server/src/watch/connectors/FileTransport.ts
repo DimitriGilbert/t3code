@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the watch-root denylist needs
+// the real OS home directory (same posture as PackStore.ts).
+import * as NodeOS from "node:os";
+
 import { WatchConnectorError, type WatchConnectorErrorReason } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -5,6 +9,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
+
+import * as ServerConfig from "../../config.ts";
 
 /**
  * `file`-transport watches: instance config `watch` declares the allowlisted
@@ -15,6 +21,21 @@ import * as Stream from "effect/Stream";
  * Instance config convention:
  *
  *   { watch: { roots: ["/abs/dir", ...], globs?: ["**\/*.json"], maxDepth?: 4 } }
+ *
+ * Declared roots are additionally checked against a denylist — `/proc`,
+ * `/sys`, `/dev`, the server's own state/secrets/connectors directories, and
+ * `~/.ssh` — by resolved path and by real path, so a symlinked spelling of a
+ * denied location still fails. File contents are read through a byte cap on
+ * the stream itself rather than trusting `stat.size` (procfs-style files
+ * report 0).
+ *
+ * Residual: `watch.roots` stays agent-writable through
+ * `config_set`/`setInstanceConfig` — an agent can still point a file
+ * connector at any non-denylisted directory the server user can read, and
+ * collected contents flow into snapshots on every subscribed surface
+ * (remote/tunnel clients included). A human-confirm gate for root changes is
+ * deliberately deferred as a product decision; the boundary enforced here is
+ * "reserved paths are never served", not "every root is human-approved".
  *
  * Raw file contents stay server-side; only the transform output crosses the
  * wire as a snapshot.
@@ -48,7 +69,8 @@ const isRecord = Predicate.isObject;
 /**
  * Reads the `watch` block out of instance config. Rejects malformed shapes as
  * `configInvalid` — the config is user/agent-written, so this is the boundary
- * where it becomes a typed spec.
+ * where it becomes a typed spec. Roots are also checked against the reserved
+ * path denylist (resolved and real-path forms) as `confinementRejected`.
  */
 export const parseFileWatchConfig = Effect.fn("ConnectorFileTransport.parseFileWatchConfig")(
   function* (config: Readonly<Record<string, unknown>>) {
@@ -75,6 +97,48 @@ export const parseFileWatchConfig = Effect.fn("ConnectorFileTransport.parseFileW
         "watchLimitExceeded",
         `File connector declares ${roots.length} watch roots; the cap is ${MAX_WATCH_ROOTS}.`,
       );
+    }
+
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const serverConfig = yield* ServerConfig.ServerConfig;
+    // Locations a declared root can never point at: the virtual filesystems
+    // (procfs/sysfs/devfs lie about sizes and expose kernel and process
+    // memory), the server's own state directory tree (sqlite, the file-backed
+    // secret store, installed packs), and `~/.ssh`. Each entry is checked in
+    // resolved and — where it exists — real path form, so a symlinked or
+    // `..`-spelled root still matches.
+    const deniedBases = new Set<string>();
+    for (const entry of [
+      "/proc",
+      "/sys",
+      "/dev",
+      serverConfig.stateDir,
+      serverConfig.connectorsDir,
+      serverConfig.secretsDir,
+      path.join(NodeOS.homedir(), ".ssh"),
+    ]) {
+      const resolved = path.resolve(entry);
+      deniedBases.add(resolved);
+      const real = yield* fs.realPath(resolved).pipe(Effect.option);
+      if (real._tag === "Some") deniedBases.add(real.value);
+    }
+    for (const declaredRoot of roots) {
+      const resolved = path.resolve(declaredRoot);
+      const candidates = [resolved];
+      const real = yield* fs.realPath(resolved).pipe(Effect.option);
+      if (real._tag === "Some" && real.value !== resolved) candidates.push(real.value);
+      const denied = [...deniedBases].find((base) =>
+        candidates.some(
+          (candidate) => candidate === base || candidate.startsWith(`${base}${path.sep}`),
+        ),
+      );
+      if (denied !== undefined) {
+        return yield* connectorError(
+          "confinementRejected",
+          `Watch root ${declaredRoot} is not allowed: it resolves inside the reserved path ${denied}.`,
+        );
+      }
     }
     const globs = watch["globs"];
     if (
@@ -154,7 +218,10 @@ export const collectWatchedFiles = Effect.fn("ConnectorFileTransport.collectWatc
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const matchers = spec.globs.map(globToRegExp);
-    const files: Record<string, string> = {};
+    // Keys carry filenames read off disk — a null-prototype map so a name like
+    // `__proto__` lands as data instead of hitting the prototype setter, and
+    // `constructor`/`hasOwnProperty` stay plain entries.
+    const files: Record<string, string> = Object.create(null);
 
     for (const declaredRoot of spec.roots) {
       const root = path.resolve(declaredRoot);
@@ -234,13 +301,34 @@ export const collectWatchedFiles = Effect.fn("ConnectorFileTransport.collectWatc
               `Watched file ${relative} exceeds the ${MAX_WATCH_FILE_BYTES}-byte cap.`,
             );
           }
-          files[`${rootName}/${relative}`] = yield* fs.readFileString(realEntry).pipe(
-            Effect.mapError((cause) =>
-              connectorError("fetchFailed", `Could not read watched file ${relative}.`, {
-                cause,
-              }),
-            ),
-          );
+          // `stat.size` is not the real cap: procfs-style files report 0 and a
+          // file can grow between stat and read. The stream itself is bounded
+          // at cap+1 bytes, so the limit is enforced on what is actually
+          // read — anything larger fails the run.
+          const chunks = yield* fs
+            .stream(realEntry, { bytesToRead: MAX_WATCH_FILE_BYTES + 1 })
+            .pipe(
+              Stream.runCollect,
+              Effect.mapError((cause) =>
+                connectorError("fetchFailed", `Could not read watched file ${relative}.`, {
+                  cause,
+                }),
+              ),
+            );
+          const byteLength = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+          if (byteLength > MAX_WATCH_FILE_BYTES) {
+            return yield* connectorError(
+              "watchLimitExceeded",
+              `Watched file ${relative} exceeds the ${MAX_WATCH_FILE_BYTES}-byte cap.`,
+            );
+          }
+          const bytes = new Uint8Array(byteLength);
+          let position = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, position);
+            position += chunk.byteLength;
+          }
+          files[`${rootName}/${relative}`] = new TextDecoder().decode(bytes);
         }
       }
     }

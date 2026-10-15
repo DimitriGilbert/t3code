@@ -252,6 +252,121 @@ it.effect("materializes under the pinned hash and re-verifies it on load", () =>
   ),
 );
 
+it.effect("rejects pack ids that cannot safely name an install directory", () =>
+  Effect.gen(function* () {
+    for (const id of ["..", ".", "...", "../escape", "a/b", "a b", ""]) {
+      yield* expectConnectorError(
+        "manifestInvalid",
+        PackStore.fetchUrlBundle(urlOrigin("https://packs.example.com/pack.json")).pipe(
+          Effect.provide(
+            layerFetch({
+              get: () => Effect.succeed(okResponse(wireBundle(manifest({ id })))),
+            }),
+          ),
+        ),
+      );
+    }
+  }),
+);
+
+it.effect("rejects a local pack manifest with an unsafe id", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "pack-store-" });
+      yield* fs.writeFileString(
+        path.join(dir, "manifest.json"),
+        JSON.stringify(manifest({ id: ".." })),
+      );
+      yield* expectConnectorError("manifestInvalid", PackStore.readLocalBundle(dir));
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects manifests declaring wildcard egress over public suffixes", () =>
+  Effect.gen(function* () {
+    for (const egressHosts of [
+      ["*"],
+      ["*."],
+      ["*.com"],
+      ["*.co.uk"],
+      ["*.*"],
+      ["a*.example.com"],
+      ["not a host"],
+    ]) {
+      yield* expectConnectorError(
+        "manifestInvalid",
+        PackStore.fetchUrlBundle(urlOrigin("https://packs.example.com/pack.json")).pipe(
+          Effect.provide(
+            layerFetch({
+              get: () => Effect.succeed(okResponse(wireBundle(manifest({ egressHosts })))),
+            }),
+          ),
+        ),
+      );
+    }
+    // Registrable wildcards and bare hosts remain valid declarations.
+    const bundle = yield* PackStore.fetchUrlBundle(
+      urlOrigin("https://packs.example.com/pack.json"),
+    ).pipe(
+      Effect.provide(
+        layerFetch({
+          get: () =>
+            Effect.succeed(
+              okResponse(
+                wireBundle(manifest({ egressHosts: ["api.example.com", "*.example.com"] })),
+              ),
+            ),
+        }),
+      ),
+    );
+    assert.deepEqual([...bundle.manifest.egressHosts], ["api.example.com", "*.example.com"]);
+  }),
+);
+
+it.effect("stores a pack file named __proto__ as data, not a prototype write", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "pack-store-" });
+      yield* fs.writeFileString(path.join(dir, "manifest.json"), JSON.stringify(manifest()));
+      yield* fs.writeFileString(path.join(dir, "__proto__"), "pack source, not a prototype");
+      const bundle = yield* PackStore.readLocalBundle(dir);
+      assert.isTrue(Object.keys(bundle.files).includes("__proto__"));
+      assert.equal(bundle.files["__proto__"], "pack source, not a prototype");
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("refuses a pack id that resolves outside the connectors directory", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      // ".." survives packDirName's sanitization — before the confinement
+      // assert this would have removed connectorsDir's parent outright.
+      yield* expectConnectorError(
+        "confinementRejected",
+        PackStore.removeInstalled(WatchConnectorPackId.make("..")),
+      );
+      yield* expectConnectorError(
+        "confinementRejected",
+        PackStore.loadInstalled(WatchConnectorPackId.make(".."), "x".repeat(64)),
+      );
+      // The parent directory — the traversal target — is untouched.
+      assert.isTrue(yield* fs.exists(config.stateDir));
+    }),
+  ).pipe(
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "pack-store-config-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+  ),
+);
+
 it.effect("removeInstalled deletes every pinned version directory", () =>
   Effect.scoped(
     Effect.gen(function* () {

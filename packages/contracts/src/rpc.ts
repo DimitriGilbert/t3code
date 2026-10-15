@@ -2194,9 +2194,11 @@ const WsWatchConnectorsRequestUpgradeRpc = Rpc.make(WS_METHODS.watchConnectorsRe
 });
 
 /**
- * Minted only for a UI client: returns the pending request plus the
- * single-use confirmation token bound to its manifest hash. Not in the MCP
- * toolkit — an agent can never reach the token.
+ * Returns the pending request plus the single-use confirmation token bound
+ * to its manifest hash. Minting needs only operate scope — the enforced
+ * boundary is `environment:maintain` on the confirm calls plus this
+ * method's absence from the MCP toolkit, so an agent can open a request
+ * but never rule on it.
  */
 const WsWatchConnectorsPrepareInstallConfirmRpc = Rpc.make(
   WS_METHODS.watchConnectorsPrepareInstallConfirm,
@@ -2246,8 +2248,9 @@ const WsWatchConnectorsUninstallRpc = Rpc.make(WS_METHODS.watchConnectorsUninsta
 });
 
 /**
- * Minted only for a UI client: describes what a purge destroys and returns a
- * single-use token bound to that descriptor. Not in the MCP toolkit.
+ * Describes what a purge destroys and returns a single-use token bound to
+ * that descriptor. Minting needs only operate scope — the purge itself is
+ * `environment:maintain` and absent from the MCP toolkit.
  */
 const WsWatchConnectorsPreparePurgeRpc = Rpc.make(WS_METHODS.watchConnectorsPreparePurge, {
   payload: WatchConnectorPreparePurgeInput,

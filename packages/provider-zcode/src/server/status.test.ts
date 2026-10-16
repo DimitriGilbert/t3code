@@ -182,6 +182,9 @@ it.layer(NodeServices.layer)("Zcode status", (it) => {
           status: "authenticated",
           type: "zcode",
           label: "ZCode account",
+          // ZCode has no remote sign-out; the snapshot must say so instead of
+          // letting the UI fall back to setup.canAuthenticate.
+          canLogout: false,
         });
         expect(snapshot.models.map((model) => model.slug)).toEqual([
           "builtin\\glm-5",

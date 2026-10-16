@@ -7,6 +7,7 @@
 export {
   DevinAdapterV2Driver,
   DevinProviderCapabilitiesV2,
+  devinApprovalOptions,
   devinPermissionDisposition,
   devinPromptFailure,
   devinSessionModeForPolicy,
@@ -24,6 +25,7 @@ export {
   makeDevinAcpRuntime,
 } from "./server/devinAcp.ts";
 export {
+  extractDevinProposedPlanMarkdown,
   extractDevinSubagentUpdate,
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,

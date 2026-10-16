@@ -45,6 +45,40 @@ export function normalizeDevinToolCall(tool: AcpToolCallState): AcpToolCallState
     : tool;
 }
 
+/**
+ * The proposed-plan markdown Devin writes mid-turn through its `write_plan`
+ * tool (verified live): the start frame carries the steps in `rawInput.plan`,
+ * the completed frame the full plan file in `rawInput.content` plus a
+ * `cognition.ai/isPlanFileEdit` diff. `exit_plan_mode` is deliberately not a
+ * source — its `rawInput.plan` is a one-line summary that would overwrite the
+ * fuller capture.
+ */
+export function extractDevinProposedPlanMarkdown(tool: AcpToolCallState): string | undefined {
+  const meta = record(tool.data.meta);
+  const isPlanWrite =
+    meta?.["cognition.ai/isPlanFileEdit"] === true ||
+    meta?.["cognition.ai/inferenceToolName"] === "write_plan";
+  if (!isPlanWrite) return undefined;
+  const rawInput = record(tool.data.rawInput);
+  for (const key of ["content", "plan"] as const) {
+    const value = rawInput?.[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  const content = tool.data.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      const diff = record(block);
+      if (diff?.type !== "diff") continue;
+      const newText = typeof diff.newText === "string" ? diff.newText : undefined;
+      if (newText === undefined) continue;
+      // Plan-file diffs carry a `---`-delimited devin-local frontmatter block.
+      const stripped = newText.replace(/^---\n[\s\S]*?\n---\n/, "");
+      if (stripped.trim().length > 0) return stripped;
+    }
+  }
+  return undefined;
+}
+
 export function extractDevinSubagentUpdate(
   tool: AcpToolCallState,
 ): AcpAdapterV2SubagentUpdate | undefined {

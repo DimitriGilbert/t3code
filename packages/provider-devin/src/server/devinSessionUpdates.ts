@@ -1,3 +1,12 @@
+/**
+ * Devin's typed `cognition.ai/*` session metadata, captured from its native
+ * ACP stream: subagent-context routing, grouped streaming message ids, and the
+ * real tool names Devin attaches to generic tool calls. The ACP Registry's
+ * `agentId: "devin"` special case reuses these for registry-configured
+ * instances.
+ *
+ * @module provider-devin/server/devinSessionUpdates
+ */
 import type * as AcpSchema from "effect-acp/compat";
 import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
 import type { AcpAdapterV2SubagentUpdate } from "@t3tools/provider-acp/server/adapter";

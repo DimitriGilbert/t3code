@@ -104,6 +104,15 @@
         { "range": ">=0.0.13", "status": "supported" },
         { "range": "<0.0.13", "status": "unsupported" }
       ]
+    },
+    {
+      "driver": "devin",
+      "t3CodeRange": ">=0.0.46",
+      "recommendedRange": ">=3000.11.92",
+      "ranges": [
+        { "range": ">=3000.11.92", "status": "supported" },
+        { "range": "<3000.11.92", "status": "unknown" }
+      ]
     }
   ],
   "currentModels": {

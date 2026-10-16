@@ -21,7 +21,7 @@ import type { ZcodeSettings } from "../settings.ts";
 export const ZCODE_ACP_AUTH_METHOD_ID = "zcode-credentials";
 
 /** npm bin alias that runs the stdio ACP bridge directly. */
-const ZCODE_ACP_SERVER_BIN = "zcode-acp-server";
+export const ZCODE_ACP_SERVER_BIN = "zcode-acp-server";
 
 /** Env var the bridge reads to locate the `zcode` backend binary. */
 const ZCODE_BIN_ENV = "ZCODE_BIN";

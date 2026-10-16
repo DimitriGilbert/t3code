@@ -29,6 +29,7 @@
     "record:grok-replay": "node scripts/record-grok-acp-replay-fixture.ts",
     "record:fx-replay": "node scripts/record-fx-acp-replay-fixture.ts",
     "record:muse-replay": "node scripts/record-muse-msp-replay-fixture.ts",
+    "record:zcode-replay": "node scripts/record-zcode-acp-replay-fixture.ts",
     "generate": "graphqlgen",
     "generate:expo-schema": "node scripts/fetch-expo-schema.ts"
   },

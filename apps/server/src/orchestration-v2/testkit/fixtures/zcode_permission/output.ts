@@ -10,7 +10,8 @@ import {
 import { ZCODE_PERMISSION_APPROVED_COMMAND, ZCODE_PERMISSION_DECLINED_COMMAND } from "./input.ts";
 
 /**
- * Guarded mode: both commands escalate to the user. The approved one runs; the
+ * Approval-required maps onto ZCode's `build` session mode, so both commands
+ * surface as permission asks the user must answer. The approved one runs; the
  * declined one resolves the native response with the reject option and its tool
  * call fails without running.
  */

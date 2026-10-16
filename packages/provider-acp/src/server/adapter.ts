@@ -1005,6 +1005,81 @@ function elicitationContent(
   return content;
 }
 
+/**
+ * Choice list of one elicitation form field. A flat `enum` is the common
+ * shape; the titled variants (`oneOf`/`anyOf` of `{const, title}`, or string
+ * literals) are the spec's labelled-choice encoding — the label renders
+ * `title` while `const` stays the wire value so sentinel picks (e.g. ZCode's
+ * `__skip__` "Skip this question") reach the provider unchanged. Array fields
+ * (multi-select) carry the same shapes under `items`.
+ */
+function acpElicitationFieldChoices(
+  field: Record<string, unknown> | undefined,
+): ReadonlyArray<{ readonly label: string; readonly value: string }> {
+  const candidates = field?.type === "array" ? unknownRecord(field.items) : field;
+  const enumValues = Array.isArray(candidates?.enum)
+    ? candidates.enum.filter((value): value is string => typeof value === "string")
+    : [];
+  if (enumValues.length > 0) {
+    return enumValues.map((value) => ({ label: value, value }));
+  }
+  for (const key of ["oneOf", "anyOf"] as const) {
+    const entries = candidates?.[key];
+    if (!Array.isArray(entries)) continue;
+    const choices = entries.flatMap((entry) => {
+      if (typeof entry === "string" && entry.trim().length > 0) {
+        return [{ label: entry.trim(), value: entry }];
+      }
+      const variant = unknownRecord(entry);
+      const constValue = variant?.const;
+      if (typeof constValue !== "string") return [];
+      const label = nonEmptyText(variant?.title, constValue);
+      return [{ label, value: constValue }];
+    });
+    if (choices.length > 0) return choices;
+  }
+  return [];
+}
+
+/**
+ * Maps a form-mode `elicitation/create` requestedSchema onto user-input
+ * questions: one per property, with enum/oneOf/anyOf options, `multiSelect`
+ * for array-typed fields, and the boolean fallback for bare `type: "boolean"`.
+ */
+export function acpElicitationFormQuestions(input: {
+  readonly requestedSchema: unknown;
+  readonly message: string;
+}): ReadonlyArray<OrchestrationV2UserInputQuestion> {
+  const requestedSchema = unknownRecord(input.requestedSchema);
+  const properties = unknownRecord(requestedSchema?.properties) ?? {};
+  return Object.entries(properties).map(
+    ([id, property], index): OrchestrationV2UserInputQuestion => {
+      const record = unknownRecord(property);
+      const choices = acpElicitationFieldChoices(record);
+      const options =
+        choices.length > 0
+          ? choices.map((choice) => ({
+              label: choice.label,
+              description: choice.label,
+              ...(choice.value === choice.label ? {} : { value: choice.value }),
+            }))
+          : record?.type === "boolean"
+            ? [
+                { label: "true", description: "Yes" },
+                { label: "false", description: "No" },
+              ]
+            : [];
+      return {
+        id,
+        header: nonEmptyText(record?.title, `Question ${index + 1}`),
+        question: nonEmptyText(record?.description, input.message),
+        options,
+        ...(record?.type === "array" ? { multiSelect: true } : {}),
+      };
+    },
+  );
+}
+
 interface ActiveTextSegment {
   readonly nativeItemId: string;
   readonly startedAt: DateTime.Utc;
@@ -3437,6 +3512,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               ? toolCall
               : { ...toolCall, backgroundCommandTaskId },
           );
+          // Same capture as the post-settle path: providers that surface their
+          // proposed plan through a tool call (Grok plan.md writes, ZCode's
+          // ExitPlanMode card) need it in-turn, while plan mode is active.
+          const proposedPlanMarkdown = flavor.extractProposedPlanMarkdown?.(toolCall);
+          if (proposedPlanMarkdown !== undefined && proposedPlanMarkdown.length > 0) {
+            yield* captureProposedPlan({ planMarkdown: proposedPlanMarkdown });
+          }
           if (
             followsAgentWorkState &&
             projectedStatus === undefined &&
@@ -6203,29 +6285,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 "sessionId" in params ? params.sessionId : `request:${params.requestId}`;
               const questions =
                 nativeForm?.questions ??
-                Object.entries(properties).map(
-                  ([id, property], index): OrchestrationV2UserInputQuestion => {
-                    const record = unknownRecord(property);
-                    const enumValues = Array.isArray(record?.enum)
-                      ? record.enum.filter((value): value is string => typeof value === "string")
-                      : [];
-                    const options =
-                      enumValues.length > 0
-                        ? enumValues.map((value) => ({ label: value, description: value }))
-                        : record?.type === "boolean"
-                          ? [
-                              { label: "true", description: "Yes" },
-                              { label: "false", description: "No" },
-                            ]
-                          : [];
-                    return {
-                      id,
-                      header: nonEmptyText(record?.title, `Question ${index + 1}`),
-                      question: nonEmptyText(record?.description, params.message),
-                      options,
-                    };
-                  },
-                );
+                acpElicitationFormQuestions({
+                  requestedSchema: params.requestedSchema,
+                  message: params.message,
+                });
               const userInput = yield* requestUserInputWithAdmission(
                 handlerGeneration,
                 Effect.gen(function* () {

@@ -101,6 +101,11 @@ const ZCODE_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
 const withZcodeSnapshotDefaults = (draft: ServerProviderDraft): ServerProviderDraft => ({
   ...draft,
   supportsTextGeneration: false,
+  // ZCode has no remote sign-out the bridge can drive (auth.ts logout is a
+  // guided failure). canLogout must say so explicitly — otherwise the UI's
+  // `canLogout ?? setup.canAuthenticate` fallback offers a control that can
+  // only fail.
+  auth: { ...draft.auth, canLogout: false },
   setup: {
     canAuthenticate: true,
     canInstall: false,

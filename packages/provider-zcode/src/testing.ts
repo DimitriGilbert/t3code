@@ -7,8 +7,11 @@
 export {
   ZcodeAdapterV2Driver,
   ZcodeProviderCapabilitiesV2,
+  extractZcodeProposedPlanMarkdown,
+  extractZcodeSubagentUpdate,
   makeZcodeAcpAdapterFlavor,
   makeZcodeAdapterV2,
+  zcodePermissionDisposition,
   zcodePromptFailure,
   zcodeSessionModeForPolicy,
   type ZcodeAdapterV2DriverEnv,

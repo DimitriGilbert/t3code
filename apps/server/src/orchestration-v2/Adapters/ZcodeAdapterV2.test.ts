@@ -11,8 +11,11 @@ import {
   ZcodeAdapterV2Driver,
   ZcodeProviderCapabilitiesV2,
   buildZcodeAcpSpawnInput,
+  extractZcodeProposedPlanMarkdown,
+  extractZcodeSubagentUpdate,
   makeZcodeAcpAdapterFlavor,
   zcodeAcpSpawnArgs,
+  zcodePermissionDisposition,
   zcodePromptFailure,
   zcodeSessionModeForPolicy,
 } from "@t3tools/provider-zcode/testing";
@@ -105,10 +108,153 @@ describe("ZcodeAdapterV2", () => {
     assert.isFalse(ZcodeProviderCapabilitiesV2.sessions.supportsRuntimeModeSwitchInSession);
     assert.isTrue(ZcodeProviderCapabilitiesV2.threads.canReadThreadSnapshot);
     assert.isTrue(ZcodeProviderCapabilitiesV2.tools.supportsMcpTools);
+    assert.isTrue(ZcodeProviderCapabilitiesV2.planning.emitsProposedPlan);
+    assert.isTrue(ZcodeProviderCapabilitiesV2.subagents.supportsSubagents);
+    assert.isTrue(ZcodeProviderCapabilitiesV2.subagents.emitsSubagentLifecycle);
+    assert.isFalse(ZcodeProviderCapabilitiesV2.subagents.exposesSubagentThreadIds);
     assert.isTrue(ZcodeProviderCapabilitiesV2.checkpointing.providerCanReadConversationSnapshot);
     assert.isTrue(flavor.preferResumeSession);
     assert.isTrue(flavor.supportsCompaction);
     assert.isTrue(flavor.supportsImagePrompts);
+    assert.isTrue(flavor.enablePostSettleContinuation);
+  });
+
+  describe("permission disposition", () => {
+    const policy = (
+      runtimeMode: RuntimeMode,
+      overrides: { approvalPolicy?: unknown; sandboxPolicy?: unknown } = {},
+    ) =>
+      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode,
+        interactionMode: "default",
+        cwd: "/workspace",
+        ...overrides,
+      });
+    const request = (kind?: string) => ({
+      sessionId: "session-1",
+      toolCall: { toolCallId: "call-1", ...(kind === undefined ? {} : { kind }) },
+      options: [
+        { optionId: "allow_once", kind: "allow_once" as const, name: "Allow" },
+        { optionId: "reject_once", kind: "reject_once" as const, name: "Reject" },
+      ],
+    });
+
+    it("escalates guarded-mode (auto) asks to the user instead of auto-allowing", () => {
+      // ZCode guarded only asks about operations its own gate refused —
+      // including kind-less ExitPlanMode prompts — so the generic "allow"
+      // would silently collapse guarded into yolo.
+      assert.equal(zcodePermissionDisposition(policy("auto"), request()), "ask");
+      assert.equal(zcodePermissionDisposition(policy("auto"), request("execute")), "ask");
+    });
+
+    it("keeps the generic policy answer elsewhere", () => {
+      // approval-required asks, full-access allows, auto-accept-edits gates
+      // only non-mutation kinds.
+      assert.equal(
+        zcodePermissionDisposition(policy("approval-required"), request("execute")),
+        "ask",
+      );
+      assert.equal(zcodePermissionDisposition(policy("full-access"), request("execute")), "allow");
+      assert.equal(
+        zcodePermissionDisposition(policy("auto-accept-edits"), request("execute")),
+        "ask",
+      );
+      assert.equal(
+        zcodePermissionDisposition(policy("auto-accept-edits"), request("edit")),
+        "allow",
+      );
+    });
+
+    it("honors explicit approval overrides under auto", () => {
+      assert.equal(
+        zcodePermissionDisposition(policy("auto", { approvalPolicy: "never" }), request()),
+        "allow",
+      );
+    });
+  });
+
+  describe("session/update extraction", () => {
+    const toolCall = (input: {
+      toolName: string;
+      rawInput?: unknown;
+      rawOutput?: unknown;
+      status?: "pending" | "inProgress" | "completed" | "failed";
+    }) => ({
+      toolCallId: "call-1",
+      status: input.status ?? "completed",
+      data: {
+        toolCallId: "call-1",
+        meta: { claudeCode: { toolName: input.toolName } },
+        ...(input.rawInput === undefined ? {} : { rawInput: input.rawInput }),
+        ...(input.rawOutput === undefined ? {} : { rawOutput: input.rawOutput }),
+      },
+    });
+
+    it("surfaces a foreground Agent call as a subagent row", () => {
+      const update = extractZcodeSubagentUpdate(
+        toolCall({
+          toolName: "Agent",
+          rawInput: {
+            prompt: "Map the codebase",
+            description: "Explore repo",
+            subagent_type: "explore",
+          },
+          status: "inProgress",
+        }),
+      );
+      assert.deepEqual(update, {
+        nativeTaskId: "call-1",
+        prompt: "Map the codebase",
+        title: "Explore repo",
+        model: "explore",
+        status: "running",
+        childSessionId: null,
+        result: null,
+      });
+      const finished = extractZcodeSubagentUpdate(
+        toolCall({
+          toolName: "Agent",
+          rawInput: { prompt: "Map the codebase", description: "Explore repo" },
+          rawOutput:
+            "Found 3 modules.\nagentId: agent_abc123 (use SendMessage)\n<usage>subagent_tokens: 4\ntool_uses: 1\nduration_ms: 5</usage>",
+          status: "completed",
+        }),
+      );
+      assert.equal(finished?.status, "completed");
+      assert.equal(finished?.result, "Found 3 modules.");
+    });
+
+    it("leaves background launches and non-agent tools as ordinary tool calls", () => {
+      assert.isUndefined(
+        extractZcodeSubagentUpdate(
+          toolCall({ toolName: "Agent", rawInput: { prompt: "x", run_in_background: true } }),
+        ),
+      );
+      assert.isUndefined(
+        extractZcodeSubagentUpdate(toolCall({ toolName: "Bash", rawInput: { command: "ls" } })),
+      );
+      // A first-sighting result frame with no launch fields stays a tool card.
+      assert.isUndefined(
+        extractZcodeSubagentUpdate(toolCall({ toolName: "Agent", status: "completed" })),
+      );
+    });
+
+    it("extracts ExitPlanMode plan markdown and nothing else", () => {
+      assert.equal(
+        extractZcodeProposedPlanMarkdown(
+          toolCall({ toolName: "ExitPlanMode", rawInput: { plan: "# Plan\n\n1. Ship it" } }),
+        ),
+        "# Plan\n\n1. Ship it",
+      );
+      assert.isUndefined(
+        extractZcodeProposedPlanMarkdown(toolCall({ toolName: "ExitPlanMode", rawInput: {} })),
+      );
+      assert.isUndefined(
+        extractZcodeProposedPlanMarkdown(
+          toolCall({ toolName: "Agent", rawInput: { plan: "not a plan" } }),
+        ),
+      );
+    });
   });
 
   describe("prompt failures", () => {
@@ -129,6 +275,41 @@ describe("ZcodeAdapterV2", () => {
       assert.equal(failure.code, "model_request_failed");
       assert.equal(failure.retryable, true);
       assert.equal(failure.message, "ZCode turn failed: rate limited");
+    });
+
+    it("maps the bridge's retryAfterMs onto a usage_limit resetAt", () => {
+      // @effect-diagnostics-next-line globalDate:off - asserting a wall-clock deadline
+      const before = Date.now();
+      const failure = zcodePromptFailure(
+        new EffectAcpErrors.AcpRequestError({
+          code: -32603,
+          errorMessage: "ZCode turn failed: quota exceeded",
+          data: {
+            type: "zcode_turn_failed",
+            code: "rate_limit",
+            statusCode: 429,
+            retryable: true,
+            retryAfterMs: 60_000,
+          },
+        }),
+      );
+      assert.equal(failure.class, "usage_limit");
+      const resetAt = failure.resetAt;
+      assert.isString(resetAt);
+      const resetAtMillis = Date.parse(resetAt!);
+      // @effect-diagnostics-next-line globalDate:off - asserting a wall-clock deadline
+      assert.isTrue(resetAtMillis >= before + 60_000 && resetAtMillis <= Date.now() + 60_000);
+
+      // Non-usage-limit failures keep retryAfterMs out of the failure payload.
+      const providerError = zcodePromptFailure(
+        new EffectAcpErrors.AcpRequestError({
+          code: -32603,
+          errorMessage: "ZCode turn failed: backend crashed",
+          data: { type: "zcode_turn_failed", statusCode: 500, retryAfterMs: 60_000 },
+        }),
+      );
+      assert.equal(providerError.class, "provider_error");
+      assert.isUndefined(providerError.resetAt);
     });
 
     it("keeps ordinary bridge and non-ACP errors as provider errors", () => {

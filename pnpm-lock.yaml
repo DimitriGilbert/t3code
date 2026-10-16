@@ -1544,6 +1544,9 @@ importers:
       '@t3tools/provider-core':
         specifier: workspace:*
         version: link:../provider-core
+      '@t3tools/provider-devin':
+        specifier: workspace:*
+        version: link:../provider-devin
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../shared

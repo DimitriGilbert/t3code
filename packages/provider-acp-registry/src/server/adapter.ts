@@ -7,7 +7,7 @@ import {
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
   extractDevinSubagentUpdate,
-} from "./devinAcp.ts";
+} from "@t3tools/provider-devin/server";
 import { extractDroidElicitationForm } from "./droidAcp.ts";
 import {
   copilotClientCapabilitiesMeta,

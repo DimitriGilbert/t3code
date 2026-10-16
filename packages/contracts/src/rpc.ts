@@ -413,6 +413,10 @@ import {
   WatchPageWithWidgetsResult,
   WatchWidgetAddInput,
   WatchWidgetConfigureInput,
+  WatchWidgetExportInput,
+  WatchWidgetExportResult,
+  WatchWidgetImportInput,
+  WatchWidgetImportResult,
   WatchWidgetMoveToPageInput,
   WatchWidgetRemoveInput,
   WatchWidgetRemoveResult,
@@ -426,6 +430,7 @@ import {
   WatchWidgetSourcePublishResult,
   WatchWidgetSourceRecord,
   WatchWidgetSourceSubscribeInput,
+  WatchWidgetTransferError,
 } from "./watch.ts";
 import {
   ProjectCloneActionInput,
@@ -671,6 +676,8 @@ export const WS_METHODS = {
   watchWidgetsSetLayout: "watchWidgets.setLayout",
   watchWidgetsSetMobileProjection: "watchWidgets.setMobileProjection",
   watchWidgetsMoveToPage: "watchWidgets.moveToPage",
+  watchWidgetsExport: "watchWidgets.export",
+  watchWidgetsImport: "watchWidgets.import",
   watchNotificationsSubscribe: "watchNotifications.subscribe",
   watchNotificationsHistory: "watchNotifications.history",
   watchNotificationsSetPrefs: "watchNotifications.setPrefs",
@@ -2142,6 +2149,44 @@ const WsWatchWidgetsMoveToPageRpc = Rpc.make(WS_METHODS.watchWidgetsMoveToPage, 
   error: WsWatchLayoutCheckedError,
 });
 
+const WsWatchWidgetExportError = Schema.Union([
+  WatchWidgetTransferError,
+  WatchPageError,
+  WatchWidgetSourceError,
+  EnvironmentAuthorizationError,
+]);
+const WsWatchWidgetImportError = Schema.Union([
+  WatchWidgetTransferError,
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  WatchLayoutCollisionError,
+  WatchWidgetSourceError,
+  EnvironmentAuthorizationError,
+]);
+
+/**
+ * Serializes one widget — kind, config, size hint, and (for `agent:` kinds)
+ * the authored source + bridge manifest — as a `t3.watch-widget` document.
+ * The document embeds the authored source, never the compiled artifact.
+ */
+const WsWatchWidgetsExportRpc = Rpc.make(WS_METHODS.watchWidgetsExport, {
+  payload: WatchWidgetExportInput,
+  success: WatchWidgetExportResult,
+  error: WsWatchWidgetExportError,
+});
+
+/**
+ * Lands a `t3.watch-widget` document on a page: embedded agent source is
+ * republished through the rate-limited pipeline and must recompute to the
+ * declared kind, `pack:` provenance is checked against live pack
+ * registrations, and the membership write is revision-checked.
+ */
+const WsWatchWidgetsImportRpc = Rpc.make(WS_METHODS.watchWidgetsImport, {
+  payload: WatchWidgetImportInput,
+  success: WatchWidgetImportResult,
+  error: WsWatchWidgetImportError,
+});
+
 const WsWatchNotificationReadError = Schema.Union([
   WatchNotificationError,
   EnvironmentAuthorizationError,
@@ -2587,6 +2632,8 @@ export const WsWatchRpcGroup = RpcGroup.make(
   WsWatchWidgetsSetLayoutRpc,
   WsWatchWidgetsSetMobileProjectionRpc,
   WsWatchWidgetsMoveToPageRpc,
+  WsWatchWidgetsExportRpc,
+  WsWatchWidgetsImportRpc,
   WsWatchNotificationsSubscribeRpc,
   WsWatchNotificationsHistoryRpc,
   WsWatchNotificationsSetPrefsRpc,

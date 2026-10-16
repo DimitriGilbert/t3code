@@ -65,6 +65,7 @@ import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { WorkspacePageHeader } from "~/components/WorkspacePageHeader";
 import { isElectron } from "~/env";
+import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { registerCommands } from "~/shortcuts/dispatcher";
 import { readLocalApi } from "~/localApi";
@@ -90,7 +91,9 @@ import { WatchNotificationBell } from "./WatchNotificationBell";
 import { WatchPageTabs } from "./WatchPageTabs";
 import { WatchThresholdAlertBadge } from "./WatchThresholdAlertBadge";
 import { WatchWidgetBody } from "./WatchWidgetBody";
+import { WatchWidgetImportDialog } from "./WatchWidgetImportDialog";
 import { WatchWidgetPickerDialog } from "./WatchWidgetPickerDialog";
+import { downloadWatchWidgetJson } from "./widgetExport";
 import { WatchConnectorSecretDialog } from "./widgets/WatchConnectorSecretDialog";
 import { useWatchAppMounts } from "./useWatchAppMounts";
 import { onWatchUiAction, type WatchUiAction } from "./watchUiBus";
@@ -105,6 +108,9 @@ type WidgetMenuAction =
   | "duplicate"
   | "move-to"
   | `move-to:${number}`
+  | "export"
+  | "export-copy"
+  | "export-download"
   | "remove";
 
 /**
@@ -419,6 +425,7 @@ export function WatchScreen() {
   );
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [pagesMenuOpen, setPagesMenuOpen] = useState(false);
   const [selectedPageId, setSelectedPageId] = useState<WatchPageId | null>(null);
   // Edit mode is per page; switching pages or going below the edit width
@@ -470,12 +477,13 @@ export function WatchScreen() {
   // The picker lists pack-registered widget sources; subscribe only while it
   // is open — the board's own subscription already covers mounted widgets.
   const pickerConnectorsQuery = useEnvironmentQuery(
-    pickerOpen && environmentId !== null
+    (pickerOpen || importOpen) && environmentId !== null
       ? watchEnvironment.connectorsLive({ environmentId, input: {} })
       : null,
   );
   const pickerPackSources = pickerConnectorsQuery.data?.widgetSources ?? [];
   const pickerInstances = pickerConnectorsQuery.data?.instances ?? [];
+  const pickerPacks = pickerConnectorsQuery.data?.packs ?? [];
 
   // The empty state previews the gallery, so it is fetched ahead of the dialog.
   const galleryQuery = useEnvironmentQuery(
@@ -494,6 +502,7 @@ export function WatchScreen() {
   const updatePageScope = useAtomCommand(watchEnvironment.updatePageScope);
   const instantiateFromGallery = useAtomCommand(watchEnvironment.instantiatePageFromGallery);
   const addWidget = useAtomCommand(watchEnvironment.addWidget);
+  const exportWidget = useAtomCommand(watchEnvironment.exportWidget);
   const removeWidget = useAtomCommand(watchEnvironment.removeWidget);
   const configureWidget = useAtomCommand(watchEnvironment.configureWidget);
   const setLayout = useAtomCommand(watchEnvironment.setLayout);
@@ -639,6 +648,15 @@ export function WatchScreen() {
           })),
         },
         {
+          id: "export",
+          label: "Export",
+          icon: "share",
+          children: [
+            { id: "export-copy", label: "Copy JSON" },
+            { id: "export-download", label: "Download file" },
+          ],
+        },
+        {
           id: "remove",
           label: "Remove",
           icon: "trash",
@@ -663,6 +681,48 @@ export function WatchScreen() {
         environmentId,
         input: buildWatchWidgetDuplicateInput(page, selectedWidgets, widget),
       }).then(reportWatchWriteResult);
+      return;
+    }
+    if (action === "export-copy" || action === "export-download") {
+      // One export call feeds either transport — clipboard or file.
+      void exportWidget({ environmentId, input: { widgetId: widget.id } }).then((result) => {
+        if (!AsyncResult.isSuccess(result)) {
+          // A read, not a page write — the write-path wording ("the watch
+          // change did not apply") does not fit a failed export.
+          if (!Cause.hasInterruptsOnly(result.cause)) {
+            const failure = squashAtomCommandFailure(result);
+            toastManager.add({
+              type: "error",
+              title: "Could not export the widget.",
+              description:
+                failure instanceof Error && failure.message !== ""
+                  ? failure.message
+                  : "The export was rejected.",
+            });
+          }
+          return;
+        }
+        const document = result.value.document;
+        if (action === "export-download") {
+          downloadWatchWidgetJson(document);
+          return;
+        }
+        writeTextToClipboard(JSON.stringify(document, null, 2), "widget export").then(
+          () => {
+            toastManager.add({
+              type: "success",
+              title: "Widget export copied to clipboard.",
+              timeout: 3000,
+            });
+          },
+          () => {
+            toastManager.add({
+              type: "error",
+              title: "Could not copy the widget export.",
+            });
+          },
+        );
+      });
       return;
     }
     if (action === "remove") {
@@ -1028,7 +1088,23 @@ export function WatchScreen() {
           onPick={handlePickWidget}
           packSources={pickerPackSources}
           onPickPackSource={handlePickPackSource}
+          onImport={() => {
+            setPickerOpen(false);
+            setImportOpen(true);
+          }}
         />
+        {importOpen && environmentId !== null && selectedPage !== null ? (
+          <WatchWidgetImportDialog
+            open
+            onOpenChange={setImportOpen}
+            environmentId={environmentId}
+            page={selectedPage}
+            widgets={selectedWidgets}
+            packs={pickerPacks}
+            instances={pickerInstances}
+            widgetSources={pickerPackSources}
+          />
+        ) : null}
       </div>
     </SidebarInset>
   );

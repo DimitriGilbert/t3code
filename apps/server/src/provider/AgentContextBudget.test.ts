@@ -35,6 +35,8 @@ import { SourceControlRepositoryService } from "../sourceControl/SourceControlRe
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import { ConnectorService } from "../watch/connectors/ConnectorService.ts";
+import { WatchPageService } from "../watch/WatchPageService.ts";
+import { WatchWidgetTransferService } from "../watch/WatchWidgetTransferService.ts";
 import { WidgetTranspileService } from "../watch/WidgetTranspileService.ts";
 import { UserNotificationService } from "../notifications/UserNotificationService.ts";
 import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
@@ -72,6 +74,8 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(VcsStatusBroadcaster)({}),
   Layer.mock(ConnectorService)({}),
   Layer.mock(UserNotificationService)({}),
+  Layer.mock(WatchPageService)({}),
+  Layer.mock(WatchWidgetTransferService)({}),
   Layer.mock(WidgetTranspileService)({}),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 

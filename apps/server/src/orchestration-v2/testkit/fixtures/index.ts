@@ -200,6 +200,16 @@ import { turnInterruptRestartInput } from "./turn_interrupt_restart/input.ts";
 import { assertClaudeWebSearchOutput } from "./web_search/claude_output.ts";
 import { assertWebSearchOutput } from "./web_search/codex_output.ts";
 import { webSearchInput } from "./web_search/input.ts";
+import { zcodeAskUserInput } from "./zcode_ask_user/input.ts";
+import { assertZcodeAskUserOutput } from "./zcode_ask_user/output.ts";
+import { zcodeBasicTurnInput } from "./zcode_basic_turn/input.ts";
+import { assertZcodeBasicTurnOutput } from "./zcode_basic_turn/output.ts";
+import { ZCODE_MODEL_SWITCH_TARGET, zcodeModelSwitchInput } from "./zcode_model_switch/input.ts";
+import { assertZcodeModelSwitchOutput } from "./zcode_model_switch/output.ts";
+import { zcodePermissionInput } from "./zcode_permission/input.ts";
+import { assertZcodePermissionOutput } from "./zcode_permission/output.ts";
+import { zcodePromptErrorInput } from "./zcode_prompt_error/input.ts";
+import { assertZcodePromptErrorOutput } from "./zcode_prompt_error/output.ts";
 import {
   ACP_REGISTRY_MODEL_SELECTION,
   CLAUDE_MODEL_SELECTION,
@@ -210,6 +220,7 @@ import {
   OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
   PI_MODEL_SELECTION,
+  ZCODE_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
   RESTRICTED_GRANULAR_POLICY,
@@ -1748,6 +1759,69 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         recordedScenario: "stop_background_work_after_failed_turn",
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
         assertOutput: assertStopBackgroundWorkAfterFailedTurnOutput,
+      },
+    ],
+  },
+  {
+    name: "zcode_basic_turn",
+    buildInput: zcodeBasicTurnInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("zcode"),
+        transcriptFile: new URL("./zcode_basic_turn/zcode_transcript.ndjson", import.meta.url),
+        modelSelection: ZCODE_MODEL_SELECTION,
+        assertOutput: assertZcodeBasicTurnOutput,
+      },
+    ],
+  },
+  {
+    name: "zcode_permission",
+    buildInput: zcodePermissionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("zcode"),
+        transcriptFile: new URL("./zcode_permission/zcode_transcript.ndjson", import.meta.url),
+        modelSelection: ZCODE_MODEL_SELECTION,
+        assertOutput: assertZcodePermissionOutput,
+      },
+    ],
+  },
+  {
+    name: "zcode_ask_user",
+    buildInput: zcodeAskUserInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("zcode"),
+        transcriptFile: new URL("./zcode_ask_user/zcode_transcript.ndjson", import.meta.url),
+        modelSelection: ZCODE_MODEL_SELECTION,
+        assertOutput: assertZcodeAskUserOutput,
+      },
+    ],
+  },
+  {
+    name: "zcode_model_switch",
+    buildInput: zcodeModelSwitchInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("zcode"),
+        transcriptFile: new URL("./zcode_model_switch/zcode_transcript.ndjson", import.meta.url),
+        modelSelection: {
+          ...ZCODE_MODEL_SELECTION,
+          model: ZCODE_MODEL_SWITCH_TARGET,
+        },
+        assertOutput: assertZcodeModelSwitchOutput,
+      },
+    ],
+  },
+  {
+    name: "zcode_prompt_error",
+    buildInput: zcodePromptErrorInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("zcode"),
+        transcriptFile: new URL("./zcode_prompt_error/zcode_transcript.ndjson", import.meta.url),
+        modelSelection: ZCODE_MODEL_SELECTION,
+        assertOutput: assertZcodePromptErrorOutput,
       },
     ],
   },

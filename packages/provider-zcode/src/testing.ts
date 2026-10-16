@@ -16,10 +16,24 @@ export {
 } from "./server/adapter.ts";
 export {
   ZCODE_ACP_AUTH_METHOD_ID,
+  ZCODE_ACP_SERVER_BIN,
   applyZcodeAcpModelSelection,
   buildZcodeAcpSpawnInput,
   makeZcodeAcpRuntime,
   zcodeAcpRuntimeProcessOwnership,
   zcodeAcpSpawnArgs,
 } from "./server/zcodeAcp.ts";
+export {
+  buildInitialZcodeProviderSnapshot,
+  checkZcodeProviderStatus,
+  enrichZcodeSnapshot,
+  ZCODE_DEFAULT_MODEL_SLUG,
+  zcodeCredentialFilesPresent,
+  zcodeHomePath,
+  zcodeModelsFromConfigOptions,
+  zcodeSlashCommandsFromCommands,
+  type ZcodeStatusProbeOptions,
+} from "./server/status.ts";
+export { makeZcodeAuth, ZCODE_LOGIN_METHOD_ID } from "./server/auth.ts";
+export { ZcodeDriver, type ZcodeDriverEnv } from "./server/driver.ts";
 export { ZCODE_DEFAULT_INSTANCE_ID, ZCODE_PROVIDER } from "./server/driverKind.ts";

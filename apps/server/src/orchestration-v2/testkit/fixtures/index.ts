@@ -36,6 +36,16 @@ import { claudeMcpToolPresentationInput } from "./claude_mcp_tool_presentation/i
 import { assertClaudeMcpToolPresentationOutput } from "./claude_mcp_tool_presentation/output.ts";
 import { claudeResultIsErrorInput } from "./claude_result_is_error/input.ts";
 import { assertClaudeResultIsErrorOutput } from "./claude_result_is_error/output.ts";
+import { devinAskUserInput } from "./devin_ask_user/input.ts";
+import { assertDevinAskUserOutput } from "./devin_ask_user/output.ts";
+import { devinBasicTurnInput } from "./devin_basic_turn/input.ts";
+import { assertDevinBasicTurnOutput } from "./devin_basic_turn/output.ts";
+import { DEVIN_MODEL_SWITCH_TARGET, devinModelSwitchInput } from "./devin_model_switch/input.ts";
+import { assertDevinModelSwitchOutput } from "./devin_model_switch/output.ts";
+import { devinPermissionInput } from "./devin_permission/input.ts";
+import { assertDevinPermissionOutput } from "./devin_permission/output.ts";
+import { devinPromptErrorInput } from "./devin_prompt_error/input.ts";
+import { assertDevinPromptErrorOutput } from "./devin_prompt_error/output.ts";
 import { grokAutoBlockedCommandInput } from "./grok_auto_blocked_command/input.ts";
 import { assertGrokAutoBlockedCommandOutput } from "./grok_auto_blocked_command/output.ts";
 import { grokBackgroundBashInput } from "./grok_background_bash/input.ts";
@@ -205,6 +215,7 @@ import {
   CLAUDE_MODEL_SELECTION,
   CODEX_MODEL_SELECTION,
   CURSOR_MODEL_SELECTION,
+  DEVIN_MODEL_SELECTION,
   GROK_MODEL_SELECTION,
   MUSE_MODEL_SELECTION,
   OPENCODE_MODEL_SELECTION,
@@ -1748,6 +1759,69 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         recordedScenario: "stop_background_work_after_failed_turn",
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
         assertOutput: assertStopBackgroundWorkAfterFailedTurnOutput,
+      },
+    ],
+  },
+  {
+    name: "devin_basic_turn",
+    buildInput: devinBasicTurnInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("devin"),
+        transcriptFile: new URL("./devin_basic_turn/devin_transcript.ndjson", import.meta.url),
+        modelSelection: DEVIN_MODEL_SELECTION,
+        assertOutput: assertDevinBasicTurnOutput,
+      },
+    ],
+  },
+  {
+    name: "devin_permission",
+    buildInput: devinPermissionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("devin"),
+        transcriptFile: new URL("./devin_permission/devin_transcript.ndjson", import.meta.url),
+        modelSelection: DEVIN_MODEL_SELECTION,
+        assertOutput: assertDevinPermissionOutput,
+      },
+    ],
+  },
+  {
+    name: "devin_ask_user",
+    buildInput: devinAskUserInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("devin"),
+        transcriptFile: new URL("./devin_ask_user/devin_transcript.ndjson", import.meta.url),
+        modelSelection: DEVIN_MODEL_SELECTION,
+        assertOutput: assertDevinAskUserOutput,
+      },
+    ],
+  },
+  {
+    name: "devin_model_switch",
+    buildInput: devinModelSwitchInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("devin"),
+        transcriptFile: new URL("./devin_model_switch/devin_transcript.ndjson", import.meta.url),
+        modelSelection: {
+          ...DEVIN_MODEL_SELECTION,
+          model: DEVIN_MODEL_SWITCH_TARGET,
+        },
+        assertOutput: assertDevinModelSwitchOutput,
+      },
+    ],
+  },
+  {
+    name: "devin_prompt_error",
+    buildInput: devinPromptErrorInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("devin"),
+        transcriptFile: new URL("./devin_prompt_error/devin_transcript.ndjson", import.meta.url),
+        modelSelection: DEVIN_MODEL_SELECTION,
+        assertOutput: assertDevinPromptErrorOutput,
       },
     ],
   },

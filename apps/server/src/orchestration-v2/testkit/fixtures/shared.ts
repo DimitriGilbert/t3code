@@ -384,6 +384,12 @@ export const ACP_REGISTRY_MODEL_SELECTION = {
   model: "default",
 } satisfies ModelSelection;
 
+/** "default" keeps the session's own model; `devin acp` resolves it from its model catalog. */
+export const DEVIN_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("devin"),
+  model: "default",
+} satisfies ModelSelection;
+
 export const READ_ONLY_ON_REQUEST_POLICY = {
   approvalPolicy: "on-request",
   sandboxPolicy: {

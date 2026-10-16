@@ -28,4 +28,17 @@ export {
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
 } from "./server/devinSessionUpdates.ts";
+export {
+  buildInitialDevinProviderSnapshot,
+  checkDevinProviderStatus,
+  DEVIN_DEFAULT_MODEL_SLUG,
+  devinCredentialFilePresent,
+  devinDataDirPath,
+  devinModelsFromConfigOptions,
+  devinSlashCommandsFromCommands,
+  enrichDevinSnapshot,
+  type DevinStatusProbeOptions,
+} from "./server/status.ts";
+export { DEVIN_LOGIN_METHOD_ID, makeDevinAuth } from "./server/auth.ts";
+export { DevinDriver, type DevinDriverEnv } from "./server/driver.ts";
 export { DEVIN_DEFAULT_INSTANCE_ID, DEVIN_PROVIDER } from "./server/driverKind.ts";

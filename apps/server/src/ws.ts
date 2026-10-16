@@ -123,6 +123,7 @@ import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as WatchPageService from "./watch/WatchPageService.ts";
 import * as WidgetTranspileService from "./watch/WidgetTranspileService.ts";
+import * as WatchWidgetTransferService from "./watch/WatchWidgetTransferService.ts";
 import * as ConnectorPoller from "./watch/connectors/ConnectorPoller.ts";
 import * as ConnectorService from "./watch/connectors/ConnectorService.ts";
 import * as UserNotificationService from "./notifications/UserNotificationService.ts";
@@ -580,6 +581,8 @@ const WS_WATCH_METHOD_TAGS = [
   WS_METHODS.watchWidgetsSetLayout,
   WS_METHODS.watchWidgetsSetMobileProjection,
   WS_METHODS.watchWidgetsMoveToPage,
+  WS_METHODS.watchWidgetsExport,
+  WS_METHODS.watchWidgetsImport,
   WS_METHODS.watchNotificationsSubscribe,
   WS_METHODS.watchNotificationsHistory,
   WS_METHODS.watchNotificationsSetPrefs,
@@ -632,6 +635,7 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
     const connectors = yield* ConnectorService.ConnectorService;
     const connectorPoller = yield* ConnectorPoller.ConnectorPoller;
     const widgetSources = yield* WidgetTranspileService.WidgetTranspileService;
+    const widgetTransfer = yield* WatchWidgetTransferService.WatchWidgetTransferService;
     return ServerWsWatchRpcGroup.of({
       [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
       [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
@@ -686,6 +690,14 @@ const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
       [WS_METHODS.watchWidgetsMoveToPage]: (input) =>
         Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
           Effect.andThen(watchPages.moveToPage(input)),
+        ),
+      [WS_METHODS.watchWidgetsExport]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
+          Effect.andThen(widgetTransfer.exportWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsImport]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(widgetTransfer.importWidget(input)),
         ),
       [WS_METHODS.watchNotificationsSubscribe]: (_input) => userNotifications.subscribe(),
       [WS_METHODS.watchNotificationsHistory]: (input) => userNotifications.history(input),

@@ -58,6 +58,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as WatchPageService from "../watch/WatchPageService.ts";
 import * as WidgetTranspileService from "../watch/WidgetTranspileService.ts";
+import * as WatchWidgetTransferService from "../watch/WatchWidgetTransferService.ts";
 import * as ConnectorPoller from "../watch/connectors/ConnectorPoller.ts";
 import * as ConnectorService from "../watch/connectors/ConnectorService.ts";
 import * as ConfirmationTokens from "../watch/connectors/ConfirmationTokens.ts";
@@ -373,6 +374,12 @@ const layerConnectorsProvided = ConnectorService.layer.pipe(
 const layerConnectorPollerProvided = ConnectorPoller.layer.pipe(
   Layer.provide(Layer.mergeAll(layerConnectorsProvided, layerUserNotificationsProvided)),
 );
+// provideMerge keeps the shared WatchPageService/WidgetTranspileService
+// instances in scope — a second page service would publish change signals a
+// subscriber on the first never sees.
+const layerWatchWidgetTransferProvided = WatchWidgetTransferService.layer.pipe(
+  Layer.provideMerge(Layer.mergeAll(WatchPageService.layer, layerWidgetTranspileProvided)),
+);
 
 export const layer = Layer.mergeAll(
   layerCommandOutputHubProvided,
@@ -400,6 +407,7 @@ export const layerProduction = Layer.mergeAll(
   ),
   WatchPageService.layer,
   layerWidgetTranspileProvided,
+  layerWatchWidgetTransferProvided,
   layerConnectorsProvided,
   layerConnectorPollerProvided,
   layerUserNotificationsProvided,

@@ -181,6 +181,19 @@ export function createWatchEnvironmentAtoms<R, E>(
       "environment-command:watch:widget-move-to-page",
       WS_METHODS.watchWidgetsMoveToPage,
     ),
+    /** Serializes one widget (and its authored agent source) as a t3.watch-widget document. */
+    exportWidget: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:watch:widget-export",
+      tag: WS_METHODS.watchWidgetsExport,
+    }),
+    /**
+     * A membership write like `addWidget` — the conflict → needsReload flag
+     * path applies because import is revision-checked server-side.
+     */
+    importWidget: revisionCheckedCommand(
+      "environment-command:watch:widget-import",
+      WS_METHODS.watchWidgetsImport,
+    ),
     /**
      * Connector instance config write — also the connector-status widget's
      * "Reconnect": the service bumps `updatedAt`, which restarts the poller

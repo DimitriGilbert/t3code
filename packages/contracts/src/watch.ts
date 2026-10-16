@@ -1180,3 +1180,110 @@ export const WatchConnectorStreamItem = ForwardCompatibleUnion(
   "type",
 );
 export type WatchConnectorStreamItem = typeof WatchConnectorStreamItem.Type;
+
+// ── Widget sharing ───────────────────────────────────────────────────────
+
+/** The `format` tag a widget export carries — guards against feeding random JSON into import. */
+export const WATCH_WIDGET_EXPORT_FORMAT = "t3.watch-widget";
+
+/** The only `formatVersion` this schema revision understands. */
+export const WATCH_WIDGET_EXPORT_FORMAT_VERSION = 1;
+
+/**
+ * The authored source + bridge manifest of an `agent:` widget, embedded so the
+ * document is self-contained across environments. This is the authored text,
+ * never the compiled bundle, artifact hash, or script hash — those are
+ * recomputed by the importing server's publish pipeline, never trusted.
+ */
+export const WatchWidgetExportEmbeddedSource = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  manifest: WatchWidgetBridgeManifest,
+});
+export type WatchWidgetExportEmbeddedSource = typeof WatchWidgetExportEmbeddedSource.Type;
+
+/**
+ * One watch widget as a portable document: no ids, revisions, timestamps, or
+ * placement x/y (only a size hint crosses). `config` exports verbatim;
+ * dangling bindings degrade into the typed `connectorMissing`/`projectMissing`
+ * states the user repoints via Configure.
+ */
+export const WatchWidgetExportDocument = Schema.Struct({
+  format: Schema.Literal(WATCH_WIDGET_EXPORT_FORMAT),
+  /**
+   * `PositiveInt`, not `Literal(1)`, so a document from a newer version fails
+   * at the service with a legible "unsupported version" rejection rather than
+   * a bare decode mismatch.
+   */
+  formatVersion: PositiveInt,
+  kind: WatchWidgetKind,
+  /** Only `pack:<packId>` is carried; `firstParty`/`agentPublished` derive from `kind`. */
+  provenance: Schema.optionalKey(WatchWidgetPackProvenance),
+  config: WatchWidgetConfig,
+  /** w/h/minCols only — the import's default placement appends below the page's widgets. */
+  sizeHint: Schema.optionalKey(
+    Schema.Struct({
+      w: PositiveInt,
+      h: PositiveInt,
+      minCols: Schema.optionalKey(PositiveInt),
+    }),
+  ),
+  /** Present for `agent:` kinds when the source record resolves; ignored for `pack:` provenance. */
+  source: Schema.optionalKey(WatchWidgetExportEmbeddedSource),
+});
+export type WatchWidgetExportDocument = typeof WatchWidgetExportDocument.Type;
+
+/** Why a widget export or import call itself was rejected. */
+export const WatchWidgetTransferErrorReason = Schema.Literals([
+  /** The document's `formatVersion` is not one this server understands. */
+  "unsupportedFormatVersion",
+  /** An `agent:` kind whose source record cannot be resolved on this server. */
+  "sourceUnavailable",
+  /** The embedded source republished to a different sourceId than the kind declares. */
+  "sourceIdMismatch",
+  "widgetNotFound",
+]);
+export type WatchWidgetTransferErrorReason = typeof WatchWidgetTransferErrorReason.Type;
+
+export class WatchWidgetTransferError extends Schema.TaggedError<WatchWidgetTransferError>()(
+  "WatchWidgetTransferError",
+  {
+    message: Schema.String,
+    reason: WatchWidgetTransferErrorReason,
+    widgetId: Schema.optionalKey(WatchWidgetId),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {}
+
+export const WatchWidgetExportInput = Schema.Struct({
+  widgetId: WatchWidgetId,
+});
+export type WatchWidgetExportInput = typeof WatchWidgetExportInput.Type;
+
+export const WatchWidgetExportResult = Schema.Struct({
+  document: WatchWidgetExportDocument,
+});
+export type WatchWidgetExportResult = typeof WatchWidgetExportResult.Type;
+
+/**
+ * Imports a widget export document onto a page. `expectedRevision` guards the
+ * membership write like `watchWidgets.add`; an omitted `placement` appends
+ * below the page's existing widgets.
+ */
+export const WatchWidgetImportInput = Schema.Struct({
+  pageId: WatchPageId,
+  expectedRevision: NonNegativeInt,
+  document: WatchWidgetExportDocument,
+  placement: Schema.optionalKey(WatchWidgetPlacement),
+});
+export type WatchWidgetImportInput = typeof WatchWidgetImportInput.Type;
+
+export const WatchWidgetImportResult = Schema.Struct({
+  widget: WatchWidget,
+  /**
+   * The resolved source record (republished for `agent:` kinds with embedded
+   * source, looked up otherwise); null for first-party kinds and uncached
+   * `pack:` records. A `failed` record still imports and warns the client.
+   */
+  source: Schema.NullOr(WatchWidgetSourceRecord),
+});
+export type WatchWidgetImportResult = typeof WatchWidgetImportResult.Type;

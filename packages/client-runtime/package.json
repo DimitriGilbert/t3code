@@ -371,6 +371,10 @@
       "types": "./src/state/watchPages.ts",
       "default": "./src/state/watchPages.ts"
     },
+    "./state/watch-transfer": {
+      "types": "./src/state/watchTransfer.ts",
+      "default": "./src/state/watchTransfer.ts"
+    },
     "./state/watch-widgets": {
       "types": "./src/state/watchWidgets.ts",
       "default": "./src/state/watchWidgets.ts"

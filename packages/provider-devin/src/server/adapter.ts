@@ -5,7 +5,10 @@
  *
  * @module provider-devin/server/adapter
  */
-import { type OrchestrationV2ProviderCapabilities } from "@t3tools/contracts";
+import {
+  type OrchestrationV2ProviderCapabilities,
+  type ProviderApprovalOption,
+} from "@t3tools/contracts";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -49,6 +52,7 @@ import { DevinSettings } from "../settings.ts";
 import { DEVIN_PROVIDER } from "./driverKind.ts";
 import { applyDevinAcpModelSelection, makeDevinAcpRuntime } from "./devinAcp.ts";
 import {
+  extractDevinProposedPlanMarkdown,
   extractDevinSubagentUpdate,
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
@@ -87,6 +91,13 @@ export const DevinProviderCapabilitiesV2 = {
   checkpointing: {
     ...AcpProviderCapabilitiesV2.checkpointing,
     providerCanReadConversationSnapshot: true,
+  },
+  planning: {
+    ...AcpProviderCapabilitiesV2.planning,
+    // Verified live: plan mode writes the plan through the `write_plan` tool
+    // (markdown in rawInput + an isPlanFileEdit diff), then asks approval via
+    // `exit_plan_mode`'s permission prompt.
+    emitsProposedPlan: true,
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
@@ -147,8 +158,9 @@ export function devinSessionModeForPolicy(
 /**
  * In Devin's `smart` session mode (the T3 `auto` runtime mode) the agent
  * auto-approves the actions it judges safe and only raises
- * `session/request_permission` for the rest — those asks are escalations,
- * not routine prompts. The generic disposition would auto-allow every one of
+ * `session/request_permission` for the rest (verified live: `rm` triggered
+ * an ask) — those asks are escalations, not routine prompts. The generic
+ * disposition would auto-allow every one of
  * them (kind `other` + no sandbox → allow), collapsing smart into bypass.
  * Escalate them to the user instead, the same way Grok's Auto and zcode's
  * guarded modes are handled. Explicit approval/sandbox overrides keep the
@@ -167,6 +179,30 @@ export function devinPermissionDisposition(
     return "ask";
   }
   return acpPermissionDisposition(policy, request);
+}
+
+/**
+ * Approval choices for a Devin `session/request_permission`. Devin emits
+ * standard option kinds but `allow_always` means different things per ask:
+ * `allow_session` (this command for the session) on `smart`-mode exec asks,
+ * `switch_accept_edits`/`switch_bypass` (a session-mode switch) on gated
+ * asks, and nothing at all on `exit_plan_mode` — where offering
+ * acceptForSession would answer the request as cancelled. Show the
+ * session-grant button only when Devin actually offered one.
+ */
+export function devinApprovalOptions(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): ReadonlyArray<ProviderApprovalOption> {
+  const has = (kind: EffectAcpSchema.PermissionOption["kind"]) =>
+    request.options.some((option) => option.kind === kind);
+  return [
+    { decision: "cancel", label: "Cancel" },
+    ...(has("reject_once") ? [{ decision: "decline", label: "Decline" } as const] : []),
+    ...(has("allow_always")
+      ? [{ decision: "acceptForSession", label: "Always allow this session" } as const]
+      : []),
+    ...(has("allow_once") ? [{ decision: "accept", label: "Approve" } as const] : []),
+  ];
 }
 
 /**
@@ -215,6 +251,7 @@ export function makeDevinAcpAdapterFlavor(options: DevinAdapterV2Options): AcpAd
     normalizeSessionUpdate: normalizeDevinSessionUpdate,
     normalizeToolCall: normalizeDevinToolCall,
     extractSubagentUpdate: extractDevinSubagentUpdate,
+    extractProposedPlanMarkdown: extractDevinProposedPlanMarkdown,
     // Devin has no `sessionCapabilities.resume`; its loadSession flag routes
     // resume through `session/load`, which replays session history.
     preferResumeSession: true,
@@ -225,6 +262,7 @@ export function makeDevinAcpAdapterFlavor(options: DevinAdapterV2Options): AcpAd
     supportsCompaction: true,
     sessionModeForPolicy: devinSessionModeForPolicy,
     permissionDisposition: devinPermissionDisposition,
+    approvalOptions: devinApprovalOptions,
     applyModelSelection: ({ runtime, modelSelection }) =>
       applyDevinAcpModelSelection({
         runtime,

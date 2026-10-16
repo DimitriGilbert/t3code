@@ -14,9 +14,11 @@ import {
   DevinProviderCapabilitiesV2,
   applyDevinAcpModelSelection,
   buildDevinAcpSpawnInput,
+  devinApprovalOptions,
   devinPermissionDisposition,
   devinPromptFailure,
   devinSessionModeForPolicy,
+  extractDevinProposedPlanMarkdown,
   extractDevinSubagentUpdate,
   makeDevinAcpAdapterFlavor,
   normalizeDevinSessionUpdate,
@@ -106,6 +108,7 @@ describe("DevinAdapterV2", () => {
     assert.isTrue(DevinProviderCapabilitiesV2.subagents.exposesSubagentThreadIds);
     assert.isTrue(DevinProviderCapabilitiesV2.subagents.emitsSubagentLifecycle);
     assert.isTrue(DevinProviderCapabilitiesV2.checkpointing.providerCanReadConversationSnapshot);
+    assert.isTrue(DevinProviderCapabilitiesV2.planning.emitsProposedPlan);
     assert.isTrue(flavor.preferResumeSession);
     assert.isTrue(flavor.supportsCompaction);
     assert.isTrue(flavor.supportsImagePrompts);
@@ -174,6 +177,45 @@ describe("DevinAdapterV2", () => {
         devinPermissionDisposition(policy("auto", { approvalPolicy: "never" }), request()),
         "allow",
       );
+    });
+  });
+
+  describe("approval options", () => {
+    // Shapes verified live: smart-mode exec asks offer `allow_session` /
+    // per-directory / global allow_always grants; plan exits offer only
+    // allow_once plan picks plus reject_once.
+    const options = (
+      entries: ReadonlyArray<readonly [string, "allow_once" | "allow_always" | "reject_once"]>,
+    ) => ({
+      sessionId: "session-1",
+      toolCall: { toolCallId: "call-1" },
+      options: entries.map(([optionId, kind]) => ({ optionId, kind, name: optionId })),
+    });
+
+    it("shows the session grant only when Devin offered allow_always", () => {
+      const decisions = devinApprovalOptions(
+        options([
+          ["allow_once", "allow_once"],
+          ["allow_session", "allow_always"],
+          ["allow_always", "allow_always"],
+          ["allow_always_global", "allow_always"],
+          ["reject_once", "reject_once"],
+        ]),
+      ).map((option) => option.decision);
+      assert.deepEqual(decisions, ["cancel", "decline", "acceptForSession", "accept"]);
+    });
+
+    it("hides acceptForSession on exit_plan_mode asks (no allow_always)", () => {
+      // The generic card's "always allow" would resolve no optionId and
+      // answer the request as cancelled — plan approvals must not offer it.
+      const decisions = devinApprovalOptions(
+        options([
+          ["plan_accept_edits", "allow_once"],
+          ["plan_bypass", "allow_once"],
+          ["reject_once", "reject_once"],
+        ]),
+      ).map((option) => option.decision);
+      assert.deepEqual(decisions, ["cancel", "decline", "accept"]);
     });
   });
 
@@ -262,6 +304,87 @@ describe("DevinAdapterV2", () => {
       assert.equal(completed?.status, "completed");
       assert.equal(completed?.result, "Wrote audit.py");
       assert.isUndefined(extractDevinSubagentUpdate(toolCall({})));
+    });
+
+    // Shapes verified against a live `devin acp` plan-mode turn: `write_plan`
+    // carries markdown in rawInput, `exit_plan_mode` only a summary.
+    describe("proposed plan extraction", () => {
+      it("reads rawInput.plan from the write_plan start frame", () => {
+        const markdown = extractDevinProposedPlanMarkdown({
+          toolCallId: "write_plan:0#abc",
+          status: "inProgress",
+          data: {
+            toolCallId: "write_plan:0#abc",
+            rawInput: { title: "Add hello.txt", plan: "## Steps\n1. Create hello.txt" },
+            meta: { "cognition.ai/inferenceToolName": "write_plan" },
+          },
+        });
+        assert.equal(markdown, "## Steps\n1. Create hello.txt");
+      });
+
+      it("prefers the full plan file content on the isPlanFileEdit frame", () => {
+        const markdown = extractDevinProposedPlanMarkdown({
+          toolCallId: "write_plan:0#abc",
+          status: "completed",
+          data: {
+            toolCallId: "write_plan:0#abc",
+            rawInput: {
+              file_path: "/home/x/.devin/plans/plan-1.md",
+              content: "# Add hello.txt\n\n## Steps\n1. Create hello.txt",
+            },
+            content: [
+              {
+                type: "diff",
+                path: "/home/x/.devin/plans/plan-1.md",
+                newText: "---\nagent: devin-local\n---\n# Add hello.txt",
+              },
+            ],
+            meta: {
+              "cognition.ai/isPlanFileEdit": true,
+              "cognition.ai/inferenceToolName": "write_plan",
+            },
+          },
+        });
+        assert.equal(markdown, "# Add hello.txt\n\n## Steps\n1. Create hello.txt");
+      });
+
+      it("strips devin-local frontmatter when only the plan-file diff is present", () => {
+        const markdown = extractDevinProposedPlanMarkdown({
+          toolCallId: "write_plan:0#abc",
+          status: "completed",
+          data: {
+            toolCallId: "write_plan:0#abc",
+            content: [
+              {
+                type: "diff",
+                path: "/home/x/.devin/plans/plan-1.md",
+                newText:
+                  "---\nagent: devin-local\nsession: s-1\n---\n# Add hello.txt\n\nDo the thing.",
+              },
+            ],
+            meta: { "cognition.ai/isPlanFileEdit": true },
+          },
+        });
+        assert.equal(markdown, "# Add hello.txt\n\nDo the thing.");
+      });
+
+      it("ignores exit_plan_mode summaries and ordinary tool calls", () => {
+        assert.isUndefined(
+          extractDevinProposedPlanMarkdown({
+            toolCallId: "exit_plan_mode:0#abc",
+            status: "inProgress",
+            data: {
+              toolCallId: "exit_plan_mode:0#abc",
+              rawInput: { plan: "Create hello.txt, then verify." },
+              meta: {
+                "cognition.ai/isExitPlan": true,
+                "cognition.ai/inferenceToolName": "exit_plan_mode",
+              },
+            },
+          }),
+        );
+        assert.isUndefined(extractDevinProposedPlanMarkdown(toolCall({})));
+      });
     });
   });
 

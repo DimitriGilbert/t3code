@@ -11,7 +11,12 @@ import {
 } from "../shared.ts";
 import { ZCODE_BASIC_TURN_PROMPT } from "./input.ts";
 
-/** One full-access turn: text deltas, a Bash tool call, then usage + end_turn. */
+/**
+ * One full-access turn: two reasoning streams on the wire before the tool
+ * call (the bridge's "Thinking…" placeholder item, then the model's own
+ * thought stream on a separate update messageId), a Bash tool call, then the
+ * assistant reply and end_turn.
+ */
 export function assertZcodeBasicTurnOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
@@ -21,7 +26,8 @@ export function assertZcodeBasicTurnOutput(
   assertSemanticProjectionIntegrity(projection);
   assertTurnItemTypeSequence(projection, [
     "user_message",
-    "assistant_message",
+    "reasoning",
+    "reasoning",
     "command_execution",
     "assistant_message",
     "checkpoint",
@@ -35,17 +41,26 @@ export function assertZcodeBasicTurnOutput(
       item.status,
       item.type === "command_execution" ? item.output : null,
     ]),
-    [["echo zcode basic turn fixture", "completed", "zcode basic turn fixture\n"]],
+    [["echo zcode basic turn fixture", "completed", "zcode basic turn fixture"]],
   );
+
+  const reasoningTexts = projection.turnItems.flatMap((item) =>
+    item.type === "reasoning" ? [item.text] : [],
+  );
+  assert.deepEqual(reasoningTexts, [
+    "Thinking…",
+    'The user wants me to run `echo zcode basic turn fixture` in the terminal and then respond with exactly "done".',
+  ]);
 
   const assistantTexts = projection.turnItems.flatMap((item) =>
     item.type === "assistant_message" ? [item.text] : [],
   );
-  assert.deepEqual(assistantTexts, ["Let me check ", "zcode basic turn fixture"]);
+  assert.deepEqual(assistantTexts, ["done"]);
 
-  // The bridge's usage_update surfaces as the thread's live context gauge.
+  // The bridge's usage_update surfaces as the thread's live context gauge;
+  // the last recorded update wins.
   assert.deepInclude(projection.providerThreads[0]?.contextUsage, {
-    usedTokens: 12400,
+    usedTokens: 24401,
     maxTokens: 200000,
   });
 }

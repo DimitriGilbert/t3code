@@ -60,7 +60,7 @@ import type { ServerProvider } from "@t3tools/contracts";
 import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as Scope from "effect/Scope";
 import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import { makeZcodeAcpRuntime, ZCODE_ACP_SERVER_BIN } from "./zcodeAcp.ts";
+import { makeZcodeAcpRuntime, ZCODE_ACP_SERVER_BIN, zcodeProviderConfigEnv } from "./zcodeAcp.ts";
 
 const ZCODE_PRESENTATION = {
   displayName: "ZCode",
@@ -331,10 +331,13 @@ const runZcodeBridgeCommand = (
   Effect.gen(function* () {
     const command = zcodeSettings.binaryPath || ZCODE_ACP_SERVER_BIN;
     const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+    // Same env the real session spawn gets: the bridge needs the headless
+    // provider-config files resolved or it boots the backend with no registry.
+    const childEnv = { ...zcodeProviderConfigEnv(environment), ...environment };
     return yield* spawnAndCollect(
       command,
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: environment,
+        env: childEnv,
         shell: spawnCommand.shell,
       }),
     );

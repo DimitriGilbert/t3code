@@ -20,11 +20,14 @@ export {
 export {
   ZCODE_ACP_AUTH_METHOD_ID,
   ZCODE_ACP_SERVER_BIN,
+  ZCODE_BUILTIN_PROVIDER_CONFIG_ENV,
+  ZCODE_PERSONAL_PROVIDER_CONFIG_ENV,
   applyZcodeAcpModelSelection,
   buildZcodeAcpSpawnInput,
   makeZcodeAcpRuntime,
   zcodeAcpRuntimeProcessOwnership,
   zcodeAcpSpawnArgs,
+  zcodeProviderConfigEnv,
 } from "./server/zcodeAcp.ts";
 export {
   buildInitialZcodeProviderSnapshot,

@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - spawn input must stat candidate
+// config files synchronously; the spawn builders are plain functions.
 /**
  * Launch and lifecycle support for the ZCode ACP bridge (`zcode-acp-server`,
  * npm package of the same name): spawn argv/env, the bridge auth method, and
@@ -5,6 +7,10 @@
  *
  * @module provider-zcode/server/zcodeAcp
  */
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -25,6 +31,15 @@ export const ZCODE_ACP_SERVER_BIN = "zcode-acp-server";
 
 /** Env var the bridge reads to locate the `zcode` backend binary. */
 const ZCODE_BIN_ENV = "ZCODE_BIN";
+
+/** Env var re-rooting the ZCode home directory (default `~/.zcode`). */
+const ZCODE_HOME_ENV = "ZCODE_HOME";
+
+/** Bridge env var pointing at the bundled provider registry. */
+export const ZCODE_BUILTIN_PROVIDER_CONFIG_ENV = "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE";
+
+/** Bridge env var pointing at the user's personal provider config. */
+export const ZCODE_PERSONAL_PROVIDER_CONFIG_ENV = "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE";
 
 type ZcodeAcpRuntimeSettings = Pick<ZcodeSettings, "binaryPath" | "zcodeBinaryPath">;
 
@@ -52,6 +67,43 @@ export function zcodeAcpSpawnArgs(command: string): ReadonlyArray<string> {
   return invokedAs === ZCODE_ACP_SERVER_BIN ? [] : ["server"];
 }
 
+const nonBlankEnvValue = (value: string | undefined): string | undefined =>
+  value !== undefined && value.trim() !== "" ? value : undefined;
+
+/**
+ * Provider-config env vars the bridge needs on a headless `~/.zcode` install.
+ * Its own resolution (`dist/backend/resolve.js` `builtinProviderEnv()`) only
+ * knows the desktop bundle's paths (macOS .app, Windows Programs); on a server
+ * install those don't exist, so the backend boots with no provider registry
+ * and every turn fails `CONFIGURATION_ERROR: Select a model before
+ * continuing`. Point the bridge at the well-known files under ZCODE_HOME
+ * instead — but only for variables the caller's environment leaves unset, so
+ * user overrides always win.
+ */
+export function zcodeProviderConfigEnv(
+  environment: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv {
+  const effective = environment ?? process.env;
+  const isSet = (name: string) => nonBlankEnvValue(effective[name]) !== undefined;
+  const zcodeHome =
+    nonBlankEnvValue(effective[ZCODE_HOME_ENV]) ?? NodePath.join(NodeOS.homedir(), ".zcode");
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, relativePath] of [
+    [
+      ZCODE_BUILTIN_PROVIDER_CONFIG_ENV,
+      NodePath.join("v2", "runtime", "provider", "bundled", "zcode-builtin.json"),
+    ],
+    [ZCODE_PERSONAL_PROVIDER_CONFIG_ENV, NodePath.join("v2", "provider_config.json")],
+  ] as const) {
+    if (isSet(name)) continue;
+    const candidate = NodePath.join(zcodeHome, relativePath);
+    if (NodeFS.existsSync(candidate)) {
+      env[name] = candidate;
+    }
+  }
+  return env;
+}
+
 export function buildZcodeAcpSpawnInput(
   settings: ZcodeAcpRuntimeSettings | null | undefined,
   cwd: string,
@@ -64,6 +116,7 @@ export function buildZcodeAcpSpawnInput(
     args: zcodeAcpSpawnArgs(command),
     cwd,
     env: {
+      ...zcodeProviderConfigEnv(environment),
       ...environment,
       ...(zcodeBinaryPath ? { [ZCODE_BIN_ENV]: zcodeBinaryPath } : {}),
     },

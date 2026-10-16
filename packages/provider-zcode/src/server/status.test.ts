@@ -112,6 +112,41 @@ it.layer(NodeServices.layer)("Zcode status", (it) => {
     ),
   );
 
+  it.effect("hands the bridge the headless ZCODE_HOME provider config files", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "zcode-status-" });
+        const zcodeHome = path.join(directory, "zcode-home");
+        const bundledDir = path.join(zcodeHome, "v2", "runtime", "provider", "bundled");
+        yield* fs.makeDirectory(bundledDir, { recursive: true });
+        const builtin = path.join(bundledDir, "zcode-builtin.json");
+        const personal = path.join(zcodeHome, "v2", "provider_config.json");
+        yield* fs.writeFileString(builtin, "{}");
+        yield* fs.writeFileString(personal, "{}");
+        // The fake bridge records the env it was spawned with; the --version
+        // probe is enough — the session runtime takes the same spawn env path.
+        const envLog = path.join(directory, "bridge-env.json");
+        const bridge = fakeBridge(
+          directory,
+          [
+            'import { writeFileSync } from "node:fs";',
+            `writeFileSync(${JSON.stringify(envLog)}, JSON.stringify({ builtin: process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE ?? null, personal: process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE ?? null }));`,
+            'process.stdout.write("zcode-acp-server 0.72.0\\n");',
+          ].join("\n"),
+        );
+        yield* checkZcodeProviderStatus(settings({ enabled: true, binaryPath: bridge }), {
+          PATH: nodeOnlyPath(),
+          ZCODE_HOME: zcodeHome,
+          ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: "/custom/override.json",
+        });
+        const recorded = JSON.parse(yield* fs.readFileString(envLog));
+        expect(recorded).toEqual({ builtin, personal: "/custom/override.json" });
+      }),
+    ),
+  );
+
   it.effect("reports unauthenticated when the probe hits auth-required", () =>
     Effect.scoped(
       Effect.gen(function* () {

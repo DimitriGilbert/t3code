@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off - temp dirs for spawn-env file checks.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderInstanceId, type RuntimeMode } from "@t3tools/contracts";
 import { ZcodeSettings } from "@t3tools/provider-zcode/settings";
@@ -7,6 +12,8 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import {
+  ZCODE_BUILTIN_PROVIDER_CONFIG_ENV,
+  ZCODE_PERSONAL_PROVIDER_CONFIG_ENV,
   ZCODE_PROVIDER,
   ZcodeAdapterV2Driver,
   ZcodeProviderCapabilitiesV2,
@@ -73,6 +80,60 @@ describe("ZcodeAdapterV2", () => {
       assert.equal(configured.command, "zcode-acp");
       assert.deepEqual(configured.args, ["server"]);
       assert.equal(configured.env?.ZCODE_BIN, "/opt/zcode/bin/zcode");
+    });
+
+    it("points the bridge at headless ZCODE_HOME provider config files it cannot find itself", () => {
+      // The bridge's builtinProviderEnv() only knows desktop bundle paths, so
+      // on a `~/.zcode` server install the backend gets no provider registry
+      // and every turn fails "Select a model before continuing". T3 resolves
+      // the well-known files itself — only when they exist and the caller has
+      // not set the variable.
+      const zcodeHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "zcode-home-"));
+      const builtin = NodePath.join(
+        zcodeHome,
+        "v2",
+        "runtime",
+        "provider",
+        "bundled",
+        "zcode-builtin.json",
+      );
+      const personal = NodePath.join(zcodeHome, "v2", "provider_config.json");
+      NodeFS.mkdirSync(NodePath.dirname(builtin), { recursive: true });
+      NodeFS.writeFileSync(builtin, "{}");
+      NodeFS.writeFileSync(personal, "{}");
+
+      const spawn = buildZcodeAcpSpawnInput(decodeZcodeSettings({}), "/workspace", {
+        ZCODE_HOME: zcodeHome,
+      });
+      assert.equal(spawn.env?.[ZCODE_BUILTIN_PROVIDER_CONFIG_ENV], builtin);
+      assert.equal(spawn.env?.[ZCODE_PERSONAL_PROVIDER_CONFIG_ENV], personal);
+    });
+
+    it("skips missing provider config files and keeps caller-set overrides", () => {
+      const emptyHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "zcode-empty-"));
+      const empty = buildZcodeAcpSpawnInput(decodeZcodeSettings({}), "/workspace", {
+        ZCODE_HOME: emptyHome,
+      });
+      assert.isUndefined(empty.env?.[ZCODE_BUILTIN_PROVIDER_CONFIG_ENV]);
+      assert.isUndefined(empty.env?.[ZCODE_PERSONAL_PROVIDER_CONFIG_ENV]);
+
+      const zcodeHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "zcode-home-"));
+      const builtin = NodePath.join(
+        zcodeHome,
+        "v2",
+        "runtime",
+        "provider",
+        "bundled",
+        "zcode-builtin.json",
+      );
+      NodeFS.mkdirSync(NodePath.dirname(builtin), { recursive: true });
+      NodeFS.writeFileSync(builtin, "{}");
+      const overridden = buildZcodeAcpSpawnInput(decodeZcodeSettings({}), "/workspace", {
+        ZCODE_HOME: zcodeHome,
+        [ZCODE_PERSONAL_PROVIDER_CONFIG_ENV]: "/custom/personal.json",
+      });
+      assert.equal(overridden.env?.[ZCODE_BUILTIN_PROVIDER_CONFIG_ENV], builtin);
+      assert.equal(overridden.env?.[ZCODE_PERSONAL_PROVIDER_CONFIG_ENV], "/custom/personal.json");
     });
   });
 

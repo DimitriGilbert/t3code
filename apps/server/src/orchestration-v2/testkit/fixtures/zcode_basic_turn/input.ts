@@ -1,12 +1,12 @@
 import type { OrchestratorFixtureInput } from "../shared.ts";
 
-export const ZCODE_BASIC_TURN_PROMPT = "Respond with exactly: zcode basic turn fixture";
+export const ZCODE_BASIC_TURN_PROMPT =
+  "Run `echo zcode basic turn fixture` in the terminal, then respond with exactly: done";
 
 /**
- * Hand-authored: the bridge's ACP surface is stable JSON-RPC, and no live
- * `zcode-acp-server`/`zcode` pair exists in CI. Shapes mirror
- * zcode-acp-server@0.72.0 (`dist/server.js` initialize, `dist/config/options.js`
- * buildConfigOptions/buildModes, `dist/handlers/dispatch.js` update kinds).
+ * Recorded live via `scripts/record-zcode-acp-replay-fixture.ts` against a real
+ * `zcode-acp-server` + headless `~/.zcode` backend: reasoning chunks
+ * (`agent_thought_chunk`), a terminal tool call, then the assistant reply.
  */
 export function zcodeBasicTurnInput(): OrchestratorFixtureInput {
   return {

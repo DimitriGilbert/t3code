@@ -29,18 +29,11 @@ import * as ServerConfig from "../../config.ts";
  * Pack layout: a directory holding `manifest.json` plus the pack's UTF-8
  * source files. A local install reads such a directory verbatim. A URL
  * install fetches one JSON document `{manifest, files: {<relPath>: source>}}`
- * — the same bundle in wire form, with `manifest.json` synthesized from the
- * decoded manifest so both origins produce the same file set and the same
- * content hash.
- *
- * Installed packs live under `<stateDir>/connectors/<packId>/<contentHash>/`.
- * The hash is the pin: every read back re-hashes the stored files and a
- * mismatch refuses to hand out code.
  */
 
-export const MAX_PACK_FILES = 128;
-export const MAX_PACK_FILE_BYTES = 512 * 1024;
-export const MAX_PACK_BUNDLE_BYTES = 2 * 1024 * 1024;
+const MAX_PACK_FILES = 128;
+const MAX_PACK_FILE_BYTES = 512 * 1024;
+const MAX_PACK_BUNDLE_BYTES = 2 * 1024 * 1024;
 const MAX_REDIRECT_HOPS = 5;
 const FETCH_TIMEOUT = "30 seconds";
 
@@ -66,7 +59,7 @@ const connectorError = (
   });
 
 /** Stable byte identity of a file set: sorted names, NUL-separated. */
-export const hashPackFiles = (files: Readonly<Record<string, string>>): string => {
+const hashPackFiles = (files: Readonly<Record<string, string>>): string => {
   const hash = NodeCrypto.createHash("sha256");
   for (const name of Object.keys(files).sort()) {
     hash.update(name, "utf8");
@@ -438,8 +431,6 @@ const packFetchFailure = (message: string, cause?: unknown) =>
  * Resolves `host` once into every address it stands for — IP literals return
  * as-is. The caller range-checks the list ({@link isLocalAddress}) and pins
  * the connection to it ({@link pinnedLookup}), so a name that re-resolves to
- * something else later (DNS rebinding) changes nothing. Shared by the pack
- * install path and the runtime egress gate.
  */
 export const resolveHostAddresses = async (
   host: string,

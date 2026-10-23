@@ -3,20 +3,6 @@
 // watch-screen tests (the real CLI is not on PATH in the test environment):
 // it emits `<projectDir>/.clanker/runs/<runId>/state.json` in Clanker's
 // PersistedRunState shape — rewritten on every step transition like the real
-// runner — and `result.json` when the run ends. A file-transport connector
-// instance watching `<projectDir>/.clanker` picks the writes up through the
-// normal watch path.
-//
-// Usage:
-//   node stub-clanker.mjs <projectDir> [--run-id <id>] [--workflow <name>]
-//       [--steps a,b,c] [--step-delay-ms <ms>] [--fail-at <step>]
-//
-//   --run-id         run directory name (default: run-<unix ms>)
-//   --workflow       workflow name recorded on the state file (default: fixture-flow)
-//   --steps          comma-separated step names (default: plan,build,verify)
-//   --step-delay-ms  delay between step transitions (default: 0 — write
-//                    immediately; the watch path debounces bursts)
-//   --fail-at        mark the named step failed and end the run as failed
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 

@@ -53,16 +53,7 @@ import { watchEnvironment } from "~/state/watch";
 /**
  * The human gate for connector pack installs and upgrades. `Dialog`, one per
  * pending request:
- *
  * - identity (pack id + origin), pinned content hash, declared egress hosts,
- *   and declared secret key names — never values;
- * - on upgrades, the pending manifest diffed against the approved one;
- * - a `localUrl` request renders nothing it fetched: the "local URL" review
- *   acknowledgement runs `prepareInstallConfirm` first, which performs the
- *   deferred fetch under that acknowledgement — then the fetched manifest is
- *   shown and the review acknowledgement must be given again, as a fresh act;
- * - confirm spends the single-use token prepare minted — the token never
- *   leaves this dialog.
  */
 
 function PermissionGroup(props: {

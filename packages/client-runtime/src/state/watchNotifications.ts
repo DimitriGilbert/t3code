@@ -20,17 +20,6 @@ import {
  * Per-channel delivery for watch notifications. The server emits every
  * notification once and always records history; whether a given channel
  * surfaces it is decided here, shared by web, desktop, and later mobile push.
- *
- * Channel identity is the connected client session: each WS/browser session
- * (every tab, every window) is its own channel, so dedupe is per
- * `(notificationId, channel)` — suppressing one tab never suppresses another.
- * The desktop-native delivery path shares the `DESKTOP_NATIVE_CHANNEL` id,
- * but the delivered set behind it is per-window bookkeeping: two unattended
- * windows can each construct a `Notification` for one event. What actually
- * dedupes across windows is the platform `Notification` `tag`
- * (`watch:<environmentId>:<notificationId>`) — a same-tag notification
- * replaces the earlier one rather than stacking. Cross-window leader routing,
- * where a single window owns native delivery, is deferred.
  */
 
 /**
@@ -56,9 +45,6 @@ function notificationPageId(notification: WatchNotificationEvent) {
  * Whether this notification may be delivered at all under `prefs` at `now`
  * (epoch millis): not snoozed, not muted by event type, not muted by page.
  * A notification type this build does not know is skipped — the client cannot
- * render it, and skipping mirrors the wire codec's unknown-member default.
- * Returning true narrows the notification to a known member so callers can
- * read its fields without a second unknown check.
  */
 export function isWatchNotificationDeliverable(input: {
   readonly notification: WatchNotificationEvent;
@@ -128,16 +114,7 @@ export interface WatchNotificationDelivery {
 /**
  * The per-client routing decision for one notification event. Delivery is
  * always a channel decision, never a server-side drop:
- *
  * - A client actively viewing the notification's thread suppresses its own
- *   delivery on both channels (the event is already on screen).
- * - An attended window (visible + focused) takes the in-app channel — a
- *   toast; an unattended window takes the desktop-native channel — one
- *   `Notification`, deduped device-wide by the native `tag`.
- * - The `(notificationId, channel)` dedupe key keeps this window's channels
- *   from firing twice — the delivered sets are per-window bookkeeping, so
- *   only the native `tag` spans windows — and prefs filtering runs before any
- *   surface check.
  */
 export function resolveWatchNotificationDelivery(input: {
   readonly notification: WatchNotificationEvent;

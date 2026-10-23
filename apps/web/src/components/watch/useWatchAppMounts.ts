@@ -5,15 +5,12 @@ import {
   type WatchAppMountState,
 } from "@t3tools/client-runtime/state/watch-mounts";
 import type { WatchWidget, WatchWidgetId } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * The board-side half of agent-frame mount governance: one
  * `WatchAppMountRegistry` per (environment, page) — a page switch or
  * environment swap reseats every widget through fresh visibility reports —
- * plus the React state the registry's change list drives.
- * `WatchAppWidget` reports `IntersectionObserver` entries through
- * `reportVisibility`; `stateOf` is what each widget renders with.
  */
 export function useWatchAppMounts(input: {
   readonly registryKey: string;
@@ -39,14 +36,14 @@ export function useWatchAppMounts(input: {
   const registry = bound.registry;
   const states = bound.states;
 
-  const applyChanges = useCallback((changes: ReadonlyArray<WatchAppMountChange>) => {
+  const applyChanges = (changes: ReadonlyArray<WatchAppMountChange>) => {
     if (changes.length === 0) return;
     setBound((current) => {
       const next = { ...current.states };
       for (const change of changes) next[change.id] = change.state;
       return { ...current, states: next };
     });
-  }, []);
+  };
 
   // Widgets removed from the page release their mount seat and can promote a
   // standby placeholder without waiting for a visibility change.
@@ -74,28 +71,19 @@ export function useWatchAppMounts(input: {
 
   // Only `agent:` kinds hold mount seats — a stray report for a first-party
   // widget must not occupy one.
-  const reportVisibility = useCallback(
-    (widgetId: WatchWidgetId, visible: boolean) => {
-      const widget = widgets.find((entry) => entry.id === widgetId);
-      if (widget === undefined || watchAgentSourceId(widget.kind) === undefined) return;
-      applyChanges(visible ? registry.setVisible(widgetId) : registry.setHidden(widgetId));
-    },
-    [applyChanges, registry, widgets],
-  );
+  const reportVisibility = (widgetId: WatchWidgetId, visible: boolean) => {
+    const widget = widgets.find((entry) => entry.id === widgetId);
+    if (widget === undefined || watchAgentSourceId(widget.kind) === undefined) return;
+    applyChanges(visible ? registry.setVisible(widgetId) : registry.setHidden(widgetId));
+  };
 
-  const requestMount = useCallback(
-    (widgetId: WatchWidgetId) => {
-      const widget = widgets.find((entry) => entry.id === widgetId);
-      if (widget === undefined || watchAgentSourceId(widget.kind) === undefined) return;
-      applyChanges(registry.requestMount(widgetId));
-    },
-    [applyChanges, registry, widgets],
-  );
+  const requestMount = (widgetId: WatchWidgetId) => {
+    const widget = widgets.find((entry) => entry.id === widgetId);
+    if (widget === undefined || watchAgentSourceId(widget.kind) === undefined) return;
+    applyChanges(registry.requestMount(widgetId));
+  };
 
-  const stateOf = useCallback(
-    (widgetId: WatchWidgetId): WatchAppMountState => states[widgetId] ?? "unmounted",
-    [states],
-  );
+  const stateOf = (widgetId: WatchWidgetId): WatchAppMountState => states[widgetId] ?? "unmounted";
 
   return { stateOf, reportVisibility, requestMount } as const;
 }

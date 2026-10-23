@@ -223,8 +223,6 @@ const orderKeyAfter = (last: string) => `${last}n`;
  * `orderKeyBetween` that steps past keys held by rows outside the rewrite
  * set — archived pages keep their keys, so a minted key landing on one
  * collides in the `order_key` ordering. Each retry mints closer to `after`,
- * so the reserved set can only be hit finitely many times. Mirrors the
- * client-side `planPinnedReorder` reserved-keys loop (threadSort.ts).
  */
 const orderKeyBetweenUnreserved = (
   before: string | null,
@@ -406,11 +404,11 @@ export const layer = Layer.effect(
     const changesPubSub = yield* PubSub.sliding<void>(1);
     const notifyChanged = PubSub.publish(changesPubSub, undefined).pipe(Effect.asVoid);
 
-    const newPageId = crypto.randomUUIDv4.pipe(
+    const newPageId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) => WatchPageId.make(`watch-page:${uuid}`)),
       Effect.mapError((cause) => watchError("Could not generate watch page id.", { cause })),
     );
-    const newWidgetId = crypto.randomUUIDv4.pipe(
+    const newWidgetId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) => WatchWidgetId.make(`watch-widget:${uuid}`)),
       Effect.mapError((cause) => watchError("Could not generate watch widget id.", { cause })),
     );
@@ -537,15 +535,14 @@ export const layer = Layer.effect(
       return yield* failRevisionMiss(pageId, expectedMobileRevision, true);
     });
 
-    const pageWithWidgets = (pageId: WatchPageId) =>
-      Effect.gen(function* () {
-        const page = yield* findPage(pageId);
-        if (page === null) {
-          return yield* watchError("Watch page not found.", { pageId });
-        }
-        const widgets = yield* widgetsForPage(pageId);
-        return { page, widgets };
-      });
+    const pageWithWidgets = Effect.fn("pageWithWidgets")(function* (pageId: WatchPageId) {
+      const page = yield* findPage(pageId);
+      if (page === null) {
+        return yield* watchError("Watch page not found.", { pageId });
+      }
+      const widgets = yield* widgetsForPage(pageId);
+      return { page, widgets };
+    });
 
     // Archived rows count toward the max: a page created while the max-keyed
     // page is archived must still append after it, or restoring that page
@@ -577,19 +574,15 @@ export const layer = Layer.effect(
      * A `pack:` marker renders as "installed by connector pack X" chrome, so
      * it is only written when the pack actually registered this widget kind's
      * source — a caller cannot mint the badge for an arbitrary `agent:` kind.
-     * The join through `watch_connector_packs` follows
-     * `ConnectorService.selectWidgetSourceRows`: an archived pack's sources
-     * are not live, so they cannot be freshly mounted under `pack:` either.
      */
-    const assertPackProvenance = (
+    const assertPackProvenance = Effect.fn("assertPackProvenance")(function* (
       pageId: WatchPageId,
       kind: string,
       provenance: `pack:${string}`,
-    ) =>
-      Effect.gen(function* () {
-        const packId = provenance.slice("pack:".length);
-        const sourceId = kind.slice("agent:".length);
-        const rows = yield* sql<{ source_id: string }>`
+    ) {
+      const packId = provenance.slice("pack:".length);
+      const sourceId = kind.slice("agent:".length);
+      const rows = yield* sql<{ source_id: string }>`
           SELECT s.source_id
           FROM watch_pack_widget_sources s
           JOIN watch_connector_packs p
@@ -599,16 +592,16 @@ export const layer = Layer.effect(
             AND p.archived_at IS NULL
           LIMIT 1
         `;
-        if (rows.length === 0) {
-          return yield* watchError(
-            `Pack provenance "${provenance}" does not match a live widget source registered for "${kind}".`,
-            { pageId },
-          );
-        }
-      });
+      if (rows.length === 0) {
+        return yield* watchError(
+          `Pack provenance "${provenance}" does not match a live widget source registered for "${kind}".`,
+          { pageId },
+        );
+      }
+    });
 
-    const list: WatchPageService["Service"]["list"] = (input) =>
-      Effect.gen(function* () {
+    const list: WatchPageService["Service"]["list"] = Effect.fn("WatchPageService.list")(
+      function* (input) {
         const includeArchived = input.includeArchived === true;
         const pageRows = yield* selectPageRows({ includeArchived });
         const pages = yield* Effect.forEach(pageRows, decodePageRow, { concurrency: 1 });
@@ -620,7 +613,9 @@ export const layer = Layer.effect(
                 Effect.flatMap((rows) => Effect.forEach(rows, decodeWidgetRow, { concurrency: 1 })),
               );
         return { pages, widgets };
-      }).pipe(Effect.mapError((cause) => watchError("Could not list watch pages.", { cause })));
+      },
+      Effect.mapError((cause) => watchError("Could not list watch pages.", { cause })),
+    );
 
     const subscribeList: WatchPageService["Service"]["subscribeList"] = (input) =>
       Stream.unwrap(
@@ -638,8 +633,8 @@ export const layer = Layer.effect(
     const listGallery: WatchPageService["Service"]["listGallery"] = () =>
       Effect.succeed({ templates: [...WATCH_GALLERY_TEMPLATES] });
 
-    const create: WatchPageService["Service"]["create"] = (input) =>
-      Effect.gen(function* () {
+    const create: WatchPageService["Service"]["create"] = Effect.fn("WatchPageService.create")(
+      function* (input) {
         const scope = input.scope ?? "global";
         const projectId = scope === "project" ? (input.projectId ?? null) : null;
         if (scope === "project" && projectId === null) {
@@ -671,23 +666,23 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { page };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause) ? cause : watchError("Could not create watch page.", { cause }),
-        ),
-      );
+      },
+      Effect.mapError((cause) =>
+        isTypedWatchError(cause) ? cause : watchError("Could not create watch page.", { cause }),
+      ),
+    );
 
-    const rename: WatchPageService["Service"]["rename"] = (input) =>
-      Effect.gen(function* () {
+    const rename: WatchPageService["Service"]["rename"] = Effect.fn("WatchPageService.rename")(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         const rows = yield* sql<{ page_id: string }>`
-          UPDATE watch_pages
-          SET name = ${input.name},
-              revision = revision + 1,
-              updated_at = ${nowIso}
-          WHERE page_id = ${input.pageId} AND archived_at IS NULL
-          RETURNING page_id
-        `;
+        UPDATE watch_pages
+        SET name = ${input.name},
+            revision = revision + 1,
+            updated_at = ${nowIso}
+        WHERE page_id = ${input.pageId} AND archived_at IS NULL
+        RETURNING page_id
+      `;
         const page = yield* findPage(input.pageId);
         if (rows.length === 0) {
           if (page === null)
@@ -699,19 +694,22 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { page };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not rename watch page.", {
-                pageId: input.pageId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not rename watch page.", {
+                  pageId: input.pageId,
+                  cause,
+                }),
+          ),
         ),
-      );
+    );
 
-    const reorder: WatchPageService["Service"]["reorder"] = (input) =>
-      Effect.gen(function* () {
+    const reorder: WatchPageService["Service"]["reorder"] = Effect.fn("WatchPageService.reorder")(
+      function* (input) {
         if (input.beforePageId === input.pageId) {
           const page = yield* findPage(input.pageId);
           if (page === null) {
@@ -751,10 +749,10 @@ export const layer = Layer.effect(
             );
             if (orderKey !== null) {
               yield* sql`
-                UPDATE watch_pages
-                SET order_key = ${orderKey}, updated_at = ${nowIso}
-                WHERE page_id = ${input.pageId}
-              `;
+              UPDATE watch_pages
+              SET order_key = ${orderKey}, updated_at = ${nowIso}
+              WHERE page_id = ${input.pageId}
+            `;
             } else {
               // Corrupt neighbor keys leave no midpoint: rewrite the whole order.
               const reordered = [
@@ -767,10 +765,10 @@ export const layer = Layer.effect(
                 reordered,
                 (page, index) =>
                   sql`
-                    UPDATE watch_pages
-                    SET order_key = ${keys[index]!}, updated_at = ${nowIso}
-                    WHERE page_id = ${page.id}
-                  `,
+                  UPDATE watch_pages
+                  SET order_key = ${keys[index]!}, updated_at = ${nowIso}
+                  WHERE page_id = ${page.id}
+                `,
                 { concurrency: 1, discard: true },
               );
             }
@@ -782,13 +780,16 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { page };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not reorder watch page.", { pageId: input.pageId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not reorder watch page.", { pageId: input.pageId, cause }),
+          ),
         ),
-      );
+    );
 
     const insertPageRow = (page: {
       readonly id: WatchPageId;
@@ -844,8 +845,10 @@ export const layer = Layer.effect(
         })}
       `;
 
-    const duplicate: WatchPageService["Service"]["duplicate"] = (input) =>
-      Effect.gen(function* () {
+    const duplicate: WatchPageService["Service"]["duplicate"] = Effect.fn(
+      "WatchPageService.duplicate",
+    )(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         const newId = yield* newPageId;
         yield* sql.withTransaction(
@@ -858,11 +861,11 @@ export const layer = Layer.effect(
               return yield* watchError("Watch page is archived.", { pageId: input.pageId });
             }
             const nextRows = yield* sql<{ order_key: string }>`
-              SELECT order_key FROM watch_pages
-              WHERE archived_at IS NULL AND order_key > ${source.orderKey}
-              ORDER BY order_key ASC, page_id ASC
-              LIMIT 1
-            `;
+            SELECT order_key FROM watch_pages
+            WHERE archived_at IS NULL AND order_key > ${source.orderKey}
+            ORDER BY order_key ASC, page_id ASC
+            LIMIT 1
+          `;
             // Archived rows between source and the next live page hold keys
             // the copy must not mint — reserved keys step past them.
             const reservedKeys = yield* archivedOrderKeys(source.orderKey);
@@ -907,13 +910,16 @@ export const layer = Layer.effect(
         const result = yield* pageWithWidgets(newId);
         yield* notifyChanged;
         return result;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not duplicate watch page.", { pageId: input.pageId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not duplicate watch page.", { pageId: input.pageId, cause }),
+          ),
         ),
-      );
+    );
 
     const deletePage: WatchPageService["Service"]["delete"] = (input) =>
       sql
@@ -941,21 +947,21 @@ export const layer = Layer.effect(
           Effect.as({ id: input.pageId }),
         );
 
-    const restore: WatchPageService["Service"]["restore"] = (input) =>
-      Effect.gen(function* () {
+    const restore: WatchPageService["Service"]["restore"] = Effect.fn("WatchPageService.restore")(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         // Both revisions bump: a mobile projection writer holding the
         // pre-archive `mobileRevision` must invalidate the same way a stale
         // desktop `expectedRevision` does.
         const rows = yield* sql<{ page_id: string }>`
-          UPDATE watch_pages
-          SET archived_at = NULL,
-              revision = revision + 1,
-              mobile_revision = mobile_revision + 1,
-              updated_at = ${nowIso}
-          WHERE page_id = ${input.pageId} AND archived_at IS NOT NULL
-          RETURNING page_id
-        `;
+        UPDATE watch_pages
+        SET archived_at = NULL,
+            revision = revision + 1,
+            mobile_revision = mobile_revision + 1,
+            updated_at = ${nowIso}
+        WHERE page_id = ${input.pageId} AND archived_at IS NOT NULL
+        RETURNING page_id
+      `;
         const page = yield* findPage(input.pageId);
         if (rows.length === 0) {
           if (page === null) {
@@ -968,16 +974,21 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { page };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not restore watch page.", { pageId: input.pageId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not restore watch page.", { pageId: input.pageId, cause }),
+          ),
         ),
-      );
+    );
 
-    const updateScope: WatchPageService["Service"]["updateScope"] = (input) =>
-      Effect.gen(function* () {
+    const updateScope: WatchPageService["Service"]["updateScope"] = Effect.fn(
+      "WatchPageService.updateScope",
+    )(
+      function* (input) {
         const projectId = input.scope === "project" ? (input.projectId ?? null) : null;
         if (input.scope === "project" && projectId === null) {
           return yield* watchError("A project-scoped watch page requires a projectId.", {
@@ -986,14 +997,14 @@ export const layer = Layer.effect(
         }
         const nowIso = iso(yield* localNow);
         const rows = yield* sql<{ page_id: string }>`
-          UPDATE watch_pages
-          SET scope = ${input.scope},
-              project_id = ${projectId},
-              revision = revision + 1,
-              updated_at = ${nowIso}
-          WHERE page_id = ${input.pageId} AND archived_at IS NULL
-          RETURNING page_id
-        `;
+        UPDATE watch_pages
+        SET scope = ${input.scope},
+            project_id = ${projectId},
+            revision = revision + 1,
+            updated_at = ${nowIso}
+        WHERE page_id = ${input.pageId} AND archived_at IS NULL
+        RETURNING page_id
+      `;
         const page = yield* findPage(input.pageId);
         if (rows.length === 0) {
           if (page === null) {
@@ -1006,16 +1017,21 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { page };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not update watch page scope.", { pageId: input.pageId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not update watch page scope.", { pageId: input.pageId, cause }),
+          ),
         ),
-      );
+    );
 
-    const instantiateFromGallery: WatchPageService["Service"]["instantiateFromGallery"] = (input) =>
-      Effect.gen(function* () {
+    const instantiateFromGallery: WatchPageService["Service"]["instantiateFromGallery"] = Effect.fn(
+      "WatchPageService.instantiateFromGallery",
+    )(
+      function* (input) {
         const template = WATCH_GALLERY_TEMPLATES.find((entry) => entry.id === input.templateId);
         if (template === undefined) {
           return yield* watchError(`Watch gallery template not found: ${input.templateId}.`);
@@ -1060,32 +1076,36 @@ export const layer = Layer.effect(
         const result = yield* pageWithWidgets(newId);
         yield* notifyChanged;
         return result;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not instantiate watch page from gallery.", { cause }),
-        ),
-      );
+      },
+      Effect.mapError((cause) =>
+        isTypedWatchError(cause)
+          ? cause
+          : watchError("Could not instantiate watch page from gallery.", { cause }),
+      ),
+    );
 
-    const archiveForProject: WatchPageService["Service"]["archiveForProject"] = (projectId) =>
-      Effect.gen(function* () {
+    const archiveForProject: WatchPageService["Service"]["archiveForProject"] = Effect.fn(
+      "WatchPageService.archiveForProject",
+    )(
+      function* (projectId) {
         const nowIso = iso(yield* localNow);
         const rows = yield* sql<{ page_id: string }>`
-          UPDATE watch_pages
-          SET archived_at = ${nowIso}, updated_at = ${nowIso}
-          WHERE project_id = ${projectId} AND archived_at IS NULL
-          RETURNING page_id
-        `;
+        UPDATE watch_pages
+        SET archived_at = ${nowIso}, updated_at = ${nowIso}
+        WHERE project_id = ${projectId} AND archived_at IS NULL
+        RETURNING page_id
+      `;
         if (rows.length > 0) yield* notifyChanged;
-      }).pipe(
-        Effect.mapError((cause) =>
-          watchError("Could not archive watch pages for project.", { cause }),
-        ),
-      );
+      },
+      Effect.mapError((cause) =>
+        watchError("Could not archive watch pages for project.", { cause }),
+      ),
+    );
 
-    const addWidget: WatchPageService["Service"]["addWidget"] = (input) =>
-      Effect.gen(function* () {
+    const addWidget: WatchPageService["Service"]["addWidget"] = Effect.fn(
+      "WatchPageService.addWidget",
+    )(
+      function* (input) {
         const id = yield* newWidgetId;
         const conflict = findLayoutConflict([{ id, placement: input.placement }]);
         if (conflict !== null) {
@@ -1144,16 +1164,21 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { widget };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not add watch widget.", { pageId: input.pageId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not add watch widget.", { pageId: input.pageId, cause }),
+          ),
         ),
-      );
+    );
 
-    const removeWidget: WatchPageService["Service"]["removeWidget"] = (input) =>
-      Effect.gen(function* () {
+    const removeWidget: WatchPageService["Service"]["removeWidget"] = Effect.fn(
+      "WatchPageService.removeWidget",
+    )(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -1162,10 +1187,10 @@ export const layer = Layer.effect(
               bumpMobile: true,
             });
             const rows = yield* sql<{ widget_id: string }>`
-              DELETE FROM watch_widgets
-              WHERE widget_id = ${input.widgetId} AND page_id = ${input.pageId}
-              RETURNING widget_id
-            `;
+            DELETE FROM watch_widgets
+            WHERE widget_id = ${input.widgetId} AND page_id = ${input.pageId}
+            RETURNING widget_id
+          `;
             if (rows.length === 0) {
               return yield* watchError("Watch widget not found.", {
                 pageId: input.pageId,
@@ -1176,39 +1201,44 @@ export const layer = Layer.effect(
         );
         yield* notifyChanged;
         return { id: input.widgetId };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not remove watch widget.", {
-                pageId: input.pageId,
-                widgetId: input.widgetId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not remove watch widget.", {
+                  pageId: input.pageId,
+                  widgetId: input.widgetId,
+                  cause,
+                }),
+          ),
         ),
-      );
+    );
 
-    const configureWidget: WatchPageService["Service"]["configureWidget"] = (input) =>
-      Effect.gen(function* () {
+    const configureWidget: WatchPageService["Service"]["configureWidget"] = Effect.fn(
+      "WatchPageService.configureWidget",
+    )(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         // Archived pages are immutable: the EXISTS gate keeps a queued or
         // stale config write from landing on a parked page and resurrecting
         // with it on restore — the same guard every sibling write gets from
         // `bumpPageRevision`'s `archived_at IS NULL`.
         const rows = yield* sql<{ widget_id: string }>`
-          UPDATE watch_widgets
-          SET config_json = ${encodeWidgetConfigJson(input.config)},
-              revision = revision + 1,
-              updated_at = ${nowIso}
-          WHERE widget_id = ${input.widgetId}
-            AND revision = ${input.expectedRevision}
-            AND EXISTS (
-              SELECT 1 FROM watch_pages
-              WHERE watch_pages.page_id = watch_widgets.page_id
-                AND watch_pages.archived_at IS NULL
-            )
-          RETURNING widget_id
-        `;
+        UPDATE watch_widgets
+        SET config_json = ${encodeWidgetConfigJson(input.config)},
+            revision = revision + 1,
+            updated_at = ${nowIso}
+        WHERE widget_id = ${input.widgetId}
+          AND revision = ${input.expectedRevision}
+          AND EXISTS (
+            SELECT 1 FROM watch_pages
+            WHERE watch_pages.page_id = watch_widgets.page_id
+              AND watch_pages.archived_at IS NULL
+          )
+        RETURNING widget_id
+      `;
         if (rows.length === 0) {
           const widget = yield* findWidget(input.widgetId);
           if (widget === null) {
@@ -1238,19 +1268,24 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { widget };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not configure watch widget.", {
-                widgetId: input.widgetId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not configure watch widget.", {
+                  widgetId: input.widgetId,
+                  cause,
+                }),
+          ),
         ),
-      );
+    );
 
-    const setLayout: WatchPageService["Service"]["setLayout"] = (input) =>
-      Effect.gen(function* () {
+    const setLayout: WatchPageService["Service"]["setLayout"] = Effect.fn(
+      "WatchPageService.setLayout",
+    )(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -1285,15 +1320,15 @@ export const layer = Layer.effect(
               input.layouts,
               (layout) =>
                 sql`
-                  UPDATE watch_widgets
-                  SET placement_x = ${layout.placement.x},
-                      placement_y = ${layout.placement.y},
-                      placement_w = ${layout.placement.w},
-                      placement_h = ${layout.placement.h},
-                      placement_min_cols = ${layout.placement.minCols ?? null},
-                      updated_at = ${nowIso}
-                  WHERE widget_id = ${layout.widgetId} AND page_id = ${input.pageId}
-                `,
+                UPDATE watch_widgets
+                SET placement_x = ${layout.placement.x},
+                    placement_y = ${layout.placement.y},
+                    placement_w = ${layout.placement.w},
+                    placement_h = ${layout.placement.h},
+                    placement_min_cols = ${layout.placement.minCols ?? null},
+                    updated_at = ${nowIso}
+                WHERE widget_id = ${layout.widgetId} AND page_id = ${input.pageId}
+              `,
               { concurrency: 1, discard: true },
             );
           }),
@@ -1301,16 +1336,21 @@ export const layer = Layer.effect(
         const result = yield* pageWithWidgets(input.pageId);
         yield* notifyChanged;
         return result;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not set watch page layout.", { pageId: input.pageId, cause }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not set watch page layout.", { pageId: input.pageId, cause }),
+          ),
         ),
-      );
+    );
 
-    const setMobileProjection: WatchPageService["Service"]["setMobileProjection"] = (input) =>
-      Effect.gen(function* () {
+    const setMobileProjection: WatchPageService["Service"]["setMobileProjection"] = Effect.fn(
+      "WatchPageService.setMobileProjection",
+    )(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -1321,13 +1361,13 @@ export const layer = Layer.effect(
               input.widgets,
               (patch) =>
                 sql<{ widget_id: string }>`
-                  UPDATE watch_widgets
-                  SET mobile_order = ${patch.mobileOrder},
-                      mobile_hidden = ${patch.mobileHidden ? 1 : 0},
-                      updated_at = ${nowIso}
-                  WHERE widget_id = ${patch.widgetId} AND page_id = ${input.pageId}
-                  RETURNING widget_id
-                `.pipe(
+                UPDATE watch_widgets
+                SET mobile_order = ${patch.mobileOrder},
+                    mobile_hidden = ${patch.mobileHidden ? 1 : 0},
+                    updated_at = ${nowIso}
+                WHERE widget_id = ${patch.widgetId} AND page_id = ${input.pageId}
+                RETURNING widget_id
+              `.pipe(
                   Effect.flatMap((rows) =>
                     rows.length > 0
                       ? Effect.void
@@ -1344,19 +1384,24 @@ export const layer = Layer.effect(
         const result = yield* pageWithWidgets(input.pageId);
         yield* notifyChanged;
         return result;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not set watch page mobile projection.", {
-                pageId: input.pageId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not set watch page mobile projection.", {
+                  pageId: input.pageId,
+                  cause,
+                }),
+          ),
         ),
-      );
+    );
 
-    const moveToPage: WatchPageService["Service"]["moveToPage"] = (input) =>
-      Effect.gen(function* () {
+    const moveToPage: WatchPageService["Service"]["moveToPage"] = Effect.fn(
+      "WatchPageService.moveToPage",
+    )(
+      function* (input) {
         // A move onto the same page is a no-op: the two revision bumps below
         // would both hit the one row, so the second would miss on the
         // just-bumped revision and report a phantom conflict.
@@ -1415,18 +1460,18 @@ export const layer = Layer.effect(
                 ? 0
                 : Math.max(...destinationWidgets.map((w) => w.mobileOrder)) + 1;
             yield* sql`
-              UPDATE watch_widgets
-              SET page_id = ${input.destinationPageId},
-                  placement_x = ${input.placement.x},
-                  placement_y = ${input.placement.y},
-                  placement_w = ${input.placement.w},
-                  placement_h = ${input.placement.h},
-                  placement_min_cols = ${input.placement.minCols ?? null},
-                  mobile_order = ${mobileOrder},
-                  mobile_hidden = 0,
-                  updated_at = ${nowIso}
-              WHERE widget_id = ${input.widgetId}
-            `;
+            UPDATE watch_widgets
+            SET page_id = ${input.destinationPageId},
+                placement_x = ${input.placement.x},
+                placement_y = ${input.placement.y},
+                placement_w = ${input.placement.w},
+                placement_h = ${input.placement.h},
+                placement_min_cols = ${input.placement.minCols ?? null},
+                mobile_order = ${mobileOrder},
+                mobile_hidden = 0,
+                updated_at = ${nowIso}
+            WHERE widget_id = ${input.widgetId}
+          `;
           }),
         );
         const widget = yield* findWidget(input.widgetId);
@@ -1437,16 +1482,19 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { widget };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedWatchError(cause)
-            ? cause
-            : watchError("Could not move watch widget.", {
-                widgetId: input.widgetId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedWatchError(cause)
+              ? cause
+              : watchError("Could not move watch widget.", {
+                  widgetId: input.widgetId,
+                  cause,
+                }),
+          ),
         ),
-      );
+    );
 
     return WatchPageService.of({
       list,

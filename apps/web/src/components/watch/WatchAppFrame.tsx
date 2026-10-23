@@ -15,7 +15,7 @@ import {
 } from "@t3tools/client-runtime/watch-app-bridge";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useAtomValue } from "@effect/atom-react";
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useHtmlRenderTheme } from "~/hooks/useHtmlRenderTheme";
 import { cn } from "~/lib/utils";
@@ -25,24 +25,6 @@ import { watchEnvironment } from "~/state/watch";
  * A published agent-authored (or pack-shipped) watch widget in its hardened
  * sandbox. This deliberately does NOT reuse `McpAppFrame`: that host loads
  * documents by server-minted `src=` URL whose served document CSP
- * (`apps/server/src/http.ts` HTML_CONTENT_SECURITY_POLICY: `sandbox
- * allow-scripts allow-forms allow-popups allow-downloads`, no
- * `default-src 'none'`, no `connect-src 'none'`, no script-hash
- * authorization) permits popups, downloads and network access. Watch widgets
- * get a `srcdoc` frame, `sandbox="allow-scripts"` only (no
- * `allow-same-origin`, no forms), and a generated document whose CSP
- * hash-authorizes exactly the prelude and the artifact — no fetch channels
- * and no credential-entry UI. One hole CSP cannot close: the sandbox has no
- * token that stops a frame navigating *itself*, and that navigation request
- * can carry widget-visible data out (see the residual note in
- * `watchAppBridge.ts`). Detection below is post-mortem — keep secrets out of
- * anything the document can see.
- *
- * Kept in sync with its mobile twin,
- * `apps/mobile/src/features/watch/WatchAppWebView.tsx`: the feed plumbing
- * (subscription state, deliver/deliverError) is intentionally duplicated
- * because the host differs — srcdoc iframe + window.postMessage here,
- * react-native WebView + ReactNativeWebView bridge there.
  */
 
 export interface WatchAppFeedSubscription {
@@ -127,10 +109,7 @@ export function WatchAppFrame(props: {
   const theme = useHtmlRenderTheme();
 
   // One generated document per artifact — srcdoc identity is the artifact hash.
-  const srcdoc = useMemo(
-    () => buildWatchAppDocument({ bundle: props.bundle, scriptHash: props.scriptHash }),
-    [props.bundle, props.scriptHash],
-  );
+  const srcdoc = buildWatchAppDocument({ bundle: props.bundle, scriptHash: props.scriptHash });
 
   // A new document is a new session and resets the lifecycle flags — the
   // sanctioned "adjust state during render" pattern, no cascading effect.
@@ -152,12 +131,6 @@ export function WatchAppFrame(props: {
   // keeps its window, so a second load stops the widget and unmounts the
   // frame rather than letting a page T3 never generated pose as the widget.
   // This is post-mortem containment, not prevention: the navigation request
-  // itself already left — with whatever widget-visible data the hostile page
-  // put in the URL — before `load` fires. Two narrower gaps it does close:
-  // the prelude's pagehide notice disposes the host at unload, and the
-  // dispose here ends the residual window where a departing page still
-  // passes the `event.source` check. Unmounting the iframe is what ends it
-  // for real.
   const loads = useRef({ document: "", count: 0 });
   const onFrameLoad = () => {
     if (loads.current.document !== srcdoc) loads.current = { document: srcdoc, count: 0 };

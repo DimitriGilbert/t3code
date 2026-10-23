@@ -1,6 +1,5 @@
 import { EnvironmentId, WatchPageId, WatchWidgetId, type WatchWidget } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -14,6 +13,7 @@ vi.mock("~/state/watch", () => ({
 }));
 
 import { WatchAppWidget } from "./WatchAppWidget";
+import { act } from "../../../test/act";
 
 const environmentId = Schema.decodeSync(EnvironmentId)("env-1");
 const widget: WatchWidget = {
@@ -41,7 +41,6 @@ const observers: Array<{
 let renderer: ReactTestRenderer | undefined;
 
 beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   observers.length = 0;
   vi.stubGlobal(
     "IntersectionObserver",
@@ -77,15 +76,15 @@ describe("WatchAppWidget visibility reporting", () => {
   // The caller (WatchWidgetBody) builds fresh closures every render. A
   // callback-keyed effect would teardown-and-report-hidden on each render,
   // oscillating the mount seat forever.
-  it("does not tear down the observer when re-rendered with fresh callbacks", () => {
+  it("does not tear down the observer when re-rendered with fresh callbacks", async () => {
     const first = vi.fn();
     const second = vi.fn();
-    act(() => {
+    await act(async () => {
       renderer = create(element(first), { createNodeMock: () => ({}) });
     });
     expect(observers).toHaveLength(1);
 
-    act(() => {
+    await act(async () => {
       renderer!.update(element(second));
     });
 
@@ -96,14 +95,14 @@ describe("WatchAppWidget visibility reporting", () => {
     expect(second).not.toHaveBeenCalled();
 
     // New reports still land on the latest callback.
-    act(() => observers[0]!.callback([{ isIntersecting: true }]));
+    await act(() => observers[0]!.callback([{ isIntersecting: true }]));
     expect(second).toHaveBeenCalledWith(true);
     expect(first).not.toHaveBeenCalled();
   });
 
   it("reports hidden once on real unmount", async () => {
     const onVisibilityChange = vi.fn();
-    act(() => {
+    await act(async () => {
       renderer = create(element(onVisibilityChange), { createNodeMock: () => ({}) });
     });
     await act(async () => renderer?.unmount());

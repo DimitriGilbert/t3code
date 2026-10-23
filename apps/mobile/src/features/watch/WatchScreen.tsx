@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
@@ -30,19 +30,20 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, View } from "react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 
-import { AndroidAnchoredMenu } from "../../components/AndroidAnchoredMenu";
-import { AndroidHeaderIconButton, AndroidScreenHeader } from "../../components/AndroidScreenHeader";
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
-import { EmptyState } from "../../components/EmptyState";
-import { MaterialButton } from "../../components/MaterialButton";
-import { ScreenHeader } from "../../components/ScreenHeader";
-import type {
-  ScreenHeaderAction,
-  ScreenHeaderMenu,
-  ScreenHeaderMenuItem,
-} from "../../components/ScreenHeader.types";
-import { ScreenScrollView } from "../../components/ScreenScrollView";
+import { AndroidAnchoredMenu } from "../../components/ui/AndroidAnchoredMenu";
+import {
+  AndroidHeaderIconButton,
+  AndroidScreenHeader,
+} from "../../components/ui/AndroidScreenHeader";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { EmptyState } from "../../components/ui/EmptyState";
+import { AppBar } from "../../components/ui/AppBar";
+import type { AppBarAction, AppBarMenu, AppBarMenuItem } from "../../components/ui/AppBar.types";
+import { Button } from "../../components/ui/Button";
+import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
+import { uuidv4 } from "../../lib/uuid";
+import { openSettings } from "../settings/settings-navigation";
 import { appAtomRegistry } from "../../state/atom-registry";
 import {
   useEnvironmentServerConfig,
@@ -69,10 +70,6 @@ import {
  * The mobile watch screen: a read-only follower of the desktop-composed
  * board. Pages and widgets stream through `pagesLive`; the stack renders
  * `watchPageMobileWidgets` (canonical order → `mobileHidden` filtered →
- * `mobileOrder`), and the only writes mobile makes are reorder/hide through
- * `setMobileProjection`, guarded by `mobileRevision`. Desktop placement is
- * never written; its only read is `mobileWidgetHeight`, which sizes a
- * widget's row from `placement.h`.
  */
 
 const NEVER_NEEDS_RELOAD_ATOM = Atom.make(false).pipe(
@@ -174,46 +171,45 @@ function WatchPageColumn(props: {
 
   const openThread = useCallback(
     (ref: ScopedThreadRef) => {
-      navigation.navigate("Thread", {
-        environmentId: ref.environmentId,
-        threadId: ref.threadId,
-      });
+      navigation.dispatch(
+        StackActions.push("Thread", {
+          environmentId: ref.environmentId,
+          threadId: ref.threadId,
+        }),
+      );
     },
     [navigation],
   );
 
   const openNewTask = useCallback(
     (projectId: ProjectId | null) => {
-      if (projectId !== null) {
-        navigation.navigate("NewTaskSheet", {
-          screen: "NewTaskDraft",
-          params: {
+      navigation.dispatch(
+        StackActions.push("Thread", {
+          draft: {
+            requestId: uuidv4(),
             environmentId: String(props.environmentId),
-            projectId: String(projectId),
+            ...(projectId === null ? {} : { projectId: String(projectId) }),
           },
-        });
-        return;
-      }
-      navigation.navigate("NewTaskSheet", { screen: "NewTask" });
+        }),
+      );
     },
     [navigation, props.environmentId],
   );
 
   const openReview = useCallback(
     (ref: ScopedThreadRef) => {
-      navigation.navigate("ThreadReview", {
-        environmentId: ref.environmentId,
-        threadId: ref.threadId,
-      });
+      navigation.dispatch(
+        StackActions.push("ThreadReview", {
+          environmentId: ref.environmentId,
+          threadId: ref.threadId,
+        }),
+      );
     },
     [navigation],
   );
 
   const openScheduledTasks = useCallback(() => {
-    navigation.navigate("SettingsSheet", {
-      screen: "SettingsContent",
-      params: { screen: "SettingsScheduledTasks" },
-    });
+    openSettings(navigation, "SettingsScheduledTasks");
   }, [navigation]);
 
   return (
@@ -321,7 +317,7 @@ export function WatchRouteScreen({ route }: WatchRouteScreenProps) {
         {Platform.OS === "android" ? (
           <AndroidScreenHeader title="Watch" onBack={() => navigation.goBack()} />
         ) : (
-          <ScreenHeader title="Watch" sidebar={false} />
+          <AppBar title="Watch" sidebar={false} />
         )}
         <EmptyState
           variant="plain"
@@ -403,9 +399,9 @@ function WatchScreen(props: {
     refresh();
   }, [environmentId, refresh, selectedPage]);
 
-  const pageMenuItems: ScreenHeaderMenuItem[] = useMemo(
+  const pageMenuItems: AppBarMenuItem[] = useMemo(
     () => [
-      ...active.map((page): ScreenHeaderMenuItem => ({
+      ...active.map((page): AppBarMenuItem => ({
         id: `page:${page.id}`,
         title: page.name,
         selected: selectedPage?.id === page.id,
@@ -417,14 +413,14 @@ function WatchScreen(props: {
             {
               id: "archived-pages",
               title: "Archived",
-              items: archived.map((page): ScreenHeaderMenuItem => ({
+              items: archived.map((page): AppBarMenuItem => ({
                 id: `page:${page.id}`,
                 title: page.name,
                 selected: selectedPage?.id === page.id,
                 onPress: () => setSelectedPageId(page.id),
               })),
             },
-          ] satisfies ScreenHeaderMenuItem[])),
+          ] satisfies AppBarMenuItem[])),
     ],
     [active, archived, selectedPage?.id],
   );
@@ -488,18 +484,18 @@ function WatchScreen(props: {
     );
   })();
 
-  const menus: ScreenHeaderMenu[] =
+  const menus: AppBarMenu[] =
     allPages.length > 1
       ? [
           {
             title: "Pages",
-            icon: "square.3.layers.3d",
+            icon: "square.grid.2x2",
             status: selectedPage?.name,
             items: pageMenuItems,
           },
         ]
       : [];
-  const actions: ScreenHeaderAction[] =
+  const actions: AppBarAction[] =
     selectedPage !== null && selectedPage.archivedAt === null && selectedWidgets.length > 0
       ? [
           {
@@ -540,13 +536,13 @@ function WatchScreen(props: {
                   if (page !== undefined) setSelectedPageId(page.id);
                 }}
               >
-                <AndroidHeaderIconButton accessibilityLabel="Pages" icon="square.3.layers.3d" />
+                <AndroidHeaderIconButton accessibilityLabel="Pages" icon="square.grid.2x2" />
               </AndroidAnchoredMenu>
             ) : undefined
           }
         />
       ) : (
-        <ScreenHeader
+        <AppBar
           title="Watch"
           subtitle={selectedPage?.name}
           sidebar={false}
@@ -571,7 +567,7 @@ function WatchScreen(props: {
             <Text className="text-xs text-warning-foreground">
               Reload to pick up the latest layout.
             </Text>
-            <MaterialButton label="Reload" tone="secondary" onPress={dismissReloadPrompt} />
+            <Button label="Reload" tone="secondary" onPress={dismissReloadPrompt} />
           </View>
         ) : null}
         {body}

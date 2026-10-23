@@ -46,7 +46,7 @@ const view = () =>
           <span>{run.runId}</span>
           <span>{run.status}</span>
           <span>
-            {run.currentStep ?? "—"} ({run.stepsCompleted}/{run.steps.length})
+            {run.currentStep ?? "…"} ({run.stepsCompleted}/{run.steps.length})
           </span>
         </div>
       ))}

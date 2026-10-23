@@ -14,17 +14,6 @@ import * as PackStore from "./PackStore.ts";
  * The `http`-transport egress gate. Pack fetch code receives a `ctx.fetch`
  * built here: every request's host is checked against the manifest's declared
  * `egressHosts` before a socket is opened — the pack's own code can never
- * reach an undeclared host. This is the enforcement layer the PRD's "declared
- * egress allowlist" mitigation stands on, and it is real: pack code runs in a
- * worker thread whose only network path is a MessagePort RPC answered by the
- * implementation built here (see PackModule.ts).
- *
- * The default transport resolves the target once, refuses any answer that is
- * local to this machine, and pins the socket's `lookup` to the checked list —
- * the same resolve → block → pin pipeline pack installs use (PackStore.ts),
- * so a declared host cannot be DNS-rebound into the local network. Unlike the
- * install path there is no `allowLocal` acknowledgement: runtime egress never
- * reaches a loopback, link-local, or private address.
  */
 
 export type ConnectorEgressFetchImpl = (
@@ -52,9 +41,9 @@ export class ConnectorEgressFetch extends Context.Reference<ConnectorEgressFetch
 ) {}
 
 /** Default ceiling for a single egress call when pack code sets no signal. */
-export const DEFAULT_EGRESS_TIMEOUT_MS = 30_000;
+const DEFAULT_EGRESS_TIMEOUT_MS = 30_000;
 /** Byte ceiling on one egress response body — oversized bodies are rejected, never truncated. */
-export const MAX_EGRESS_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_EGRESS_RESPONSE_BYTES = 5 * 1024 * 1024;
 
 /**
  * Lowercases a host and strips IPv6 brackets and trailing-dot FQDN markers,
@@ -276,7 +265,6 @@ export const makeEgressFetch =
       // cannot turn it back on. A declared host could otherwise 302 into an
       // undeclared one; pack code follows hops through ctx.fetch instead,
       // which re-gates each target (the same model as PackStore's hop
-      // revalidation).
       redirect: "manual",
       signal: init?.signal
         ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])

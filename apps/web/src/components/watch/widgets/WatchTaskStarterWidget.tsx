@@ -21,7 +21,7 @@ import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/reactivity";
 import { ArrowUpIcon, CircleCheckIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import {
@@ -58,10 +58,6 @@ function taskTitleFromPrompt(prompt: string): string {
  * Compose-and-launch surface: project / provider / model pickers, a prompt
  * box, and editable template chips from the widget's settings. Starting a
  * task creates the thread and sends its first turn through the normal
- * `startTurn` bootstrap path with the same defaults the composer resolves —
- * the project's env-mode chain (`resolveNewThreadEnvMode`) decides whether
- * the turn preps a worktree and runs its setup script. The user stays on
- * the watch page and the new thread shows up in Active work.
  */
 export function WatchTaskStarterWidget(props: {
   readonly environmentId: EnvironmentId;
@@ -88,16 +84,12 @@ export function WatchTaskStarterWidget(props: {
   const templates = watchWidgetSettingStringList(props.widget, "templates");
 
   const projects = props.projects;
-  const providers = useMemo(
-    () =>
-      props.providers.filter(
-        (provider) =>
-          provider.enabled &&
-          provider.installed &&
-          isProviderAvailable(provider) &&
-          provider.models.length > 0,
-      ),
-    [props.providers],
+  const providers = props.providers.filter(
+    (provider) =>
+      provider.enabled &&
+      provider.installed &&
+      isProviderAvailable(provider) &&
+      provider.models.length > 0,
   );
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -150,7 +142,6 @@ export function WatchTaskStarterWidget(props: {
   // false, and `resolveSendEnvMode` would silently downgrade "worktree" to
   // "local" — gate Start until the answer exists. A checkout remembered as
   // a non-repo resolves "local" either way and need not wait; a remembered
-  // repo still waits, since a worktree start needs the live base branch.
   const gitStatusPending =
     envModeMayBeWorktree &&
     rememberedIsGitRepo !== false &&
@@ -369,7 +360,7 @@ export function WatchTaskStarterWidget(props: {
             className="ml-auto flex shrink-0 items-center gap-1 text-2xs text-success-foreground hover:underline"
           >
             <CircleCheckIcon className="size-3" />
-            Started — open thread
+            Started. Open thread
           </button>
         ) : null}
         <Button

@@ -15,8 +15,6 @@ export function watchScreenSupported(serverConfig: ServerConfig | null | undefin
  * The mobile sandbox kill switch. WebView enforcement has a documented
  * Android fails-open window (the load-gate callback can time out), so agent
  * widgets only mount when the server explicitly opts in. When the flag is
- * off, agent/pack widget rows drop out entirely — capability absence is not
- * a widget error and renders no placeholder.
  */
 export function watchAgentWidgetsMobileSupported(
   serverConfig: ServerConfig | null | undefined,

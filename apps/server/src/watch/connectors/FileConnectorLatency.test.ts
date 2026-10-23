@@ -35,14 +35,6 @@ import * as PackStore from "./PackStore.ts";
  * Journey-5 coverage over the real service stack: the fixture Clanker pack
  * (`../__fixtures__/clanker-pack`) is installed through the real
  * request → prepare → confirm gate, a file-transport instance watches a
- * project `.clanker` directory, and `runs/<id>/state.json` writes drive
- * snapshots through fs.watch → debounce → forced run → transform → push.
- *
- * These are `it.live` tests on purpose: the 250ms debounce and the push rate
- * cap ride the real Clock, and the latency gate measures real elapsed time.
- * The subscriber requests a 60s interval so a scheduled poll can never
- * produce a push inside the test — every post-initial snapshot proves the
- * fs.watch signal forced the run.
  */
 
 // Layers merged this way see every service provided later in the chain —
@@ -395,7 +387,6 @@ it.live(`file-write → snapshot-push latency p95 ≤ 1s across ${RUNS} isolated
       // a measured write lands on a quiet instance, so its push is not
       // delayed behind the poller's 1Hz burst-coalescing cap (which is
       // correct behavior for back-to-back writes, and would hide the
-      // single-write latency being measured).
       const rigs: Array<Rig> = [];
       for (let i = 0; i < RUNS; i += 1) {
         const project = yield* fs.makeTempDirectory({ prefix: `watch-lat-${i}-` });

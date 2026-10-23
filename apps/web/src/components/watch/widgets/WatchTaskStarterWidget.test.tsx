@@ -10,7 +10,7 @@ import {
   type WatchWidget,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { act, isValidElement, type ReactElement, type ReactNode } from "react";
+import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -86,6 +86,7 @@ vi.mock("~/components/ui/button", () => ({
 vi.mock("~/components/ui/toast", () => ({ toastManager: { add: state.toast } }));
 
 import { WatchTaskStarterWidget } from "./WatchTaskStarterWidget";
+import { act } from "../../../../test/act";
 
 const environmentId = EnvironmentId.make("env-1");
 const nowIso = "2026-06-20T12:00:00.000Z";
@@ -196,11 +197,10 @@ afterEach(async () => {
 
 describe("WatchTaskStarterWidget", () => {
   it("disables Start while the checkout's git status is still in flight", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     queryView(null, true);
 
     await renderWidget();
-    typePrompt("fix the flaky test");
+    await typePrompt("fix the flaky test");
 
     // Pending status must not silently resolve "worktree" down to "local".
     expect(startButton()?.props.disabled).toBe(true);
@@ -208,26 +208,24 @@ describe("WatchTaskStarterWidget", () => {
   });
 
   it("keeps Start gated on a warm revisit when the checkout was a repo", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     // A remembered repo still needs the live query for the base branch.
     state.checkoutIsRepo.set(repoMemoryKey(), true);
     queryView(null, true);
 
     await renderWidget();
-    typePrompt("fix the flaky test");
+    await typePrompt("fix the flaky test");
 
     expect(startButton()?.props.disabled).toBe(true);
     expect(state.startTurn).not.toHaveBeenCalled();
   });
 
   it("lets a remembered non-repo checkout start local without waiting", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.checkoutIsRepo.set(repoMemoryKey(), false);
     queryView(null, true);
     state.startTurn.mockResolvedValue(AsyncResult.success({}));
 
     await renderWidget();
-    typePrompt("fix the flaky test");
+    await typePrompt("fix the flaky test");
     expect(startButton()?.props.disabled).toBe(false);
 
     await act(async () => {
@@ -243,12 +241,11 @@ describe("WatchTaskStarterWidget", () => {
   });
 
   it("starts the thread in a worktree once git status lands", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     queryView({ isRepo: true, refName: "main" }, false);
     state.startTurn.mockResolvedValue(AsyncResult.success({}));
 
     await renderWidget();
-    typePrompt("fix the flaky test");
+    await typePrompt("fix the flaky test");
     expect(startButton()?.props.disabled).toBe(false);
 
     await act(async () => {

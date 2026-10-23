@@ -1593,10 +1593,6 @@ export function createStageWorkspaceConfig(input: {
   // binary on the installing machine — which here is the build host, not the
   // artifact's target, so the rewrite is at best useless (the launcher is
   // only used by the tsc-rs CLI bin, which the packaged server never runs:
-  // the JS API resolves the target's binary itself through
-  // @tsc-rs/<os>-<arch>) and at worst warns on a host whose platform package
-  // supportedArchitectures did not install. The repo's own allowBuilds
-  // carries `tsc-rs: true` for development, so it must be pinned off here.
   const stagedAllowBuilds = { ...allowBuilds, "tsc-rs": false };
 
   return {

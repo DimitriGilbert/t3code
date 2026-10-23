@@ -18,11 +18,6 @@ import { Label } from "~/components/ui/label";
  * Re-enter declared secret values for a connector instance — values never
  * come back from the server (`configuredSecretKeys` reports presence only),
  * so every field starts blank and only filled keys are sent. Config and
- * secrets stay separate at the wire level too: this dialog only produces the
- * `secrets` record and `clearSecretKeys` list for `setInstanceConfig`.
- *
- * "Clear" marks a configured key for removal on save — the only way short of
- * deleting the instance to take a stored credential off the server.
  */
 export function WatchConnectorSecretDialog(props: {
   readonly instance: WatchConnectorInstance;
@@ -52,7 +47,7 @@ export function WatchConnectorSecretDialog(props: {
         <DialogHeader>
           <DialogTitle>Update secrets</DialogTitle>
           <DialogDescription>
-            {props.instance.name ?? props.instance.packId} — stored on the server, never shown here.
+            {props.instance.name ?? props.instance.packId}, stored on the server, never shown here.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -68,8 +63,8 @@ export function WatchConnectorSecretDialog(props: {
                       <span className="text-muted-foreground">
                         {" "}
                         {markedForClear
-                          ? "(set — will be removed)"
-                          : "(set — enter a new value to replace)"}
+                          ? "(set; will be removed)"
+                          : "(set; enter a new value to replace)"}
                       </span>
                     ) : null}
                   </Label>

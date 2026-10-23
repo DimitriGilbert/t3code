@@ -8,8 +8,8 @@ import type { WatchWidget, WatchWidgetErrorState } from "@t3tools/contracts";
 import type { ReactNode } from "react";
 import { Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { cn } from "../../lib/cn";
 
 /**
@@ -95,8 +95,6 @@ export function WatchWidgetSection(props: {
  * The typed source/config error a widget degrades to — the same copy table as
  * web (`watchWidgetErrorPresentation`). Mobile only keeps the actions that
  * work without the configure form: `reconnect` re-sends the bound instance's
- * config; the configure-family actions stay hidden because mobile has no
- * authoring surface.
  */
 export function WatchWidgetErrorBody(props: {
   readonly error: WatchWidgetErrorState;

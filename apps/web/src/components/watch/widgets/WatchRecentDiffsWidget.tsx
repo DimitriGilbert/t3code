@@ -8,7 +8,6 @@ import {
 import type { EnvironmentId, ProjectId, ScopedThreadRef, WatchWidget } from "@t3tools/contracts";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import { FileDiffIcon } from "lucide-react";
-import { useMemo } from "react";
 
 import { useDiffPanelStore } from "~/diffPanelStore";
 import { useNowMinute } from "~/hooks/useNowMinute";
@@ -34,12 +33,12 @@ function RecentDiffRow(props: {
 }) {
   const threadRef = scopeThreadRef(props.environmentId, props.thread.id);
   const detail = useThreadProjection(props.withDetail ? threadRef : null);
-  const latestCheckpoint = useMemo(() => {
+  const latestCheckpoint = (() => {
     if (detail === null) return null;
     return deriveThreadCheckpointSummaries(detail.projection).at(-1) ?? null;
-  }, [detail]);
+  })();
 
-  const diffTotals = useMemo(() => {
+  const diffTotals = (() => {
     if (latestCheckpoint === null || latestCheckpoint.files.length === 0) return null;
     let additions = 0;
     let deletions = 0;
@@ -48,7 +47,7 @@ function RecentDiffRow(props: {
       deletions += file.deletions;
     }
     return { additions, deletions, files: latestCheckpoint.files.length };
-  }, [latestCheckpoint]);
+  })();
 
   // A subscribed row that proved to have no diff drops out — under "Recent
   // diffs" a diffless turn is noise. Rows that never subscribed keep a plain

@@ -53,6 +53,7 @@ const layerMetadata = Layer.merge(
   }),
   Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
     resolvePath: (workspaceRoot) => Effect.succeed(`${workspaceRoot}/favicon.svg`),
+    invalidate: () => Effect.void,
   }),
 );
 

@@ -19,7 +19,7 @@ import {
   TimerOffIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -67,13 +67,16 @@ function SnoozeMenu(props: {
   readonly onSnooze: (until: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [presets, setPresets] = useState<ReturnType<typeof resolveSnoozePresets>>([]);
   // Presets resolve at open time so "In 1 hour" is relative to the click.
-  const presets = useMemo(
-    () => (open ? resolveSnoozePresets(new Date(), props.timestampFormat) : []),
-    [open, props.timestampFormat],
-  );
   return (
-    <Menu open={open} onOpenChange={setOpen}>
+    <Menu
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setPresets(resolveSnoozePresets(new Date(), props.timestampFormat));
+      }}
+    >
       <Tooltip>
         <TooltipTrigger
           render={
@@ -200,8 +203,6 @@ function AttentionRow(props: {
  * Failed runs, parked approvals/user questions, stale threads, and unread
  * completions on the bound projects — anything that wants a human decision.
  * Snooze rides the existing thread-snooze command (presets + the custom
- * dialog); snoozed rows collapse to a quiet tail unless the widget opts in
- * via `showSnoozed`.
  */
 export function WatchNeedsAttentionWidget(props: {
   readonly environmentId: EnvironmentId;
@@ -229,14 +230,8 @@ export function WatchNeedsAttentionWidget(props: {
   });
   const visible = showSnoozed ? [...items, ...snoozed] : items;
   const { snoozeThread, unsnoozeThread } = useThreadActions();
-  const onSnooze = useCallback(
-    (ref: ScopedThreadRef, until: string) => void snoozeThread(ref, until),
-    [snoozeThread],
-  );
-  const onUnsnooze = useCallback(
-    (ref: ScopedThreadRef) => void unsnoozeThread(ref),
-    [unsnoozeThread],
-  );
+  const onSnooze = (ref: ScopedThreadRef, until: string) => void snoozeThread(ref, until);
+  const onUnsnooze = (ref: ScopedThreadRef) => void unsnoozeThread(ref);
 
   if (visible.length === 0) {
     return <WatchWidgetEmpty text="Nothing needs attention" />;

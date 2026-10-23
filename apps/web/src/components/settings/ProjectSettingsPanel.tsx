@@ -9,11 +9,15 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  scopedProjectKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
 import { AsyncResult } from "effect/reactivity";
 import { type EnvironmentId, type ProjectIconOverride } from "@t3tools/contracts";
-import { Navigate, useLocation, useNavigate } from "@tanstack/react-router";
+import { Link, Navigate, useLocation, useNavigate } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
 import { InfoIcon, Trash2Icon } from "lucide-react";
 import { lazy, Suspense, useRef, useState, type ReactNode } from "react";
@@ -562,6 +566,43 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
+        <SettingsSection id="project-clanker" title="Clanker">
+          {group.memberProjects.map((member) => (
+            <SettingsRow
+              key={member.physicalProjectKey}
+              title={
+                group.memberProjects.length === 1
+                  ? "Workflows"
+                  : (member.environmentLabel ?? "Environment")
+              }
+              description={
+                group.memberProjects.length === 1 ? (
+                  <>
+                    Manage workflow files in <span className="font-mono">.clanker/workflows</span>.
+                  </>
+                ) : (
+                  member.workspaceRoot
+                )
+              }
+              control={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  render={
+                    <Link
+                      to="/clanker"
+                      search={{
+                        project: scopedProjectKey(scopeProjectRef(member.environmentId, member.id)),
+                      }}
+                    />
+                  }
+                >
+                  Open workflows
+                </Button>
+              }
+            />
+          ))}
+        </SettingsSection>
         {hasMultipleCheckouts ? checkoutChoices : null}
         <SettingsSection title="Danger">
           <SettingsRow

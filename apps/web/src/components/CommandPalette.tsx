@@ -2,6 +2,7 @@ import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-r
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
 import {
+  scopedProjectKey,
   scopedThreadKey,
   scopeProjectRef,
   scopeThreadRef,
@@ -69,6 +70,7 @@ import {
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
 import {
@@ -1540,6 +1542,23 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  const clankerProjectRef = contextualProjectRef ?? contextualProjectGroup?.memberProjectRefs[0];
+  actionItems.push({
+    kind: "action",
+    value: "action:clanker-workflows",
+    searchTerms: ["clanker", "workflow", "workflows", "yaml", "automation", "dag"],
+    title: "Clanker workflows",
+    ...(contextualProjectGroup ? { description: contextualProjectGroup.displayName } : {}),
+    icon: <WorkflowIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({
+        to: "/clanker",
+        search:
+          clankerProjectRef === undefined ? {} : { project: scopedProjectKey(clankerProjectRef) },
+      });
+    },
+  });
 
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   // Every setting goes to the palette's own matcher, so settings get the same

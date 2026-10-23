@@ -12,6 +12,7 @@ import {
   WatchPageRevisionConflictError,
   WatchWidget,
   WatchWidgetErrorState,
+  WatchWidgetExportDocument,
   WatchWidgetSource,
 } from "./watch.ts";
 
@@ -245,5 +246,65 @@ describe("WatchWidgetErrorState", () => {
     // A cause this build does not know is an UnknownUnionMember, not a
     // stream-killing decode failure.
     expect(decodeWidgetErrorState({ cause: "unknownThing" })).toBeInstanceOf(UnknownUnionMember);
+  });
+});
+
+describe("WatchWidgetExportDocument", () => {
+  const decodeDocument = (value: unknown) =>
+    Schema.decodeUnknownSync(WatchWidgetExportDocument)(value);
+  const documentFixture = {
+    format: "t3.watch-widget",
+    formatVersion: 1,
+    kind: "active-work",
+    config: { source: { kind: "threads", binding: "project:1" } },
+  };
+
+  it("round-trips a minimal document and one with every optional field", () => {
+    const minimal = decodeDocument(documentFixture);
+    expect(minimal.format).toBe("t3.watch-widget");
+    expect(minimal.formatVersion).toBe(1);
+    expect(minimal.kind).toBe("active-work");
+    expect(minimal.provenance).toBeUndefined();
+    expect(minimal.sizeHint).toBeUndefined();
+    expect(minimal.source).toBeUndefined();
+
+    const full = decodeDocument({
+      ...documentFixture,
+      kind: "agent:watch-widget-source:abc",
+      provenance: "pack:pack.test",
+      sizeHint: { w: 6, h: 4, minCols: 2 },
+      source: {
+        source: "T3.render(() => null);",
+        manifest: { subscriptions: ["snapshots"], actions: ["refresh"] },
+      },
+    });
+    expect(full.provenance).toBe("pack:pack.test");
+    expect(full.sizeHint).toEqual({ w: 6, h: 4, minCols: 2 });
+    expect(full.source?.source).toBe("T3.render(() => null);");
+  });
+
+  it("rejects a different format tag, a non-positive version, and a bad provenance shape", () => {
+    expect(() => decodeDocument({ ...documentFixture, format: "t3.watch-page" })).toThrow();
+    expect(() => decodeDocument({ ...documentFixture, formatVersion: 0 })).toThrow();
+    expect(() => decodeDocument({ ...documentFixture, formatVersion: -1 })).toThrow();
+    // A newer format version still decodes — the service rejects it with a
+    // legible "unsupported version" error rather than a decode failure.
+    expect(decodeDocument({ ...documentFixture, formatVersion: 2 }).formatVersion).toBe(2);
+    expect(() => decodeDocument({ ...documentFixture, provenance: "agentPublished" })).toThrow();
+    expect(() => decodeDocument({ ...documentFixture, provenance: "pack:" })).toThrow();
+    // Embedded source carries the authored text and manifest only — the
+    // compiled bundle and hashes are never part of the contract.
+    expect(() =>
+      decodeDocument({
+        ...documentFixture,
+        source: { source: "x", manifest: { subscriptions: [], actions: [] }, bundle: "js" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      decodeDocument({
+        ...documentFixture,
+        source: { manifest: { subscriptions: [], actions: [] } },
+      }),
+    ).toThrow();
   });
 });

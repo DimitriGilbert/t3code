@@ -133,6 +133,10 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.watchWidgetsSetLayout]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchWidgetsSetMobileProjection]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchWidgetsMoveToPage]: AuthOrchestrationOperateScope,
+  // Export reads the widget row and (for agent kinds) its authored source.
+  [WS_METHODS.watchWidgetsExport]: AuthOrchestrationReadScope,
+  // Import republishes embedded source and writes page membership.
+  [WS_METHODS.watchWidgetsImport]: AuthOrchestrationOperateScope,
   [WS_METHODS.watchNotificationsSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.watchNotificationsHistory]: AuthOrchestrationReadScope,
   [WS_METHODS.watchNotificationsSetPrefs]: AuthOrchestrationOperateScope,

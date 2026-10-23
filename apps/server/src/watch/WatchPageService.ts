@@ -97,6 +97,17 @@ export class WatchPageService extends Context.Service<
      * kept so their bindings degrade to the "project missing" widget state.
      */
     readonly archiveForProject: (projectId: ProjectId) => Effect.Effect<void, WatchPageError>;
+    /** One widget row, or null when it does not exist. */
+    readonly getWidget: (
+      widgetId: WatchWidgetId,
+    ) => Effect.Effect<WatchWidget | null, WatchPageError>;
+    /**
+     * A page's widgets. Errors when the page is missing or archived — reads
+     * that name a parked page are pointing at stale state.
+     */
+    readonly listWidgetsForPage: (
+      pageId: WatchPageId,
+    ) => Effect.Effect<ReadonlyArray<WatchWidget>, WatchPageError>;
     readonly addWidget: (
       input: WatchWidgetAddInput,
     ) => Effect.Effect<
@@ -1084,6 +1095,20 @@ export const layer = Layer.effect(
         ),
       );
 
+    const getWidget: WatchPageService["Service"]["getWidget"] = (widgetId) => findWidget(widgetId);
+
+    const listWidgetsForPage: WatchPageService["Service"]["listWidgetsForPage"] = (pageId) =>
+      Effect.gen(function* () {
+        const page = yield* findPage(pageId);
+        if (page === null) {
+          return yield* watchError("Watch page not found.", { pageId });
+        }
+        if (page.archivedAt !== null) {
+          return yield* watchError("Watch page is archived.", { pageId });
+        }
+        return yield* widgetsForPage(pageId);
+      });
+
     const addWidget: WatchPageService["Service"]["addWidget"] = (input) =>
       Effect.gen(function* () {
         const id = yield* newWidgetId;
@@ -1461,6 +1486,8 @@ export const layer = Layer.effect(
       updateScope,
       instantiateFromGallery,
       archiveForProject,
+      getWidget,
+      listWidgetsForPage,
       addWidget,
       removeWidget,
       configureWidget,

@@ -229,6 +229,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.watchWidgetsSetLayout]: "watch",
   [WS_METHODS.watchWidgetsSetMobileProjection]: "watch",
   [WS_METHODS.watchWidgetsMoveToPage]: "watch",
+  [WS_METHODS.watchWidgetsExport]: "watch",
+  [WS_METHODS.watchWidgetsImport]: "watch",
   [WS_METHODS.watchNotificationsSubscribe]: "watch",
   [WS_METHODS.watchNotificationsHistory]: "watch",
   [WS_METHODS.watchNotificationsSetPrefs]: "watch",

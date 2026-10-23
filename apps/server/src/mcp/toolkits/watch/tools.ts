@@ -18,6 +18,12 @@ import {
   WatchNotificationsHistoryInput,
   WatchNotificationsHistoryResult,
   WatchNotificationsSetPrefsResult,
+  WatchPageListInput,
+  WatchPageListResult,
+  WatchWidgetExportInput,
+  WatchWidgetExportResult,
+  WatchWidgetImportInput,
+  WatchWidgetImportResult,
   WatchWidgetSourcePublishInput,
   WatchWidgetSourcePublishResult,
 } from "@t3tools/contracts";
@@ -25,6 +31,8 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as UserNotificationService from "../../../notifications/UserNotificationService.ts";
+import * as WatchPageService from "../../../watch/WatchPageService.ts";
+import * as WatchWidgetTransferService from "../../../watch/WatchWidgetTransferService.ts";
 import * as WidgetTranspileService from "../../../watch/WidgetTranspileService.ts";
 import * as ConnectorService from "../../../watch/connectors/ConnectorService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -36,6 +44,8 @@ const shared = {
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     UserNotificationService.UserNotificationService,
+    WatchPageService.WatchPageService,
+    WatchWidgetTransferService.WatchWidgetTransferService,
     WidgetTranspileService.WidgetTranspileService,
     ConnectorService.ConnectorService,
   ],
@@ -147,10 +157,45 @@ const WatchWidgetSourcePublishTool = Tool.make("t3_watch_widget_source_publish",
   success: WatchWidgetSourcePublishResult,
 }).annotate(Tool.Destructive, false);
 
+/**
+ * Page and widget ids are how the export/import tools name their targets —
+ * without this list an agent cannot discover them.
+ */
+const WatchPagesListTool = Tool.make("t3_watch_pages_list", {
+  ...shared,
+  description:
+    "List this server's watch pages and their widgets, including the page ids, widget ids, and page revisions that widget export and import need.",
+  parameters: WatchPageListInput,
+  success: WatchPageListResult,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+const WatchWidgetExportTool = Tool.make("t3_watch_widget_export", {
+  ...shared,
+  description:
+    "Export one watch widget as a portable t3.watch-widget JSON document: its kind, config, and size hint, plus the authored source and bridge manifest embedded for agent-authored kinds. The document carries no ids or placement, so it imports cleanly onto any page, environment, or server.",
+  parameters: WatchWidgetExportInput,
+  success: WatchWidgetExportResult,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+const WatchWidgetImportTool = Tool.make("t3_watch_widget_import", {
+  ...shared,
+  description:
+    "Import a t3.watch-widget export document onto a watch page. Embedded agent source is re-transpiled server-side and its recomputed identity is checked against the declared kind; pack widgets require the same connector pack installed here. expectedRevision is the page's current revision from t3_watch_pages_list — the write fails when the page changed since. Omit placement to append below the page's existing widgets.",
+  parameters: WatchWidgetImportInput,
+  success: WatchWidgetImportResult,
+}).annotate(Tool.Destructive, false);
+
 export const WatchToolkit = Toolkit.make(
   WatchNotificationsHistoryTool,
   WatchNotificationsSetPrefsTool,
   WatchWidgetSourcePublishTool,
+  WatchPagesListTool,
+  WatchWidgetExportTool,
+  WatchWidgetImportTool,
   WatchConnectorsListTool,
   WatchConnectorInstanceCreateTool,
   WatchConnectorInstanceUpdateTool,

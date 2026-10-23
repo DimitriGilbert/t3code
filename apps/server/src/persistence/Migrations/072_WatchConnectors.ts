@@ -49,7 +49,6 @@ export default Effect.gen(function* () {
   // confirmation token binds to; `resolved_at` marks confirm/cancel.
   // `local_url` marks an https origin that resolved private at request time:
   // it is recorded without a fetch (pack_id/content_hash/manifest_* stay null)
-  // and the human prepare step fills them after its `allowLocalUrl` ack.
   yield* sql`
     CREATE TABLE IF NOT EXISTS watch_connector_install_requests (
       request_id TEXT PRIMARY KEY,

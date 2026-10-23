@@ -10,25 +10,6 @@ import * as Predicate from "effect/Predicate";
  * The host side of the agent-authored watch-widget bridge: JSON-RPC 2.0 over
  * postMessage between a client and one widget document, modeled on
  * `mcpApps/host.ts` and sharing its caps. It is transport-free so web (a
- * sandboxed srcdoc iframe) and mobile (a WebView over the identical document)
- * enforce the same contract; each platform supplies how to post a message and
- * how to start feeding subscription data.
- *
- * The bridge enforces the widget's declared manifest rather than trusting the
- * frame: undeclared subscriptions and actions are dropped and surfaced through
- * `onViolation` as widget errors. Data subscriptions are authorized against the
- * connector instance id resolved from the widget row's config — a
- * frame-supplied instance id is never trusted and any value other than the
- * widget's configured binding is a violation.
- *
- * Known residual (r9-F1): on web, no platform primitive stops the sandboxed
- * document from navigating its own frame, and that navigation request can
- * carry anything the widget could see — `deliver` items, `hostContext`,
- * whatever it computed — out to an arbitrary origin. Detection is post-mortem
- * (the frame's load watchdog plus the prelude's pagehide notice, which closes
- * the post-delivery gap but cannot stop the request). Keep secrets and
- * credentials out of widget-visible data; treat everything posted into the
- * document as disclosable. Mobile's deny-all load gate does not have this hole.
  */
 
 const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -105,8 +86,6 @@ export interface WatchAppHostHandlers {
      * The connector instance resolved host-side from the widget row's config —
      * `undefined` for widgets with no connector binding. Never a frame-supplied id.
      * Bridge feeds are connector-bound only in v1: a widget configured on a
-     * `threads` or `static` source gets `undefined` here and its subscribes are
-     * refused — those source kinds feed first-party widget kinds natively.
      */
     readonly instanceId: WatchConnectorInstanceId | undefined;
   }) => Promise<void>;
@@ -115,8 +94,6 @@ export interface WatchAppHostHandlers {
    * `arguments` is frame-controlled except `instanceId`: the bridge applies
    * the same foreign-instance check as subscribe before this runs, so a
    * surviving `instanceId` can only equal the widget's own binding. Every
-   * other argument is unvetted — handlers must not treat other id-shaped
-   * keys as host-authorized.
    */
   readonly invokeAction: (input: {
     readonly name: string;
@@ -283,7 +260,6 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
   // closes each stale feed (with an error notice so the widget can
   // re-subscribe under the new binding) instead of streaming the old
   // instance's data indefinitely. Runs before every inbound request is
-  // handled and every outbound item posts.
   const recheckBindings = () => {
     if (open.size === 0) return;
     const bound = options.connectorInstanceId();
@@ -515,15 +491,6 @@ export function makeWatchAppHost(options: WatchAppHostOptions): WatchAppHost {
  * The fixed document prelude: defines `globalThis.T3` (`h`/`Fragment` for the
  * JSX pragma, `render`, and the bridge client) before the bundle runs, and the
  * transport both sides of the bridge share — `ReactNativeWebView` inside the
- * mobile WebView, `window.parent` postMessage in a real frame. It also posts
- * `t3.watch/navigating` on `pagehide`/`beforeunload` — the document's last
- * word before a navigation tears it down, so the host disposes at unload
- * rather than at the next `load`. Because the same prelude text renders on
- * both surfaces, the generated document is byte-identical between web srcdoc
- * and mobile `source.html`.
- *
- * Keep this free of backticks, `${`, and `</script>`; its SHA-256 authorizes it
- * in the document CSP via `WATCH_APP_PRELUDE_SCRIPT_HASH` (asserted by tests).
  */
 export const WATCH_APP_PRELUDE = `(function(){
 var nextRequestId=0;
@@ -688,14 +655,6 @@ const SCRIPT_HASH_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
  * The frame document's Content-Security-Policy, sent as a meta tag so the same
  * policy governs a srcdoc iframe (which cannot carry response headers) and the
  * mobile WebView. No fetch channels: `default-src 'none'`,
- * `connect-src 'none'`, no `img-src`/`font-src` — but CSP governs subresource
- * loads, not browsing-context navigation. The sandboxed frame can still
- * navigate *itself* (and the navigation URL can carry widget-visible data
- * out); containment for that is the frame's post-mortem load watchdog plus
- * the prelude's pagehide notice, not this policy. `style-src 'unsafe-inline'`
- * permits the inline base style and widget-authored inline styles — a
- * deliberate tradeoff recorded in the plan; scripts get no such allowance and
- * are hash-authorized only.
  */
 export function watchAppContentSecurityPolicy(scriptHash: string): string {
   if (!SCRIPT_HASH_PATTERN.test(scriptHash)) {
@@ -708,10 +667,6 @@ export function watchAppContentSecurityPolicy(scriptHash: string): string {
  * The srcdoc/source.html for one published widget: CSP meta first, then the
  * prelude that defines `T3`, then the transpiled IIFE bundle — each inline
  * script authorized by its own CSP hash. `scriptHash` must be the record's
- * base64 SHA-256 of the emitted bundle; a mismatch blocks the script by design.
- * The bundle is spliced verbatim so the hash matches the artifact bytes; a
- * literal `</script>` inside the bundle would truncate its block and fail the
- * hash check, which degrades to a dead widget rather than an injected one.
  */
 export function buildWatchAppDocument(input: {
   readonly bundle: string;
@@ -743,8 +698,6 @@ export type WatchAppArtifactState =
  * Resolves the stream of source records plus the fetched bundle into one
  * renderable state. `record` is `undefined` while its stream is still loading
  * and `null` once nothing is published; `bundle` is `undefined` while a
- * `ready` record's artifact is still being fetched, `null` once a fetch came
- * back empty.
  */
 export function resolveWatchAppArtifact(
   record: WatchWidgetSourceRecord | null | undefined,

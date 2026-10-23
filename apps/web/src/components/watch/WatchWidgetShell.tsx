@@ -62,10 +62,6 @@ const GRIP_KEY_DELTAS: Record<string, readonly [number, number]> = {
  * The card chrome around every watch widget: fixed 28px header carrying the
  * provenance marker and title, and a content region. In edit mode the header
  * gains the configure gear, the drag grip (the only move handle), and the
- * overflow menu, and the card gains resize hit zones on every edge center
- * and both bottom corners. While `configuring`, the header swaps to the
- * "Configure" title and a Check "Done" that submits the swapped-in settings
- * form by id; the drag/resize affordances are suppressed for the duration.
  */
 export function WatchWidgetShell(props: {
   readonly widget: WatchWidget;

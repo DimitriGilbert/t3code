@@ -2,14 +2,6 @@
  * Tiny intent bus between app-level entry points (command palette,
  * keybindings, menus) and the mounted /watch screen. Actions emitted while no
  * screen is listening — e.g. fired right before navigating to /watch — are
- * queued and delivered when the screen mounts its listener.
- *
- * The queue is deliberately bounded: the only intended emit is "right around
- * a navigation to /watch", so a queued action that is not picked up within
- * {@link QUEUED_ACTION_TTL_MS} is stale intent — a `/pair` redirect that
- * swallowed the navigation, or an off-route keybinding — and must not
- * detonate on an unrelated mount minutes later. The backlog is also capped,
- * so a burst of off-route emits keeps only the newest few.
  */
 export type WatchUiAction =
   | "new-page"

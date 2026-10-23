@@ -2232,8 +2232,6 @@ const WsWatchConnectorsRequestUpgradeRpc = Rpc.make(WS_METHODS.watchConnectorsRe
  * Returns the pending request plus the single-use confirmation token bound
  * to its manifest hash. Minting needs only operate scope — the enforced
  * boundary is `environment:maintain` on the confirm calls plus this
- * method's absence from the MCP toolkit, so an agent can open a request
- * but never rule on it.
  */
 const WsWatchConnectorsPrepareInstallConfirmRpc = Rpc.make(
   WS_METHODS.watchConnectorsPrepareInstallConfirm,

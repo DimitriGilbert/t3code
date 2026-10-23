@@ -9,7 +9,6 @@ import {
 } from "@t3tools/client-runtime/state/watch-widgets";
 import type { EnvironmentId, ProjectId, ScopedThreadRef, WatchWidget } from "@t3tools/contracts";
 import { ArrowUpLeftIcon } from "lucide-react";
-import { useMemo } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -53,7 +52,7 @@ function SubagentRunRow(props: {
   // The parent's projection is where workflow membership lives: find this
   // run by its child thread (or its background-task id when it has none) to
   // show the phase, e.g. "Refactor · Phase 2".
-  const workflowLabel = useMemo(() => {
+  const workflowLabel = (() => {
     if (detail === null) return null;
     const agents = projectedSubagentsToRuntime(detail.projection.subagents);
     const agent =
@@ -66,7 +65,7 @@ function SubagentRunRow(props: {
       return `${agent.workflowName} · ${agent.phaseTitle}`;
     }
     return agent.workflowName ?? agent.phaseTitle;
-  }, [detail, item.thread, item.taskId]);
+  })();
 
   const target = item.thread ?? item.parentThread;
   const status = STATUS_BADGE[item.status];

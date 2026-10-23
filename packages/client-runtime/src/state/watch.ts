@@ -60,8 +60,6 @@ export function createWatchEnvironmentAtoms<R, E>(
    * Revision-checked mutation built on `createEnvironmentRpcCommand`: the
    * shared boundary keeps the grant check and the `RpcPermissionGuard`
    * install. The `run` wrapper only adds the conflict flag — a settled
-   * failure whose squashed cause is the revision conflict marks the page for
-   * reload, the same tagged-value check the caller's toast path applies.
    */
   const revisionCheckedCommand = <TTag extends EnvironmentUnaryRpcTag>(
     label: string,
@@ -196,8 +194,6 @@ export function createWatchEnvironmentAtoms<R, E>(
      * Mints the single-use token bound to the pending request's manifest
      * hash (and, for `localUrl` requests, performs the deferred fetch under
      * the caller-asserted `allowLocalUrl` acknowledgement). Only operate
-     * scope is needed to mint — the enforced boundary is
-     * `environment:maintain` on the confirm calls plus MCP absence.
      */
     prepareConnectorInstallConfirm: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:watch:connector-prepare-install-confirm",

@@ -643,7 +643,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       screen: WatchRouteScreen,
       linking: "watch",
       options: {
-        ...PULL_REQUEST_HEADER_OPTIONS,
+        ...DETAIL_HEADER_OPTIONS,
         title: "Watch",
       },
     }),

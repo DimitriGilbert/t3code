@@ -28,8 +28,6 @@ const STATUS_BADGE: Record<
  * The environment's scheduled tasks as watch rows: failures lead, then
  * enabled tasks by soonest run, paused tasks last. The list rides the
  * existing `scheduledTasksLive` subscription — the widget adds no wire
- * traffic of its own beyond what the settings screen already opens.
- * Rows open the scheduled-tasks settings screen focused on the task.
  */
 export function WatchScheduledTasksWidget(props: {
   readonly environmentId: EnvironmentId;

@@ -104,9 +104,6 @@ function initialDraft(
  * The generated settings form for one connector instance's `config`, opened
  * from the row menu. Fields come from the pack manifest's `authSchema`
  * (JSON-schema-lite: `properties`/`required`/`additionalProperties`); values
- * are scalars only and secrets are never part of this form — they have their
- * own dialog. Submitting sends the merged config through `setInstanceConfig`,
- * which also restarts the poller.
  */
 export function WatchConnectorConfigDialog(props: {
   readonly instance: WatchConnectorInstance;
@@ -164,7 +161,7 @@ export function WatchConnectorConfigDialog(props: {
         <DialogHeader>
           <DialogTitle>Edit config</DialogTitle>
           <DialogDescription>
-            {instance.name ?? instance.packId} — saving restarts the connector.
+            {instance.name ?? instance.packId}. Saving restarts the connector.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>

@@ -925,12 +925,15 @@ importers:
       stream-json:
         specifier: 3.6.0
         version: 3.6.0
-      undici:
+      tldts:
         specifier: 'catalog:'
-        version: 8.11.2
+        version: 7.4.2
       tsc-rs:
         specifier: 0.6.0
         version: 0.6.0
+      undici:
+        specifier: 'catalog:'
+        version: 8.11.2
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -1251,6 +1254,9 @@ importers:
       '@types/react-dom':
         specifier: 'catalog:'
         version: 19.3.0(@types/react@19.3.0)
+      '@types/react-test-renderer':
+        specifier: 19.1.0
+        version: 19.1.0
       '@types/sql.js':
         specifier: 1.4.11
         version: 1.4.11
@@ -1275,6 +1281,9 @@ importers:
       playwright:
         specifier: 1.60.0
         version: 1.60.0
+      react-test-renderer:
+        specifier: 19.2.6
+        version: 19.2.6(react@19.3.0)
       tailwindcss:
         specifier: 4.3.3
         version: 4.3.3
@@ -6645,10 +6654,22 @@ packages:
   '@tiptap/starter-kit@3.31.3':
     resolution: {integrity: sha512-WKof9RewdmGHvWJ1wn0/HVNG2mV+HOgVRyJkKekuM9fgr6BZAAH/xZsWE1eon+94JnQ+KtK2ThydXQM/qc6b2A==}
 
+  '@tsc-rs/darwin-arm64@0.6.0':
+    resolution: {integrity: sha512-9aToB7RVGciaousuImyOqAx2xGiE9g+kCqrQaoR2uiGKxItPcRY+V/bsCP/VIg4O/qWrz6EU128gbyoxG5SKDA==}
+    engines: {node: '>=16.20.0'}
+    cpu: [arm64]
+    os: [darwin]
+
   '@tsc-rs/darwin-arm64@0.8.0':
     resolution: {integrity: sha512-1aGCULRzd7KXIFh72Ja1K+35bQ1AeW9P3F3S36MXXhp5EQCezqxeXKkL3kQ3kH+ebfI/wA2gxyus34rllF1keQ==}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
+    os: [darwin]
+
+  '@tsc-rs/darwin-x64@0.6.0':
+    resolution: {integrity: sha512-OT/KmLYe47I4G7cCueorXeWRihCvOVd0+3dud8AtoQ+s6UrtasM9oz+rxvA9oK+F7eAWnxxrg9OeHAvmQtZVEA==}
+    engines: {node: '>=16.20.0'}
+    cpu: [x64]
     os: [darwin]
 
   '@tsc-rs/darwin-x64@0.8.0':
@@ -6657,10 +6678,22 @@ packages:
     cpu: [x64]
     os: [darwin]
 
+  '@tsc-rs/linux-arm64@0.6.0':
+    resolution: {integrity: sha512-BG+gJQ3rE2vk/XhkZ5XIg2utrkiBp4Mk5y+CKTuOfy88+P8RgkLmPmPlk/cY3ona7xm61Dg4T5LuNjsY7nxsrQ==}
+    engines: {node: '>=16.20.0'}
+    cpu: [arm64]
+    os: [linux]
+
   '@tsc-rs/linux-arm64@0.8.0':
     resolution: {integrity: sha512-mo8qBCCgvMv7jYJrYSbHjc5CBVkzMQiJFOVF6oL4nP7sp/QjywskFZwUduw8Yn1MX83fR1zbJbhAkKtlwRZ3hg==}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
+    os: [linux]
+
+  '@tsc-rs/linux-x64@0.6.0':
+    resolution: {integrity: sha512-I7OFBKqdLF9TzRYQ9VTRHFqKQiIAnpDo7EkSx/0jtwclYz9piosrual6yC3NP4sFaLSPCIMZkscHnGOs/6aCoA==}
+    engines: {node: '>=16.20.0'}
+    cpu: [x64]
     os: [linux]
 
   '@tsc-rs/linux-x64@0.8.0':
@@ -6674,10 +6707,22 @@ packages:
     engines: {node: '>=16.20.0'}
     hasBin: true
 
+  '@tsc-rs/win32-arm64@0.6.0':
+    resolution: {integrity: sha512-/ZQTIaLdn7pSYrvvB0lTTQ9EREYNIRIfWC08qeMXwHIoABxDf0vKW8GdoOrZOB5RAOS6wmZYD9UpDfOW0qbmzg==}
+    engines: {node: '>=16.20.0'}
+    cpu: [arm64]
+    os: [win32]
+
   '@tsc-rs/win32-arm64@0.8.0':
     resolution: {integrity: sha512-JNycrZs0LcZ8Rx1+Ik3z9R7YkNIKE2ZQjWKmI6os3EpGrMpfSztFYhbuI0whiZpFfL0AqaVu4o0F1+oR0Z8YDQ==}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
+    os: [win32]
+
+  '@tsc-rs/win32-x64@0.6.0':
+    resolution: {integrity: sha512-0/2p/llHCgdopwRY/jsNpkS4foXHTeOGNsUKu/omX7FxXXhV57kodpDl+fjCZVPsInFHVGynrrN/fb2cfqw0cA==}
+    engines: {node: '>=16.20.0'}
+    cpu: [x64]
     os: [win32]
 
   '@tsc-rs/win32-x64@0.8.0':
@@ -10900,6 +10945,11 @@ packages:
     resolution: {integrity: sha512-jCvmsr+1IUSMUyzOkRcvnVbX3ZYC6g9TDrDbFuFmRDq7PD4yaGbLKNQL6k2jnArV8hjYxh7hVhAZB6s9HDGpZA==}
     engines: {node: '>=0.10.0'}
 
+  react-test-renderer@19.2.6:
+    resolution: {integrity: sha512-GbS6V23YduFTPiWJ5xICbKEjRcqx1Z90js/V5miqhz7qp/d6xSe9Dd6NjSQODFRdzdsqRMPW82E/sFpPRbY5Mw==}
+    peerDependencies:
+      react: ^19.2.6
+
   react@19.3.0:
     resolution: {integrity: sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==}
     engines: {node: '>=0.10.0'}
@@ -11098,6 +11148,9 @@ packages:
   saxes@6.0.0:
     resolution: {integrity: sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==}
     engines: {node: '>=v12.22.7'}
+
+  scheduler@0.27.0:
+    resolution: {integrity: sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q==}
 
   scheduler@0.28.0:
     resolution: {integrity: sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==}
@@ -11575,6 +11628,11 @@ packages:
 
   ts-algebra@2.0.0:
     resolution: {integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==}
+
+  tsc-rs@0.6.0:
+    resolution: {integrity: sha512-n2Y3ZF6rylMvIJHVwqDf2r7y4SpR5a81OqG4/FlmcasIl4GJ80fLiBa2xEj/nRAHhheQxzbhw5GSe/oU7ZeImA==}
+    engines: {node: '>=16.20.0'}
+    hasBin: true
 
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
@@ -16494,13 +16552,25 @@ snapshots:
       '@tiptap/extensions': 3.31.3(@tiptap/core@3.31.3(@tiptap/pm@3.31.3))(@tiptap/pm@3.31.3)
       '@tiptap/pm': 3.31.3
 
+  '@tsc-rs/darwin-arm64@0.6.0':
+    optional: true
+
   '@tsc-rs/darwin-arm64@0.8.0':
+    optional: true
+
+  '@tsc-rs/darwin-x64@0.6.0':
     optional: true
 
   '@tsc-rs/darwin-x64@0.8.0':
     optional: true
 
+  '@tsc-rs/linux-arm64@0.6.0':
+    optional: true
+
   '@tsc-rs/linux-arm64@0.8.0':
+    optional: true
+
+  '@tsc-rs/linux-x64@0.6.0':
     optional: true
 
   '@tsc-rs/linux-x64@0.8.0':
@@ -16515,7 +16585,13 @@ snapshots:
       '@typescript/typescript-win32-arm64': '@tsc-rs/win32-arm64@0.8.0'
       '@typescript/typescript-win32-x64': '@tsc-rs/win32-x64@0.8.0'
 
+  '@tsc-rs/win32-arm64@0.6.0':
+    optional: true
+
   '@tsc-rs/win32-arm64@0.8.0':
+    optional: true
+
+  '@tsc-rs/win32-x64@0.6.0':
     optional: true
 
   '@tsc-rs/win32-x64@0.8.0':
@@ -21511,6 +21587,12 @@ snapshots:
 
   react-refresh@0.14.2: {}
 
+  react-test-renderer@19.2.6(react@19.3.0):
+    dependencies:
+      react: 19.3.0
+      react-is: 19.2.7
+      scheduler: 0.27.0
+
   react@19.3.0: {}
 
   read-binary-file-arch@1.0.6(supports-color@8.1.1):
@@ -21801,6 +21883,8 @@ snapshots:
   saxes@6.0.0:
     dependencies:
       xmlchars: 2.2.0
+
+  scheduler@0.27.0: {}
 
   scheduler@0.28.0: {}
 
@@ -22335,6 +22419,15 @@ snapshots:
       utf8-byte-length: 1.0.5
 
   ts-algebra@2.0.0: {}
+
+  tsc-rs@0.6.0:
+    optionalDependencies:
+      '@tsc-rs/darwin-arm64': 0.6.0
+      '@tsc-rs/darwin-x64': 0.6.0
+      '@tsc-rs/linux-arm64': 0.6.0
+      '@tsc-rs/linux-x64': 0.6.0
+      '@tsc-rs/win32-arm64': 0.6.0
+      '@tsc-rs/win32-x64': 0.6.0
 
   tslib@2.8.1: {}
 

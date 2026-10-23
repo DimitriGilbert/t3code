@@ -49,9 +49,14 @@
         "scripts/update-test-shard-weights.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
+        // Watch-connector test packs install by directory path and the latency
+        // fixture spawns the stub CLI as a subprocess.
+        "src/watch/__fixtures__/**/*.{js,mjs,ts,tsx}",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],
+      // Vendored wasm/js artifacts load through createRequire by URL, never by import.
+      "ignore": ["vendor/**"],
       // The generated operations export every selection's class.
       "ignoreIssues": { "**/*.graphql.ts": ["exports", "types", "namespaceMembers"] },
       // Keep the transitive Effect runtime pinned for standalone npm installs.

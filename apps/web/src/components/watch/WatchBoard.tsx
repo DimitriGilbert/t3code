@@ -27,7 +27,7 @@ import {
   type WatchResizeEdge,
 } from "@t3tools/client-runtime/state/watch-pages";
 import type { WatchWidget, WatchWidgetId, WatchWidgetPlacement } from "@t3tools/contracts";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
@@ -60,14 +60,6 @@ interface BoardMetrics {
  * The board's breakpoint contract:
  * - >=1200px: the stored 12-column placement grid, editable in edit mode.
  * - 768–1200px: a 6-column canonical-order reflow, view-only.
- * - <768px: a single column, the same derived rule mobile renders.
- * Reflowed layouts are render-time views; stored placements are never
- * rewritten to match them.
- *
- * Layout gestures never mutate widgets mid-gesture: the drag/resize produces
- * a ghost candidate that commits one revision-checked `setLayout` on drop.
- * Overlap is forbidden — a colliding ghost tints destructive and its drop is
- * a no-op; Escape cancels the gesture outright.
  */
 export function WatchBoard(props: {
   readonly widgets: ReadonlyArray<WatchWidget>;
@@ -87,7 +79,7 @@ export function WatchBoard(props: {
 }) {
   const wide = useMediaQuery({ min: WATCH_GRID_EDIT_MIN_WIDTH_PX });
   const stacked = useMediaQuery({ max: WATCH_GRID_STACK_MIN_WIDTH_PX - 1 });
-  const ordered = useMemo(() => canonicalWatchWidgetOrder(props.widgets), [props.widgets]);
+  const ordered = canonicalWatchWidgetOrder(props.widgets);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const [interaction, setInteraction] = useState<BoardInteraction | null>(null);
   const interactionRef = useRef<BoardInteraction | null>(null);
@@ -106,10 +98,10 @@ export function WatchBoard(props: {
   // 12-column board — candidates always run on the canonical grid.
   const editing = props.editing && wide;
 
-  const mediumPlacements = useMemo(() => {
+  const mediumPlacements = (() => {
     if (wide || stacked) return null;
     return reflowWatchPlacements(ordered, WATCH_GRID_MEDIUM_COLUMNS);
-  }, [ordered, stacked, wide]);
+  })();
 
   const setInteractionState = (next: BoardInteraction | null) => {
     interactionRef.current = next;

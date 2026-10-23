@@ -42,33 +42,6 @@ import * as ServerConfig from "../config.ts";
  * Agent-authored widget pipeline: `publish` validates the bridge manifest,
  * transpiles the single-file TS/TSX source through tsc-rs into an IIFE
  * artifact cached on disk by content hash, and records the outcome as a
- * `WatchWidgetSourceRecord`. Two compile backends produce the same emit:
- * the vendored in-process wasm module is preferred, and the native
- * `@tsc-rs/*` compiler server is the automatic fallback when the wasm file
- * assets do not exist (a SEA bundle). A bad build is *data*, not a call
- * failure — the record's `transpileFailed` state is what the widget shell
- * renders; only manifest shape, source-size, and rate-limit violations
- * reject the call.
- *
- * Emitted code contract (the hardened host document owns the other half):
- * the artifact is a self-contained IIFE. `transpileModule` rewrites one
- * file; it never resolves specifiers. Compiling as CommonJS turns every
- * module form into detectable residue — static `import`/`export … from`,
- * `import x = require("y")`, and literal `import("y")` all lower to
- * `require(...)`/`exports.`/`module.exports` plumbing, while `import(expr)`
- * and `import.meta` survive verbatim — and output still containing any of
- * it is rejected, so a source can never smuggle filesystem contents into
- * the artifact or defer to modules that do not exist in the frame.
- * `</script` sequences are escaped to `<\/script` so the bundle cannot
- * close its own inline script tag; `scriptHash` covers the escaped bytes
- * actually served. JSX compiles to the `T3` host global (`T3.h`,
- * `T3.Fragment`), which the generated document defines before the bundle
- * runs.
- *
- * The artifact directory is bounded by count and byte caps: publishing a
- * new pair evicts the oldest pairs through the same removal path as
- * `remove` — files, cached record, tombstone — so the store cannot grow
- * without bound, and `get`/`publish` already tolerate missing files.
  */
 
 export type TscRsModule = typeof import("tsc-rs/unstable/async");
@@ -77,8 +50,6 @@ export type TscRsModule = typeof import("tsc-rs/unstable/async");
 // per-platform `@tsc-rs/<os>-<arch>` binary on the real filesystem. Inside a
 // Node SEA `import`/`import()` cannot reach file-backed packages, so — like
 // node-pty — it loads through createRequire, which works in every runtime.
-// The package is ESM, which `require()` loads through Node's require(esm)
-// path (unflagged since Node 22.12, below our minimum engine).
 const requireForTscRs = NodeModule.createRequire(import.meta.url);
 
 const SOURCE_ID_PREFIX = "watch-widget-source:";
@@ -121,9 +92,6 @@ export class WidgetTranspileError extends Schema.TaggedError<WidgetTranspileErro
      * `unavailable` marks the tsc-rs module or its platform binary as
      * missing/broken — latched by `makeTranspile` so later publishes fast-fail
      * instead of re-probing. `failed` is a per-source build diagnostic *or*
-     * any other non-diagnostic rejection (a wedged compiler server, spawn
-     * pressure); only the verifiably-permanent missing-binary signature
-     * latches.
      */
     reason: Schema.Literals(["unavailable", "failed"]),
     detail: Schema.String,
@@ -141,8 +109,6 @@ export class WidgetSourceTranspiler extends Context.Service<
  * Latches the first `unavailable` transpile failure: a missing or mismatched
  * `@tsc-rs/*` platform binary cannot appear mid-process, so re-probing on
  * every publish would just fail the same way. Only that signature is
- * classified `unavailable` — transient compiler-server rejections and
- * per-source diagnostics are `failed` and pass through every time.
  */
 export const makeTranspile = (
   build: (source: string) => Effect.Effect<string, WidgetTranspileError>,
@@ -167,17 +133,6 @@ export const makeTranspile = (
  * `transpileModule` rewrites one file; it never resolves specifiers.
  * `module: CommonJS` is load-bearing for the residue scan below: every
  * import/export form compiles to `require(...)`/`exports.`/`module.exports`
- * plumbing — `import x = require("y")` is the case that silently vanishes
- * under `module: none` — so module syntax can never emit as a working
- * script that reached for a module the frame does not have. JSX lowers to
- * the host-provided T3 global.
- *
- * The enum members are RawCompilerOptions' wire values
- * (ScriptTarget.ES2022, ModuleKind.CommonJS, JsxEmit.React); keeping them
- * literal means `makeBuild`'s client never has to carry the enum exports.
- * `strict` is inert for `transpileModule` — it reports only parse/options
- * diagnostics, never semantic ones — but is kept so the option set matches
- * the tsconfig contract these sources are written against.
  */
 const WIDGET_COMPILER_OPTIONS = {
   target: 9,
@@ -193,10 +148,6 @@ const WIDGET_COMPILER_OPTIONS = {
  * Module machinery in the emitted artifact means the source reached for a
  * module the widget frame does not have: a verbatim `import(` or
  * `import.meta`, CommonJS plumbing from lowered import/export forms
- * (`require(`, `exports.`, `module.exports`), or a `__require` shim. The
- * preceding-character check spares member lookups such as `foo.require(x)`.
- * Rather than ship a live module specifier in hash-authorized code,
- * `makeBuild` fails the build.
  */
 const FORBIDDEN_ARTIFACT_PATTERN =
   /(?<![\w$.])(?:import\s*\(|import\.meta|require\s*\(|__require\b|exports\.|module\.exports\b)/g;
@@ -208,8 +159,6 @@ const REQUIRED_SPECIFIER_PATTERN = /(?<![\w$.])require\s*\(\s*["'`]([^"'`]+)["'`
  * `</script` in artifact bytes would close the host document's inline
  * script tag early — at best a dead widget under the CSP hash, at worst a
  * vector under a weaker embedding. `\/` is the same character as `/` to the
- * JS parser, so escaping is a runtime no-op. It runs in `publish` before
- * `scriptHash` is computed, so the hash covers the bytes actually served.
  */
 const escapeScriptCloseTags = (text: string) => text.replace(/<\/script/gi, "<\\/script");
 
@@ -217,10 +166,6 @@ const escapeScriptCloseTags = (text: string) => text.replace(/<\/script/gi, "<\\
  * The only non-diagnostic rejection worth latching `unavailable`: a missing
  * or mismatched `@tsc-rs/*` platform binary cannot appear mid-process. Its
  * signatures are `ENOENT` on the spawned binary and the wrapper's
- * `Unable to resolve @tsc-rs/<pkg>` / `Executable not found` messages.
- * Everything else — `EMFILE`/`EAGAIN` spawn pressure, a wedged compiler
- * server, a panic on pathological input — is a per-source `failed` so the
- * next publish retries cleanly.
  */
 const MISSING_BINARY_PATTERN = /ENOENT|@tsc-rs\/|Executable not found/;
 
@@ -273,10 +218,6 @@ const toTranspileError = (cause: unknown): WidgetTranspileError => {
  * One source's transpile through the shared compiler client. There is no
  * per-request cancellation: interrupting the `tryPromise` (a
  * `transpileTimeoutMs` expiry or fiber interrupt) abandons the wait while
- * the request keeps running inside the shared server — a hung transpile can
- * stall the requests queued behind it, which surface as `failed` timeouts
- * rather than crashing the layer. Exported so tests can drive it with a
- * fake client.
  */
 export const makeBuild =
   (client: WidgetTscRsClient) =>
@@ -349,10 +290,6 @@ export interface TsRustWasmCompiler {
  * The tsconfig the wasm backend compiles against. A real `tsc -p` run
  * typechecks and resolves modules, so `noCheck` and `noResolve` bring it
  * back to `transpileModule`'s contract — parse/options diagnostics only,
- * and imports never reach a real fs — keeping both backends accepting and
- * rejecting the same sources before the residue scan runs. The enum-valued
- * options mirror `WIDGET_COMPILER_OPTIONS` (target 9 = ES2022, module 1 =
- * CommonJS, jsx 2 = react); keep them in sync.
  */
 const WIDGET_WASM_TSCONFIG_JSON = JSON.stringify({
   compilerOptions: {
@@ -404,15 +341,6 @@ const formatWasmDiagnostics = (diagnostics: readonly Diagnostic[]) => {
  * Adapts the vendored wasm compiler to the `WidgetTscRsClient` seam: each
  * `transpileModule` is one `runTscAsync` against a memory file system
  * holding only `widget.tsx` and the generated tsconfig — the compile can
- * never touch the real filesystem. `compilerOptions`/`fileName` are the
- * native-path parameters; the wasm run's fixed compile profile lives in
- * `WIDGET_WASM_TSCONFIG_JSON`.
- *
- * `runTscAsync` returns a promise so the call composes with
- * `transpileTimeoutMs`, but the wasm itself still executes on the calling
- * thread (Node has no JSPI): an interruption abandons the result rather
- * than preempting the run — the same "no per-request cancel" posture as
- * the native server.
  */
 export const makeWasmClient = (compiler: TsRustWasmCompiler): WidgetTscRsClient => {
   const stderrDecoder = new TextDecoder();
@@ -460,11 +388,6 @@ export const makeWasmClient = (compiler: TsRustWasmCompiler): WidgetTscRsClient 
  * The vendored module is a file asset, so it resolves by path — the same
  * posture as the tsc-rs createRequire load. `vendor/ts-rust-wasm/` sits at
  * the package root: two levels up from `src/watch/` in the source layout,
- * one up from `dist/` in the packed bundle. Where file assets do not exist
- * — inside a Node SEA, or an artifact that did not stage the dir — every
- * probe fails, this effect fails `unavailable`, and
- * `makeTranspilerLayer` falls back to the native backend. The wasm probe
- * is never the `unavailable` latch.
  */
 const WASM_VENDOR_URLS = [
   new URL("../../vendor/ts-rust-wasm/", import.meta.url),
@@ -508,18 +431,6 @@ const loadTscRs = Effect.try({
  * Backend selection: the vendored in-process wasm compiler is preferred —
  * no child process, no platform binary — and is probed once at layer init.
  * A probe failure (missing file assets in a SEA, a corrupt module) is the
- * fallback trigger, not a latch: the native tsc-rs compiler server below
- * keeps its old semantics, so when wasm is absent AND native cannot load
- * either, the publish path fails `unavailable` through the existing latch.
- *
- * The native side is unchanged: one lazily-spawned compiler server shared
- * by every publish. The module require is the first probe (a missing
- * tsc-rs package caches `unavailable` through `Effect.cached` +
- * `makeTranspile`'s latch); the first `transpileModule` is the second —
- * `API` connects to its child process on first request, so a missing
- * `@tsc-rs/<os>-<arch>` binary surfaces there. Caching the client also
- * dedupes concurrent first publishes onto a single server. The API is
- * closed when the layer's scope ends.
  */
 export const makeTranspilerLayer = (
   tscRsModule: Effect.Effect<TscRsModule, WidgetTranspileError>,
@@ -623,8 +534,6 @@ export class WidgetTranspileService extends Context.Service<
      * The way out of publish, server-side only: deletes the source's artifact
      * and sidecar meta, drops the cached record, and emits a `null` tombstone
      * so live subscribers re-render the missing-source state. A sourceId that
-     * cannot name an artifact still drops its record — it just has no files.
-     * Artifact-store eviction runs the same path for over-cap pairs.
      */
     readonly remove: (
       input: WatchWidgetSourceGetInput,
@@ -732,30 +641,29 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
        * fetchable, matching the state a failed removal should leave — then
        * the cached record drops and subscribers get a `null` tombstone.
        */
-      const dropArtifact = (artifactHash: string, sourceId: WatchWidgetSourceId) =>
-        Effect.gen(function* () {
-          yield* Effect.all(
-            [
-              fs.remove(artifactPath(artifactHash), { force: true }),
-              fs.remove(metaPath(artifactHash), { force: true }),
-            ],
-            { concurrency: 1, discard: true },
-          );
-          yield* Ref.update(records, (map) => {
-            const next = new Map(map);
-            next.delete(sourceId);
-            return next;
-          });
-          yield* PubSub.publish(publishes, { sourceId, record: null });
+      const dropArtifact = Effect.fn("dropArtifact")(function* (
+        artifactHash: string,
+        sourceId: WatchWidgetSourceId,
+      ) {
+        yield* Effect.all(
+          [
+            fs.remove(artifactPath(artifactHash), { force: true }),
+            fs.remove(metaPath(artifactHash), { force: true }),
+          ],
+          { concurrency: 1, discard: true },
+        );
+        yield* Ref.update(records, (map) => {
+          const next = new Map(map);
+          next.delete(sourceId);
+          return next;
         });
+        yield* PubSub.publish(publishes, { sourceId, record: null });
+      });
 
       /**
        * Bounds the artifact directory: pairs past the count or byte caps are
        * evicted oldest-first through `dropArtifact`, so agent-published
        * sources get the same way out as `remove` — files gone, record
-       * dropped, subscribers tombstoned — without a dedicated RPC. A pair's
-       * age is its oldest file mtime; `keepHash` (the pair just written) is
-       * never evicted by the publish that created it.
        */
       const evictArtifacts = Effect.fnUntraced(function* (keepHash: string) {
         const names = yield* fs.readDirectory(serverConfig.widgetArtifactsDir);
@@ -808,8 +716,8 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
         }
       });
 
-      const publishInner = (input: WatchWidgetSourcePublishInput, enforcePublishLimit: boolean) =>
-        Effect.gen(function* () {
+      const publishInner = Effect.fn("publishInner")(
+        function* (input: WatchWidgetSourcePublishInput, enforcePublishLimit: boolean) {
           if (
             input.manifest.subscriptions.length > limits.maxBridgeDeclarations ||
             input.manifest.actions.length > limits.maxBridgeDeclarations
@@ -852,7 +760,6 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           // pack registration neither consumes nor is rejected by it. It
           // sits after the ready-cache-hit early return so republishing an
           // existing artifact is free — a retry loop cannot spend the budget
-          // without doing real transpile work.
           if (enforcePublishLimit) {
             const admitted = yield* Clock.currentTimeMillis.pipe(
               Effect.flatMap((now) =>
@@ -877,7 +784,6 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           // the timeout bounds only a hung transpile. The shared tsc-rs
           // server has no per-request cancel, so interruption abandons the
           // wait while the request keeps running there. Either way the
-          // outcome is written as a record — data, never an effect failure.
           const transpiled = yield* transpiler.transpile(input.source).pipe(
             Effect.result,
             Effect.timeoutOrElse({
@@ -949,13 +855,13 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
 
           yield* storeRecord(record);
           return { source: record };
-        }).pipe(
-          Effect.mapError((cause) =>
-            isSourceError(cause)
-              ? cause
-              : sourceError("artifactStoreFailed", "Widget source publish failed.", { cause }),
-          ),
-        );
+        },
+        Effect.mapError((cause) =>
+          isSourceError(cause)
+            ? cause
+            : sourceError("artifactStoreFailed", "Widget source publish failed.", { cause }),
+        ),
+      );
 
       const publish: WidgetTranspileService["Service"]["publish"] = (input) =>
         publishInner(input, true);
@@ -963,8 +869,8 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
       const publishTrusted: WidgetTranspileService["Service"]["publishTrusted"] = (input) =>
         publishInner(input, false);
 
-      const remove: WidgetTranspileService["Service"]["remove"] = (input) =>
-        Effect.gen(function* () {
+      const remove: WidgetTranspileService["Service"]["remove"] = Effect.fn("remove")(
+        function* (input) {
           const artifactHash = input.sourceId.startsWith(SOURCE_ID_PREFIX)
             ? input.sourceId.slice(SOURCE_ID_PREFIX.length)
             : null;
@@ -985,16 +891,16 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
             });
             yield* PubSub.publish(publishes, { sourceId: input.sourceId, record: null });
           }
-        }).pipe(
-          Effect.mapError((cause) =>
-            isSourceError(cause)
-              ? cause
-              : sourceError("artifactStoreFailed", "Widget source removal failed.", { cause }),
-          ),
-        );
+        },
+        Effect.mapError((cause) =>
+          isSourceError(cause)
+            ? cause
+            : sourceError("artifactStoreFailed", "Widget source removal failed.", { cause }),
+        ),
+      );
 
-      const get: WidgetTranspileService["Service"]["get"] = (input) =>
-        Effect.gen(function* () {
+      const get: WidgetTranspileService["Service"]["get"] = Effect.fn("get")(
+        function* (input) {
           const record = yield* loadRecord(input.sourceId);
           if (record === null) return { source: null, bundle: null };
           if (record.status !== "ready") return { source: record, bundle: null };
@@ -1014,13 +920,13 @@ export const makeLayer = (overrides: Partial<WidgetTranspileLimits> = {}) =>
           );
           yield* storeRecord(degraded);
           return { source: degraded, bundle: null };
-        }).pipe(
-          Effect.mapError((cause) =>
-            isSourceError(cause)
-              ? cause
-              : sourceError("artifactStoreFailed", "Widget source lookup failed.", { cause }),
-          ),
-        );
+        },
+        Effect.mapError((cause) =>
+          isSourceError(cause)
+            ? cause
+            : sourceError("artifactStoreFailed", "Widget source lookup failed.", { cause }),
+        ),
+      );
 
       const subscribe: WidgetTranspileService["Service"]["subscribe"] = (input) =>
         Stream.unwrap(

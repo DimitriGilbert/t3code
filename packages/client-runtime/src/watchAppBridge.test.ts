@@ -30,6 +30,7 @@ const manifest: WatchWidgetBridgeManifest = {
   actions: ["restart"],
 };
 
+// oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- bridge delivery resolves through async handler chains; a macrotask turn is the flush milestone, not a duration assertion
 const flushAsync = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function makeTestHost(
@@ -457,6 +458,7 @@ describe("makeWatchAppHost", () => {
     await flushAsync();
     // Inside the cooldown the re-open has not reached the platform yet.
     expect(opened).toHaveLength(1);
+    // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- delivery lands on a worker postMessage turn the test cannot subscribe to
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(opened).toHaveLength(2);
     expect(opened[1]).toEqual({ name: "status", instanceId });

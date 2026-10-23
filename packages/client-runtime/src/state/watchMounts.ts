@@ -11,9 +11,6 @@ import * as Schema from "effect/Schema";
  * Mount governance for agent-authored watch widgets: at most
  * `WATCH_APP_MOUNT_LIMIT` frames mount at once, a widget mounts lazily when it
  * becomes visible, the least-recently-visible mounted widget is evicted to a
- * "tap to load" placeholder past the cap, and an offscreen widget is fully
- * unmounted. This is pure logic — the shell reports visibility and applies the
- * returned state changes; no DOM lives here.
  */
 export const WATCH_APP_MOUNT_LIMIT = 6;
 

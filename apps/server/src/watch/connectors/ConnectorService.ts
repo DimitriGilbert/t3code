@@ -64,23 +64,7 @@ import * as PackStore from "./PackStore.ts";
 /**
  * Connector pack registry: pending install requests, human-confirmed
  * installs, and instance rows. The split that matters for security:
- *
  * - `requestInstall`/`requestUpgrade` are agent-reachable — they record a
- *   *pending* row, fetching the origin only when it is a local path or a
- *   public https URL. An https URL resolving to a loopback/link-local/
- *   private address is recorded unfetched (`local_url`): an agent can never
- *   trigger a private-range fetch, and a request-supplied `allowLocalUrl`
- *   flag is stripped before anything is stored or fetched.
- * - `prepareInstallConfirm` mints the single-use token bound to
- *   `(requestId, manifestHash)`. For `local_url` requests it also performs
- *   the deferred fetch, but only with an explicit `allowLocalUrl`
- *   acknowledgement on the call. It is a standard-scope RPC but absent from
- *   the MCP toolkit, so an agent can never mint one.
- * - `confirmInstall`/`confirmUpgrade`/`cancelInstallRequest` — the confirms
- *   sit behind `environment:maintain` + `CLIENT_GUARDED_RPC_SCOPES` and a
- *   valid token. Confirm re-fetches the origin and requires the bundle to
- *   hash to the pin recorded at request time, so the bytes a human approved
- *   are the bytes installed.
  */
 export class ConnectorService extends Context.Service<
   ConnectorService,
@@ -105,9 +89,6 @@ export class ConnectorService extends Context.Service<
      * Replaces instance config (validated against the pinned manifest's auth
      * schema) and writes declared secret values into the secret store by key.
      * Secret values never reach the instance row or a client: config entries
-     * keyed by a declared secret name are rejected, migrated config is
-     * scrubbed of secret material before persist, and re-pins prune stored
-     * keys the new manifest no longer declares.
      */
     readonly setInstanceConfig: (
       input: WatchConnectorSetInstanceConfigInput,
@@ -124,9 +105,6 @@ export class ConnectorService extends Context.Service<
      * Server-side only: health writes from the poller, rollback, and
      * confirm. `patch` is a delta merged onto the stored row inside a
      * transaction, so one writer's stale read never clobbers fields another
-     * writer touched (`lastRollback` stays sticky because poller writes
-     * never name it). `updated_at` is untouched so subscribers diffing
-     * instance rows see health as health, not a config change.
      */
     readonly recordHealth: (
       instanceId: WatchConnectorInstanceId,
@@ -154,9 +132,6 @@ export class ConnectorService extends Context.Service<
      * Re-pins an instance to a previously-approved pack version — no fetch:
      * the target's hash-pinned files are already on disk. Runs the target
      * pack's `migrateConfig` when it ships one; a failed migration keeps the
-     * instance's config and flags it unhealthy so widgets render the typed
-     * `configMismatch` state. Every rollback lands in notification history
-     * and on `health.lastRollback` for the Connector status widget.
      */
     readonly rollback: (
       input: WatchConnectorRollbackInput,
@@ -307,8 +282,8 @@ const encodeSecretKeysJson = Schema.encodeSync(SecretKeysJson);
 const encodeHealthJson = Schema.encodeSync(HealthJson);
 const decodeSecretKeysJson = Schema.decodeEffect(SecretKeysJson);
 
-const decodePackRow = (row: PackRow) =>
-  Effect.gen(function* () {
+const decodePackRow = Effect.fn("decodePackRow")(
+  function* (row: PackRow) {
     return yield* decodePack({
       packId: row.pack_id,
       schemaVersion: row.schema_version,
@@ -318,19 +293,22 @@ const decodePackRow = (row: PackRow) =>
       approvedAt: row.approved_at,
       archivedAt: row.archived_at,
     });
-  }).pipe(
-    Effect.mapError((cause) =>
-      isConnectorError(cause)
-        ? cause
-        : connectorError("fetchFailed", "Could not decode connector pack row.", {
-            packId: WatchConnectorPackId.make(row.pack_id),
-            cause,
-          }),
+  },
+  (effect, row) =>
+    effect.pipe(
+      Effect.mapError((cause) =>
+        isConnectorError(cause)
+          ? cause
+          : connectorError("fetchFailed", "Could not decode connector pack row.", {
+              packId: WatchConnectorPackId.make(row.pack_id),
+              cause,
+            }),
+      ),
     ),
-  );
+);
 
-const decodeInstanceRow = (row: InstanceRow) =>
-  Effect.gen(function* () {
+const decodeInstanceRow = Effect.fn("decodeInstanceRow")(
+  function* (row: InstanceRow) {
     return yield* decodeInstance({
       id: row.instance_id,
       packId: row.pack_id,
@@ -345,19 +323,22 @@ const decodeInstanceRow = (row: InstanceRow) =>
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
-  }).pipe(
-    Effect.mapError((cause) =>
-      isConnectorError(cause)
-        ? cause
-        : connectorError("fetchFailed", "Could not decode connector instance row.", {
-            instanceId: WatchConnectorInstanceId.make(row.instance_id),
-            cause,
-          }),
+  },
+  (effect, row) =>
+    effect.pipe(
+      Effect.mapError((cause) =>
+        isConnectorError(cause)
+          ? cause
+          : connectorError("fetchFailed", "Could not decode connector instance row.", {
+              instanceId: WatchConnectorInstanceId.make(row.instance_id),
+              cause,
+            }),
+      ),
     ),
-  );
+);
 
-const decodeRequestRow = (row: RequestRow) =>
-  Effect.gen(function* () {
+const decodeRequestRow = Effect.fn("decodeRequestRow")(
+  function* (row: RequestRow) {
     return yield* decodeRequest({
       id: row.request_id,
       kind: row.kind,
@@ -377,16 +358,19 @@ const decodeRequestRow = (row: RequestRow) =>
           }),
       createdAt: row.created_at,
     });
-  }).pipe(
-    Effect.mapError((cause) =>
-      isConnectorError(cause)
-        ? cause
-        : connectorError("fetchFailed", "Could not decode install request row.", {
-            requestId: WatchConnectorInstallRequestId.make(row.request_id),
-            cause,
-          }),
+  },
+  (effect, row) =>
+    effect.pipe(
+      Effect.mapError((cause) =>
+        isConnectorError(cause)
+          ? cause
+          : connectorError("fetchFailed", "Could not decode install request row.", {
+              requestId: WatchConnectorInstallRequestId.make(row.request_id),
+              cause,
+            }),
+      ),
     ),
-  );
+);
 
 /** Secret values live in the file-backed secret store under a per-instance name. */
 const secretStoreName = (instanceId: string, key: string) => {
@@ -405,8 +389,6 @@ const defaultHealth = {
  * Pending install requests are durable rows any agent can mint — and each
  * mint may trigger an outbound fetch — so both the environment-wide and
  * per-pack totals are capped. Deferred (`pack_id IS NULL`) requests only
- * count toward the environment total; their pack is unknowable until
- * prepare resolves the manifest.
  */
 const MAX_PENDING_REQUESTS = 50;
 const MAX_PENDING_REQUESTS_PER_PACK = 10;
@@ -531,9 +513,6 @@ const unrevocableSecretKey = (
  * Belt-and-suspenders for pack-produced config: a `migrateConfig` return
  * value is arbitrary pack output, so before it is persisted into
  * `config_json` — and thereby broadcast to every client — drop entries keyed
- * by a declared secret name and entries whose string value equals a resolved
- * secret value. Shallow by design: the auth schema decides whether the
- * surviving shape is valid.
  */
 const scrubSecretsFromConfig = (
   manifest: WatchConnectorPackManifest,
@@ -624,13 +603,13 @@ export const layer = Layer.effect(
         ? PackStore.urlResolvesLocal(origin.url).pipe(Effect.provide(packRuntime))
         : Effect.succeed(false);
 
-    const newInstanceId = crypto.randomUUIDv4.pipe(
+    const newInstanceId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) => WatchConnectorInstanceId.make(`watch-connector-instance:${uuid}`)),
       Effect.mapError((cause) =>
         connectorError("fetchFailed", "Could not generate connector instance id.", { cause }),
       ),
     );
-    const newRequestId = crypto.randomUUIDv4.pipe(
+    const newRequestId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) =>
         WatchConnectorInstallRequestId.make(`watch-connector-install-request:${uuid}`),
       ),
@@ -772,8 +751,8 @@ export const layer = Layer.effect(
         ),
       );
 
-    const list: ConnectorService["Service"]["list"] = (input) =>
-      Effect.gen(function* () {
+    const list: ConnectorService["Service"]["list"] = Effect.fn("list")(
+      function* (input) {
         const includeArchived = input.includeArchived === true;
         const [packRows, instanceRows, requestRows, widgetSourceRows] = yield* Effect.all(
           [
@@ -795,7 +774,9 @@ export const layer = Layer.effect(
           concurrency: 1,
         });
         return { packs, instances, installRequests, widgetSources };
-      }).pipe(Effect.mapError(toConnectorError("Could not list connectors.")));
+      },
+      Effect.mapError(toConnectorError("Could not list connectors.")),
+    );
 
     const subscribeList: ConnectorService["Service"]["subscribeList"] = (input) =>
       Stream.unwrap(
@@ -810,8 +791,10 @@ export const layer = Layer.effect(
         }),
       );
 
-    const createInstance: ConnectorService["Service"]["createInstance"] = (input) =>
-      Effect.gen(function* () {
+    const createInstance: ConnectorService["Service"]["createInstance"] = Effect.fn(
+      "createInstance",
+    )(
+      function* (input) {
         const packRows = yield* findCurrentPackRow(input.packId);
         const packRow = packRows[0];
         if (packRow === undefined) {
@@ -837,21 +820,21 @@ export const layer = Layer.effect(
         // claiming configured keys that were never written.
         yield* writeSecrets(id, secretsInput);
         yield* sql`
-          INSERT INTO watch_connector_instances ${sql.insert({
-            instance_id: id,
-            pack_id: input.packId,
-            schema_version: packRow.schema_version,
-            name: input.name ?? null,
-            config_json: encodeConfigJson(config),
-            secret_keys_json: encodeSecretKeysJson(configuredKeys),
-            origin_json: packRow.origin_json,
-            content_hash: packRow.content_hash,
-            health_json: encodeHealthJson(defaultHealth),
-            archived_at: null,
-            created_at: nowIso,
-            updated_at: nowIso,
-          })}
-        `;
+        INSERT INTO watch_connector_instances ${sql.insert({
+          instance_id: id,
+          pack_id: input.packId,
+          schema_version: packRow.schema_version,
+          name: input.name ?? null,
+          config_json: encodeConfigJson(config),
+          secret_keys_json: encodeSecretKeysJson(configuredKeys),
+          origin_json: packRow.origin_json,
+          content_hash: packRow.content_hash,
+          health_json: encodeHealthJson(defaultHealth),
+          archived_at: null,
+          created_at: nowIso,
+          updated_at: nowIso,
+        })}
+      `;
         const instance = yield* findInstance(id);
         if (instance === null) {
           return yield* connectorError("instanceNotFound", "Instance missing after create.", {
@@ -860,10 +843,14 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { instance };
-      }).pipe(Effect.mapError(toConnectorError("Could not create connector instance.")));
+      },
+      Effect.mapError(toConnectorError("Could not create connector instance.")),
+    );
 
-    const updateInstance: ConnectorService["Service"]["updateInstance"] = (input) =>
-      Effect.gen(function* () {
+    const updateInstance: ConnectorService["Service"]["updateInstance"] = Effect.fn(
+      "updateInstance",
+    )(
+      function* (input) {
         const existing = yield* findInstance(input.instanceId);
         if (existing === null || existing.archivedAt !== null) {
           return yield* connectorError(
@@ -874,10 +861,10 @@ export const layer = Layer.effect(
         }
         const nowIso = iso(yield* localNow);
         yield* sql`
-          UPDATE watch_connector_instances
-          SET name = ${input.name}, updated_at = ${nowIso}
-          WHERE instance_id = ${input.instanceId}
-        `;
+        UPDATE watch_connector_instances
+        SET name = ${input.name}, updated_at = ${nowIso}
+        WHERE instance_id = ${input.instanceId}
+      `;
         const instance = yield* findInstance(input.instanceId);
         if (instance === null) {
           return yield* connectorError("instanceNotFound", "Instance missing after update.", {
@@ -886,10 +873,14 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { instance };
-      }).pipe(Effect.mapError(toConnectorError("Could not update connector instance.")));
+      },
+      Effect.mapError(toConnectorError("Could not update connector instance.")),
+    );
 
-    const deleteInstance: ConnectorService["Service"]["deleteInstance"] = (input) =>
-      Effect.gen(function* () {
+    const deleteInstance: ConnectorService["Service"]["deleteInstance"] = Effect.fn(
+      "deleteInstance",
+    )(
+      function* (input) {
         const instance = yield* findInstance(input.instanceId);
         if (instance === null) {
           return yield* connectorError("instanceNotFound", "Connector instance not found.", {
@@ -898,14 +889,18 @@ export const layer = Layer.effect(
         }
         yield* removeSecrets(input.instanceId, instance.configuredSecretKeys);
         yield* sql`
-          DELETE FROM watch_connector_instances WHERE instance_id = ${input.instanceId}
-        `;
+        DELETE FROM watch_connector_instances WHERE instance_id = ${input.instanceId}
+      `;
         yield* notifyChanged;
         return { id: input.instanceId };
-      }).pipe(Effect.mapError(toConnectorError("Could not delete connector instance.")));
+      },
+      Effect.mapError(toConnectorError("Could not delete connector instance.")),
+    );
 
-    const setInstanceConfig: ConnectorService["Service"]["setInstanceConfig"] = (input) =>
-      Effect.gen(function* () {
+    const setInstanceConfig: ConnectorService["Service"]["setInstanceConfig"] = Effect.fn(
+      "setInstanceConfig",
+    )(
+      function* (input) {
         const instance = yield* findInstance(input.instanceId);
         if (instance === null || instance.archivedAt !== null) {
           return yield* connectorError(
@@ -949,12 +944,12 @@ export const layer = Layer.effect(
           .sort();
         const nowIso = iso(yield* localNow);
         yield* sql`
-          UPDATE watch_connector_instances
-          SET config_json = ${encodeConfigJson(input.config)},
-              secret_keys_json = ${encodeSecretKeysJson(configuredKeys)},
-              updated_at = ${nowIso}
-          WHERE instance_id = ${input.instanceId}
-        `;
+        UPDATE watch_connector_instances
+        SET config_json = ${encodeConfigJson(input.config)},
+            secret_keys_json = ${encodeSecretKeysJson(configuredKeys)},
+            updated_at = ${nowIso}
+        WHERE instance_id = ${input.instanceId}
+      `;
         const updated = yield* findInstance(input.instanceId);
         if (updated === null) {
           return yield* connectorError("instanceNotFound", "Instance missing after config write.", {
@@ -963,41 +958,40 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { instance: updated };
-      }).pipe(Effect.mapError(toConnectorError("Could not update connector instance config.")));
+      },
+      Effect.mapError(toConnectorError("Could not update connector instance config.")),
+    );
 
     /**
      * Values resolve only for keys that are both declared by the given
      * manifest and configured on the instance — the intersection, read fresh
      * from the secret store each call.
      */
-    const resolveSecrets = (
+    const resolveSecrets = Effect.fn("resolveSecrets")(function* (
       instance: WatchConnectorInstance,
       manifest: WatchConnectorPackManifest,
-    ) =>
-      Effect.gen(function* () {
-        const declared = new Set(manifest.secretKeys);
-        const secretPairs = yield* Effect.forEach(
-          instance.configuredSecretKeys.filter((key) => declared.has(key)),
-          (key) =>
-            secrets.get(secretStoreName(instance.id, key)).pipe(
-              Effect.map((value) =>
-                Option.isSome(value)
-                  ? ([key, new TextDecoder().decode(value.value)] as const)
-                  : null,
-              ),
-              Effect.mapError(toConnectorError("Could not read a connector secret.")),
+    ) {
+      const declared = new Set(manifest.secretKeys);
+      const secretPairs = yield* Effect.forEach(
+        instance.configuredSecretKeys.filter((key) => declared.has(key)),
+        (key) =>
+          secrets.get(secretStoreName(instance.id, key)).pipe(
+            Effect.map((value) =>
+              Option.isSome(value) ? ([key, new TextDecoder().decode(value.value)] as const) : null,
             ),
-          { concurrency: 1 },
-        );
-        const resolved: Record<string, string> = {};
-        for (const pair of secretPairs) {
-          if (pair !== null) resolved[pair[0]] = pair[1];
-        }
-        return resolved;
-      });
+            Effect.mapError(toConnectorError("Could not read a connector secret.")),
+          ),
+        { concurrency: 1 },
+      );
+      const resolved: Record<string, string> = {};
+      for (const pair of secretPairs) {
+        if (pair !== null) resolved[pair[0]] = pair[1];
+      }
+      return resolved;
+    });
 
-    const loadRuntime: ConnectorService["Service"]["loadRuntime"] = (instanceId) =>
-      Effect.gen(function* () {
+    const loadRuntime: ConnectorService["Service"]["loadRuntime"] = Effect.fn("loadRuntime")(
+      function* (instanceId) {
         const instance = yield* findInstance(instanceId);
         if (instance === null || instance.archivedAt !== null) {
           return yield* connectorError(
@@ -1018,14 +1012,14 @@ export const layer = Layer.effect(
         const manifest = yield* decodeManifestFromJson(packRow.manifest_json);
         const resolved = yield* resolveSecrets(instance, manifest);
         return { instance, manifest, secrets: resolved } satisfies ConnectorRuntimeInfo;
-      }).pipe(Effect.mapError(toConnectorError("Could not load connector runtime.")));
+      },
+      Effect.mapError(toConnectorError("Could not load connector runtime.")),
+    );
 
     /**
      * `lastFetchAt` ticks on every poll run, so per-tick notify would
      * re-push the full list to every subscriber on every poll. But the
      * widget renders it as the instance's liveness label — a frozen
-     * timestamp is a lie. Compromise: re-push when `lastFetchAt` crosses a
-     * coarse bucket boundary, bounding staleness without the churn.
      */
     const LAST_FETCH_NOTIFY_BUCKET_MS = 15 * 60 * 1000;
     const lastFetchBucket = (value: string | null) =>
@@ -1049,18 +1043,18 @@ export const layer = Layer.effect(
       );
     };
 
-    const recordHealth: ConnectorService["Service"]["recordHealth"] = (instanceId, patch) =>
-      Effect.gen(function* () {
+    const recordHealth: ConnectorService["Service"]["recordHealth"] = Effect.fn("recordHealth")(
+      function* (instanceId, patch) {
         // The poller, rollback, and confirm all write `health_json` — the
         // merge runs inside a transaction so the delta lands on the row's
         // current health, not on a snapshot the caller read earlier.
         const changed = yield* sql.withTransaction(
           Effect.gen(function* () {
             const stored = yield* sql<{ health_json: string }>`
-              SELECT health_json
-              FROM watch_connector_instances
-              WHERE instance_id = ${instanceId} AND archived_at IS NULL
-            `;
+            SELECT health_json
+            FROM watch_connector_instances
+            WHERE instance_id = ${instanceId} AND archived_at IS NULL
+          `;
             const row = stored[0];
             if (row === undefined) {
               return yield* connectorError(
@@ -1082,44 +1076,47 @@ export const layer = Layer.effect(
               ...(lastRollback === undefined ? {} : { lastRollback }),
             };
             yield* sql`
-              UPDATE watch_connector_instances
-              SET health_json = ${encodeHealthJson(merged)}
-              WHERE instance_id = ${instanceId} AND archived_at IS NULL
-            `;
+            UPDATE watch_connector_instances
+            SET health_json = ${encodeHealthJson(merged)}
+            WHERE instance_id = ${instanceId} AND archived_at IS NULL
+          `;
             return healthChanged(row.health_json, merged);
           }),
         );
         if (changed) yield* notifyChanged;
-      }).pipe(Effect.mapError(toConnectorError("Could not record connector health.")));
+      },
+      Effect.mapError(toConnectorError("Could not record connector health.")),
+    );
 
     /** Refuse a new request when the pending budget is already spent. */
-    const checkPendingRequestBudget = (packId: WatchConnectorPackId | null) =>
-      Effect.gen(function* () {
-        const totals = yield* sql<{ readonly n: number }>`
-          SELECT COUNT(*) AS n
-          FROM watch_connector_install_requests
-          WHERE status = 'pending'
-        `;
-        if ((totals[0]?.n ?? 0) >= MAX_PENDING_REQUESTS) {
-          return yield* connectorError(
-            "watchLimitExceeded",
-            `Too many pending connector install requests (cap ${MAX_PENDING_REQUESTS}).`,
-          );
-        }
-        if (packId === null) return;
-        const perPack = yield* sql<{ readonly n: number }>`
-          SELECT COUNT(*) AS n
-          FROM watch_connector_install_requests
-          WHERE status = 'pending' AND pack_id = ${packId}
-        `;
-        if ((perPack[0]?.n ?? 0) >= MAX_PENDING_REQUESTS_PER_PACK) {
-          return yield* connectorError(
-            "watchLimitExceeded",
-            `Too many pending install requests for ${packId} (cap ${MAX_PENDING_REQUESTS_PER_PACK}).`,
-            { packId },
-          );
-        }
-      });
+    const checkPendingRequestBudget = Effect.fn("checkPendingRequestBudget")(function* (
+      packId: WatchConnectorPackId | null,
+    ) {
+      const totals = yield* sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n
+        FROM watch_connector_install_requests
+        WHERE status = 'pending'
+      `;
+      if ((totals[0]?.n ?? 0) >= MAX_PENDING_REQUESTS) {
+        return yield* connectorError(
+          "watchLimitExceeded",
+          `Too many pending connector install requests (cap ${MAX_PENDING_REQUESTS}).`,
+        );
+      }
+      if (packId === null) return;
+      const perPack = yield* sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n
+        FROM watch_connector_install_requests
+        WHERE status = 'pending' AND pack_id = ${packId}
+      `;
+      if ((perPack[0]?.n ?? 0) >= MAX_PENDING_REQUESTS_PER_PACK) {
+        return yield* connectorError(
+          "watchLimitExceeded",
+          `Too many pending install requests for ${packId} (cap ${MAX_PENDING_REQUESTS_PER_PACK}).`,
+          { packId },
+        );
+      }
+    });
 
     const insertRequest = (request: {
       readonly id: WatchConnectorInstallRequestId;
@@ -1155,10 +1152,6 @@ export const layer = Layer.effect(
      * Publishes a pack's declared widget sources through the trusted leg of
      * the transpile pipeline — same validation and content-hashed artifacts
      * as agent-published sources, but a human-approved bundle does not
-     * consume (and is not rejected by) the agent-facing publish rate limit.
-     * A declared file missing from the bundle is a manifest lie and fails
-     * the confirm; a source that fails to build registers as a `failed`
-     * record (the widget renders `transpileFailed`), never a call error.
      */
     const registerPackWidgets = Effect.fn("ConnectorService.registerPackWidgets")(function* (
       bundle: PackStore.ConnectorPackBundle,
@@ -1198,12 +1191,6 @@ export const layer = Layer.effect(
      * Runs the target pack's `migrateConfig(from, to, ctx)` when it ships
      * one — server-side under the same pack boundary as poll runs, with
      * `ctx.config` holding the instance's current config. Pack code gets no
-     * secrets here: migration transforms config, it never reads credentials.
-     * Returns:
-     * - `migrated` — scrubbed of secret material, validated against the
-     *   target manifest, written on re-pin;
-     * - `failed` — the instance keeps its config and flags `configMismatch`;
-     * - `absent` — no migrator shipped; poll-time validation decides.
      */
     const runConfigMigration = Effect.fn("ConnectorService.runConfigMigration")(function* (
       bundle: PackStore.ConnectorPackBundle,
@@ -1253,8 +1240,10 @@ export const layer = Layer.effect(
       return { kind: "migrated" as const, config: scrubbed };
     });
 
-    const requestInstall: ConnectorService["Service"]["requestInstall"] = (input) =>
-      Effect.gen(function* () {
+    const requestInstall: ConnectorService["Service"]["requestInstall"] = Effect.fn(
+      "requestInstall",
+    )(
+      function* (input) {
         // The origin is fetched now unless it resolves private — an https
         // URL resolving to a loopback/link-local/private address is recorded
         // unfetched (`localUrl`), and the fetch waits for the human-acked
@@ -1284,10 +1273,14 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { request };
-      }).pipe(Effect.mapError(toConnectorError("Could not record install request.")));
+      },
+      Effect.mapError(toConnectorError("Could not record install request.")),
+    );
 
-    const requestUpgrade: ConnectorService["Service"]["requestUpgrade"] = (input) =>
-      Effect.gen(function* () {
+    const requestUpgrade: ConnectorService["Service"]["requestUpgrade"] = Effect.fn(
+      "requestUpgrade",
+    )(
+      function* (input) {
         const packRows = yield* findCurrentPackRow(input.packId);
         const packRow = packRows[0];
         if (packRow === undefined) {
@@ -1352,29 +1345,34 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { request };
-      }).pipe(Effect.mapError(toConnectorError("Could not record upgrade request.")));
+      },
+      Effect.mapError(toConnectorError("Could not record upgrade request.")),
+    );
 
-    const pendingRequestRow = (requestId: WatchConnectorInstallRequestId) =>
-      Effect.gen(function* () {
-        const rows = yield* loadRequestRow(requestId);
-        const row = rows[0];
-        if (row === undefined) {
-          return yield* connectorError("requestNotFound", "Install request not found.", {
-            requestId,
-          });
-        }
-        if (row.status !== "pending") {
-          return yield* connectorError(
-            "requestNotPending",
-            `Install request is already ${row.status}.`,
-            { requestId },
-          );
-        }
-        return row;
-      });
+    const pendingRequestRow = Effect.fn("pendingRequestRow")(function* (
+      requestId: WatchConnectorInstallRequestId,
+    ) {
+      const rows = yield* loadRequestRow(requestId);
+      const row = rows[0];
+      if (row === undefined) {
+        return yield* connectorError("requestNotFound", "Install request not found.", {
+          requestId,
+        });
+      }
+      if (row.status !== "pending") {
+        return yield* connectorError(
+          "requestNotPending",
+          `Install request is already ${row.status}.`,
+          { requestId },
+        );
+      }
+      return row;
+    });
 
-    const prepareInstallConfirm: ConnectorService["Service"]["prepareInstallConfirm"] = (input) =>
-      Effect.gen(function* () {
+    const prepareInstallConfirm: ConnectorService["Service"]["prepareInstallConfirm"] = Effect.fn(
+      "prepareInstallConfirm",
+    )(
+      function* (input) {
         let row = yield* pendingRequestRow(input.requestId);
         let manifestHash = row.manifest_hash;
         if (manifestHash === null) {
@@ -1418,15 +1416,15 @@ export const layer = Layer.effect(
           const manifestJson = encodeManifestJson(bundle.manifest);
           const originJson = encodeOriginJson(ackedOrigin);
           const filled = yield* sql<{ readonly request_id: string }>`
-            UPDATE watch_connector_install_requests
-            SET pack_id = ${bundle.manifest.id},
-                content_hash = ${bundle.contentHash},
-                manifest_json = ${manifestJson},
-                manifest_hash = ${bundle.manifestHash},
-                origin_json = ${originJson}
-            WHERE request_id = ${input.requestId} AND status = 'pending'
-            RETURNING request_id
-          `;
+          UPDATE watch_connector_install_requests
+          SET pack_id = ${bundle.manifest.id},
+              content_hash = ${bundle.contentHash},
+              manifest_json = ${manifestJson},
+              manifest_hash = ${bundle.manifestHash},
+              origin_json = ${originJson}
+          WHERE request_id = ${input.requestId} AND status = 'pending'
+          RETURNING request_id
+        `;
           if (filled.length === 0) {
             // A cancel landing during the deferred fetch wins — refuse
             // rather than mutating a resolved row or minting a token for it.
@@ -1466,19 +1464,21 @@ export const layer = Layer.effect(
         });
         const request = yield* decodeRequestRow(row);
         return { request, diffBase, confirmationToken };
-      }).pipe(Effect.mapError(toConnectorError("Could not prepare install confirmation.")));
+      },
+      Effect.mapError(toConnectorError("Could not prepare install confirmation.")),
+    );
 
     /**
      * Shared confirm leg: consume the hash-bound token, refetch the origin,
      * and install only bytes that hash to the recorded pin — the bundle the
      * human saw at request time is the bundle that lands on disk.
      */
-    const confirmRequest = (
-      requestId: WatchConnectorInstallRequestId,
-      confirmationToken: string,
-      expectedKind: "install" | "upgrade",
-    ) =>
-      Effect.gen(function* () {
+    const confirmRequest = Effect.fn("confirmRequest")(
+      function* (
+        requestId: WatchConnectorInstallRequestId,
+        confirmationToken: string,
+        expectedKind: "install" | "upgrade",
+      ) {
         const row = yield* pendingRequestRow(requestId);
         if (row.kind !== expectedKind) {
           return yield* connectorError(
@@ -1592,8 +1592,6 @@ export const layer = Layer.effect(
             // re-approving identical bytes is a no-op (or the intentional
             // archived-revive path), but writing different content over an
             // existing pin would silently retcon what every pinned instance
-            // runs — new bytes require a new schemaVersion. The check covers
-            // archived rows too: a revive must revive the same bundle.
             const approvedRows = yield* sql<{
               readonly content_hash: string;
               readonly manifest_hash: string;
@@ -1724,7 +1722,9 @@ export const layer = Layer.effect(
         const pack = yield* decodePackRow(packRow);
         yield* notifyChanged;
         return { pack };
-      }).pipe(Effect.mapError(toConnectorError("Could not confirm install request.")));
+      },
+      Effect.mapError(toConnectorError("Could not confirm install request.")),
+    );
 
     const confirmInstall: ConnectorService["Service"]["confirmInstall"] = (input) =>
       confirmRequest(input.requestId, input.confirmationToken, "install");
@@ -1732,14 +1732,16 @@ export const layer = Layer.effect(
     const confirmUpgrade: ConnectorService["Service"]["confirmUpgrade"] = (input) =>
       confirmRequest(input.requestId, input.confirmationToken, "upgrade");
 
-    const cancelInstallRequest: ConnectorService["Service"]["cancelInstallRequest"] = (input) =>
-      Effect.gen(function* () {
+    const cancelInstallRequest: ConnectorService["Service"]["cancelInstallRequest"] = Effect.fn(
+      "cancelInstallRequest",
+    )(
+      function* (input) {
         const nowIso = iso(yield* localNow);
         yield* sql`
-          UPDATE watch_connector_install_requests
-          SET status = 'cancelled', resolved_at = ${nowIso}
-          WHERE request_id = ${input.requestId} AND status = 'pending'
-        `;
+        UPDATE watch_connector_install_requests
+        SET status = 'cancelled', resolved_at = ${nowIso}
+        WHERE request_id = ${input.requestId} AND status = 'pending'
+      `;
         const request = yield* findRequest(input.requestId);
         if (request === null) {
           return yield* connectorError("requestNotFound", "Install request not found.", {
@@ -1755,7 +1757,9 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return { request };
-      }).pipe(Effect.mapError(toConnectorError("Could not cancel install request.")));
+      },
+      Effect.mapError(toConnectorError("Could not cancel install request.")),
+    );
 
     /**
      * Shared re-pin: run the target pack's migrateConfig and update the
@@ -1792,8 +1796,8 @@ export const layer = Layer.effect(
       return { migrationFailure, nowIso };
     });
 
-    const rollback: ConnectorService["Service"]["rollback"] = (input) =>
-      Effect.gen(function* () {
+    const rollback: ConnectorService["Service"]["rollback"] = Effect.fn("rollback")(
+      function* (input) {
         const instance = yield* findInstance(input.instanceId);
         if (instance === null || instance.archivedAt !== null) {
           return yield* connectorError(
@@ -1810,7 +1814,7 @@ export const layer = Layer.effect(
         if (input.schemaVersion === instance.schemaVersion) {
           return yield* connectorError(
             "sameVersionRollback",
-            `Instance already pins ${packId} version ${instance.schemaVersion} — rollback requires a different approved version.`,
+            `Instance already pins ${packId} version ${instance.schemaVersion}. Rollback requires a different approved version.`,
             { instanceId: input.instanceId, packId },
           );
         }
@@ -1870,15 +1874,17 @@ export const layer = Layer.effect(
         yield* notifyChanged;
         const fresh = yield* findInstance(input.instanceId);
         return { instance: fresh ?? instance };
-      }).pipe(Effect.mapError(toConnectorError("Could not roll back the connector.")));
+      },
+      Effect.mapError(toConnectorError("Could not roll back the connector.")),
+    );
 
-    const uninstall: ConnectorService["Service"]["uninstall"] = (input) =>
-      Effect.gen(function* () {
+    const uninstall: ConnectorService["Service"]["uninstall"] = Effect.fn("uninstall")(
+      function* (input) {
         const installed = yield* sql<PackRow>`
-          SELECT ${sql.literal(PACK_COLUMNS)}
-          FROM watch_connector_packs
-          WHERE pack_id = ${input.packId}
-        `;
+        SELECT ${sql.literal(PACK_COLUMNS)}
+        FROM watch_connector_packs
+        WHERE pack_id = ${input.packId}
+      `;
         if (installed.length === 0) {
           return yield* connectorError("packNotFound", "Connector pack is not installed.", {
             packId: input.packId,
@@ -1891,40 +1897,41 @@ export const layer = Layer.effect(
         const archived = yield* sql.withTransaction(
           Effect.gen(function* () {
             yield* sql`
-              UPDATE watch_connector_packs SET archived_at = ${nowIso}
-              WHERE pack_id = ${input.packId} AND archived_at IS NULL
-            `;
+            UPDATE watch_connector_packs SET archived_at = ${nowIso}
+            WHERE pack_id = ${input.packId} AND archived_at IS NULL
+          `;
             const instances = yield* sql<{ instance_id: string }>`
-              UPDATE watch_connector_instances SET archived_at = ${nowIso}, updated_at = ${nowIso}
-              WHERE pack_id = ${input.packId} AND archived_at IS NULL
-              RETURNING instance_id
-            `;
+            UPDATE watch_connector_instances SET archived_at = ${nowIso}, updated_at = ${nowIso}
+            WHERE pack_id = ${input.packId} AND archived_at IS NULL
+            RETURNING instance_id
+          `;
             // Deferred rows carry pack_id IS NULL until prepare resolves
             // the manifest, so pack-scoped cancellation cannot see them.
             // The only attribution available without fetching is the
             // origin: a pending request to a URL this pack was approved
-            // from could still resolve to it, so it shares the pack's fate.
             yield* sql`
-              UPDATE watch_connector_install_requests
-              SET status = 'cancelled', resolved_at = ${nowIso}
-              WHERE status = 'pending' AND (
-                pack_id = ${input.packId}
-                OR (
-                  pack_id IS NULL
-                  AND json_extract(origin_json, '$.url') IN (
-                    SELECT json_extract(origin_json, '$.url')
-                    FROM watch_connector_packs
-                    WHERE pack_id = ${input.packId}
-                  )
+            UPDATE watch_connector_install_requests
+            SET status = 'cancelled', resolved_at = ${nowIso}
+            WHERE status = 'pending' AND (
+              pack_id = ${input.packId}
+              OR (
+                pack_id IS NULL
+                AND json_extract(origin_json, '$.url') IN (
+                  SELECT json_extract(origin_json, '$.url')
+                  FROM watch_connector_packs
+                  WHERE pack_id = ${input.packId}
                 )
               )
-            `;
+            )
+          `;
             return instances.length;
           }),
         );
         yield* notifyChanged;
         return { packId: input.packId, archivedInstances: archived };
-      }).pipe(Effect.mapError(toConnectorError("Could not uninstall the connector pack.")));
+      },
+      Effect.mapError(toConnectorError("Could not uninstall the connector pack.")),
+    );
 
     /** What a purge of `packId` would destroy — the descriptor the token binds. */
     const purgeDescriptor = Effect.fn("ConnectorService.purgeDescriptor")(function* (
@@ -1944,7 +1951,7 @@ export const layer = Layer.effect(
       if (packRows.some((row) => row.archived_at === null)) {
         return yield* connectorError(
           "packNotArchived",
-          "Purge requires a soft-archived pack — uninstall it first.",
+          "Purge requires a soft-archived pack. Uninstall it first.",
           { packId },
         );
       }
@@ -1957,7 +1964,7 @@ export const layer = Layer.effect(
       if (instanceRows.some((row) => row.archived_at === null)) {
         return yield* connectorError(
           "packNotArchived",
-          "Purge requires every instance to be soft-archived — uninstall the pack first.",
+          "Purge requires every instance to be soft-archived. Uninstall the pack first.",
           { packId },
         );
       }
@@ -1975,8 +1982,8 @@ export const layer = Layer.effect(
       return { instances, instanceRows, schemaVersions, widgetSources, descriptor };
     });
 
-    const preparePurge: ConnectorService["Service"]["preparePurge"] = (input) =>
-      Effect.gen(function* () {
+    const preparePurge: ConnectorService["Service"]["preparePurge"] = Effect.fn("preparePurge")(
+      function* (input) {
         const { instances, schemaVersions, widgetSources, descriptor } = yield* purgeDescriptor(
           input.packId,
         );
@@ -1991,10 +1998,14 @@ export const layer = Layer.effect(
           widgetSources: widgetSources.map((id) => WatchWidgetSourceId.make(id)),
           confirmationToken,
         };
-      }).pipe(Effect.mapError(toConnectorError("Could not prepare purge confirmation.")));
+      },
+      Effect.mapError(toConnectorError("Could not prepare purge confirmation.")),
+    );
 
-    const purgeInstanceData: ConnectorService["Service"]["purgeInstanceData"] = (input) =>
-      Effect.gen(function* () {
+    const purgeInstanceData: ConnectorService["Service"]["purgeInstanceData"] = Effect.fn(
+      "purgeInstanceData",
+    )(
+      function* (input) {
         const { instances, instanceRows, widgetSources, descriptor } = yield* purgeDescriptor(
           input.packId,
         );
@@ -2022,9 +2033,6 @@ export const layer = Layer.effect(
         // aborts with every row still restorable, and each removal is
         // idempotent so a re-minted token retries cleanly. After the commit
         // nothing remains that can fail and orphan data.
-        //
-        // Secret values go too — purge is destructive. Keys are namespaced
-        // by instance id, so no other pack's instance shares a slot.
         for (const { instanceId, keys } of instanceSecrets) {
           yield* removeSecrets(instanceId, keys);
         }
@@ -2042,35 +2050,37 @@ export const layer = Layer.effect(
         yield* sql.withTransaction(
           Effect.gen(function* () {
             yield* sql`
-              DELETE FROM watch_connector_instances WHERE pack_id = ${input.packId}
-            `;
+            DELETE FROM watch_connector_instances WHERE pack_id = ${input.packId}
+          `;
             yield* sql`
-              DELETE FROM watch_pack_widget_sources WHERE pack_id = ${input.packId}
-            `;
+            DELETE FROM watch_pack_widget_sources WHERE pack_id = ${input.packId}
+          `;
             // Same NULL pack_id gap as uninstall's cancel: deferred
             // requests whose origin could resolve to this pack go too —
             // purge's contract is that nothing fetchable survives. Runs
             // before the pack rows delete so the origin subquery resolves.
             yield* sql`
-              DELETE FROM watch_connector_install_requests
-              WHERE pack_id = ${input.packId}
-                 OR (
-                   pack_id IS NULL
-                   AND json_extract(origin_json, '$.url') IN (
-                     SELECT json_extract(origin_json, '$.url')
-                     FROM watch_connector_packs
-                     WHERE pack_id = ${input.packId}
-                   )
+            DELETE FROM watch_connector_install_requests
+            WHERE pack_id = ${input.packId}
+               OR (
+                 pack_id IS NULL
+                 AND json_extract(origin_json, '$.url') IN (
+                   SELECT json_extract(origin_json, '$.url')
+                   FROM watch_connector_packs
+                   WHERE pack_id = ${input.packId}
                  )
-            `;
+               )
+          `;
             yield* sql`
-              DELETE FROM watch_connector_packs WHERE pack_id = ${input.packId}
-            `;
+            DELETE FROM watch_connector_packs WHERE pack_id = ${input.packId}
+          `;
           }),
         );
         yield* notifyChanged;
         return { packId: input.packId, purgedInstances: instances.length };
-      }).pipe(Effect.mapError(toConnectorError("Could not purge connector data.")));
+      },
+      Effect.mapError(toConnectorError("Could not purge connector data.")),
+    );
 
     return ConnectorService.of({
       list,

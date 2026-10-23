@@ -11,10 +11,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * The board-side half of agent-frame mount governance: one
  * `WatchAppMountRegistry` per (environment, page) — a page switch or
  * environment swap reseats every widget through fresh visibility reports —
- * plus the React state the registry's change list drives. On mobile there is
- * no IntersectionObserver: a widget reports visible when its section mounts
- * and hidden when it unmounts, so the registry caps mounted frames at
- * `WATCH_APP_MOUNT_LIMIT` and demotes the rest to tap-to-load placeholders.
  */
 export function useWatchAppMounts(input: {
   readonly registryKey: string;

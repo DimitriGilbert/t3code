@@ -1008,7 +1008,7 @@ const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
-export const layerWatchToolkit = toolkitRegistration(WatchToolkit, WatchHandlers.layer);
+const layerWatchToolkit = toolkitRegistration(WatchToolkit, WatchHandlers.layer);
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 

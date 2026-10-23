@@ -195,9 +195,7 @@ export function WorkspaceToolbar(props: {
             <Toolbar.Button
               accessibilityLabel="Watch"
               icon="square.grid.2x2"
-              onPress={() =>
-                navigation.navigate("Watch", { environmentId: watchEnvironmentId })
-              }
+              onPress={() => navigation.navigate("Watch", { environmentId: watchEnvironmentId })}
             />
           ) : null}
           {searchButton}

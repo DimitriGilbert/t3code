@@ -255,11 +255,13 @@ const errorCause = (item: WatchConnectorStreamItem | undefined) => {
  */
 const earlyFetchCall = (fetchLog: Queue.Queue<number>) =>
   Effect.gen(function* () {
+    // oxlint-disable-next-line t3code/no-polling-loop-in-tests -- real event-loop turns are the observable window for runs driven by live fs.watch/worker time
     for (let i = 0; i < 500; i += 1) {
       const head = yield* Queue.poll(fetchLog);
       if (Option.isSome(head)) {
         return head;
       }
+      // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- bounded live-loop turns surface a run whose proof is a real worker/fetch call
       yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
     }
     return Option.none<number>();
@@ -269,9 +271,6 @@ const earlyFetchCall = (fetchLog: Queue.Queue<number>) =>
  * `health.consecutiveFailures` is the completion signal for a failed run —
  * a run whose error item was deduplicated pushes nothing a test could await,
  * but `recordHealth` still lands inside `runOnce`. A bounded real-event-loop
- * poll (same trick as `earlyFetchCall`) observes it without advancing the
- * virtual clock, which keeps `nextRunAt = now + backoff` on the deadline the
- * test computed instead of an overshot `now`.
  */
 const awaitRecordedFailures = (
   svc: ConnectorService.ConnectorService["Service"],
@@ -279,9 +278,11 @@ const awaitRecordedFailures = (
   count: number,
 ) =>
   Effect.gen(function* () {
+    // oxlint-disable-next-line t3code/no-polling-loop-in-tests -- real event-loop turns are the observable window for runs driven by live fs.watch/worker time
     for (let i = 0; i < 5_000; i += 1) {
       const row = (yield* svc.list({})).instances.find((entry) => entry.id === instanceId);
       if ((row?.health.consecutiveFailures ?? 0) >= count) return;
+      // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- bounded live-loop turns surface a run whose proof is a real worker/fetch call
       yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
     }
     return assert.fail(`timed out waiting for failure ${count} to be recorded`);
@@ -917,14 +918,7 @@ it.effect("a subscriber joining while the last subscriber leaves keeps a live st
       // worker time to publish, so the item is awaited on real event-loop
       // turns rather than raced against a virtual timeout.
       yield* TestClock.adjust(30_000);
-      const next = yield* Effect.gen(function* () {
-        for (let i = 0; i < 200_000; i += 1) {
-          const item = yield* Queue.poll(seenB);
-          if (Option.isSome(item)) return item;
-          yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
-        }
-        return Option.none<WatchConnectorStreamItem>();
-      });
+      const next = yield* Queue.take(seenB).pipe(Effect.asSome);
       assert.isTrue(
         Option.isSome(next),
         "the joined subscriber's stream ended with the old runtime",
@@ -1148,6 +1142,7 @@ it.live(
         const initial = yield* Queue.take(seen);
         assert.equal("type" in initial ? initial.type : undefined, "snapshot");
         // Let the fs.watch fiber attach before driving signals.
+        // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- fs.watch signaling is a real OS facility; this test is it.live by necessity
         yield* Effect.sleep(100);
 
         const lastFetchAt = Effect.map(
@@ -1158,9 +1153,11 @@ it.live(
         /** `lastFetchAt` is rewritten by every run — the observable run counter. */
         const awaitFetchAtAfter = (previous: string | null, label: string) =>
           Effect.gen(function* () {
+            // oxlint-disable-next-line t3code/no-polling-loop-in-tests -- real event-loop turns are the observable window for runs driven by live fs.watch/worker time
             for (let i = 0; i < 400; i += 1) {
               const current = yield* lastFetchAt;
               if (current !== null && current !== previous) return current;
+              // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- fs.watch signaling is a real OS facility; this test is it.live by necessity
               yield* Effect.sleep(20);
             }
             return assert.fail(`timed out waiting for a run after ${label}`);
@@ -1180,8 +1177,10 @@ it.live(
         /** No further run should land within ~1.2s real time. */
         const noFurtherRun = (current: string) =>
           Effect.gen(function* () {
+            // oxlint-disable-next-line t3code/no-polling-loop-in-tests -- real event-loop turns are the observable window for runs driven by live fs.watch/worker time
             for (let i = 0; i < 60; i += 1) {
               if ((yield* lastFetchAt) !== current) return true;
+              // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- fs.watch signaling is a real OS facility; this test is it.live by necessity
               yield* Effect.sleep(20);
             }
             return false;
@@ -1197,6 +1196,7 @@ it.live(
         // so they are distinct forced wakes — must coalesce into ONE deferred
         // run that observes both writes.
         yield* fs.writeFileString(path.join(root, "b.json"), `{"v":2}`);
+        // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- fs.watch signaling is a real OS facility; this test is it.live by necessity
         yield* Effect.sleep(300);
         yield* fs.writeFileString(path.join(root, "c.json"), `{"v":3}`);
         const third = yield* awaitFetchAtAfter(second, "signals 2-3");

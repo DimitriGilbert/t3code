@@ -61,9 +61,6 @@ export interface WatchAppMountControls {
  * Wraps the configure form so a live `pagesLive` update can never leave it
  * submitting stale draft values under a fresh `expectedRevision`: the form
  * is keyed on `widget.revision`, so a remote config write remounts it
- * against the new base. The gate outlives the remount — it carries the
- * "changed elsewhere" notice, which the remounted form can't know about
- * since its predecessor's draft state died with it.
  */
 function WatchWidgetConfigFormGate(props: {
   readonly widget: WatchWidget;
@@ -79,15 +76,13 @@ function WatchWidgetConfigFormGate(props: {
   // different revision means a write landed while the user was editing —
   // the keyed remount silently re-bases the draft, and this notice explains
   // why in-progress edits were replaced. A successful save from this client
-  // also bumps the revision, but the screen closes the form on success, so
-  // the notice is at most a render's worth of flash before unmount.
   const [openedRevision] = useState(widget.revision);
   const changedElsewhere = widget.revision !== openedRevision;
   return (
     <>
       {changedElsewhere ? (
         <p className="mb-2 shrink-0 text-2xs text-muted-foreground">
-          This widget changed on another client — the form was reset to the latest values.
+          This widget changed on another client; the form was reset to the latest values.
         </p>
       ) : null}
       <WatchWidgetSettingsForm
@@ -107,10 +102,6 @@ function WatchWidgetConfigFormGate(props: {
  * Picks the live body for a widget, layered over the same degradation
  * contract for first-party and sandboxed kinds: `configure` swaps the body
  * for the generated settings form, then typed source errors (stale project
- * binding, missing/down connector) replace it entirely — a widget that
- * cannot show data must still be repointable. Agent kinds defer to
- * `WatchAppWidget`, which the mount registry's `WatchAppMountControls`
- * governs: offscreen bodies unmount, over-cap bodies get tap-to-load.
  */
 export function WatchWidgetBody(props: {
   readonly environmentId: EnvironmentId;

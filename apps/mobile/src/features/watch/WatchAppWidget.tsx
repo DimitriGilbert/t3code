@@ -21,8 +21,8 @@ import * as Schema from "effect/Schema";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import {
   WATCH_GRID_ROW_UNIT_REM,
   watchWidgetDisplayTitle,
@@ -36,9 +36,6 @@ import { WatchAppWebView } from "./WatchAppWebView";
  * The mobile twin of web's `WatchAppWidget`: one `agent:<sourceId>` body —
  * mount-governed by the page registry, artifact resolved through the source
  * stream plus one bundle fetch per `artifactHash`, and rendered through
- * `WatchAppWebView`, the mobile half of the sandbox contract. Visibility is
- * reported on mount/unmount (no IntersectionObserver on native); the registry
- * still caps mounted frames and demotes the rest to tap-to-load.
  */
 
 const isConnectorInstanceId = Schema.is(WatchConnectorInstanceIdSchema);

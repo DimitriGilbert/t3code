@@ -10,8 +10,6 @@ import { create } from "zustand";
  * The client-side surface state for watch notifications, shared between the
  * always-mounted `WatchNotificationCoordinator` (which writes prefs, unread
  * ids, and threshold alerts) and the bell/popover and widget chrome (which
- * read and clear them). History itself is server-recorded; this store only
- * holds what the live stream most recently delivered to this client session.
  */
 interface WatchNotificationSurfaceState {
   /** Unread notification ids per environment — the badge counts. */

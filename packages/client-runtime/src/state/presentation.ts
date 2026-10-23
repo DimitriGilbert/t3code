@@ -316,6 +316,12 @@ export function createEnvironmentSummaryAtoms(input: {
           .pullRequests === true,
     ),
   );
+  const watchScreenSupportedAtom = Atom.make((get) =>
+    get(environmentIdsAtom).some(
+      (environmentId) =>
+        get(input.presentationAtom(environmentId))?.serverConfig?.watchScreen === true,
+    ),
+  );
   return {
     environmentIdsAtom,
     connectedEnvironmentIdsAtom,
@@ -323,5 +329,6 @@ export function createEnvironmentSummaryAtoms(input: {
     environmentsAtom,
     machineByIdAtom,
     pullRequestsSupportedAtom,
+    watchScreenSupportedAtom,
   };
 }

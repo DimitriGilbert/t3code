@@ -292,7 +292,7 @@ import {
   DeviceSession,
   DeviceShutdownInput,
 } from "./device.ts";
-import {} from "./previewAutomation.ts";
+import "./previewAutomation.ts";
 import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
@@ -356,6 +356,73 @@ import {
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
+import {
+  WatchConnectorCancelInstallRequestInput,
+  WatchConnectorConfirmInstallInput,
+  WatchConnectorConfirmResult,
+  WatchConnectorConfirmUpgradeInput,
+  WatchConnectorCreateInstanceInput,
+  WatchConnectorDeleteInstanceInput,
+  WatchConnectorDeleteInstanceResult,
+  WatchConnectorError,
+  WatchConnectorInstallRequestResult,
+  WatchConnectorInstanceResult,
+  WatchConnectorPrepareInstallConfirmInput,
+  WatchConnectorPrepareInstallConfirmResult,
+  WatchConnectorPreparePurgeInput,
+  WatchConnectorPreparePurgeResult,
+  WatchConnectorPurgeInstanceDataInput,
+  WatchConnectorPurgeResult,
+  WatchConnectorRequestInstallInput,
+  WatchConnectorRequestUpgradeInput,
+  WatchConnectorRollbackInput,
+  WatchConnectorSetInstanceConfigInput,
+  WatchConnectorStreamItem,
+  WatchConnectorSubscribeInput,
+  WatchConnectorUninstallInput,
+  WatchConnectorUninstallResult,
+  WatchConnectorUpdateInstanceInput,
+  WatchConnectorsListInput,
+  WatchConnectorsListResult,
+  WatchGalleryListResult,
+  WatchLayoutCollisionError,
+  WatchNotificationError,
+  WatchNotificationPrefs,
+  WatchNotificationsHistoryInput,
+  WatchNotificationsHistoryResult,
+  WatchNotificationsSetPrefsResult,
+  WatchNotificationStreamItem,
+  WatchPageCreateInput,
+  WatchPageDeleteInput,
+  WatchPageDeleteResult,
+  WatchPageDuplicateInput,
+  WatchPageError,
+  WatchPageInstantiateFromGalleryInput,
+  WatchPageListInput,
+  WatchPageListResult,
+  WatchPageRenameInput,
+  WatchPageReorderInput,
+  WatchPageRestoreInput,
+  WatchPageResult,
+  WatchPageRevisionConflictError,
+  WatchPageUpdateScopeInput,
+  WatchPageWithWidgetsResult,
+  WatchWidgetAddInput,
+  WatchWidgetConfigureInput,
+  WatchWidgetMoveToPageInput,
+  WatchWidgetRemoveInput,
+  WatchWidgetRemoveResult,
+  WatchWidgetResult,
+  WatchWidgetSetLayoutInput,
+  WatchWidgetSetMobileProjectionInput,
+  WatchWidgetSourceError,
+  WatchWidgetSourceGetInput,
+  WatchWidgetSourceGetResult,
+  WatchWidgetSourcePublishInput,
+  WatchWidgetSourcePublishResult,
+  WatchWidgetSourceRecord,
+  WatchWidgetSourceSubscribeInput,
+} from "./watch.ts";
 import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
@@ -579,6 +646,48 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+
+  // Watch screen methods (pages, widgets, notifications, connector installs)
+  watchPagesList: "watchPages.list",
+  watchPagesSubscribe: "watchPages.subscribe",
+  watchPagesCreate: "watchPages.create",
+  watchPagesRename: "watchPages.rename",
+  watchPagesReorder: "watchPages.reorder",
+  watchPagesDuplicate: "watchPages.duplicate",
+  watchPagesDelete: "watchPages.delete",
+  watchPagesRestore: "watchPages.restore",
+  watchPagesUpdateScope: "watchPages.updateScope",
+  watchPagesInstantiateFromGallery: "watchPages.instantiateFromGallery",
+  watchGalleryList: "watchGallery.list",
+  watchWidgetsAdd: "watchWidgets.add",
+  watchWidgetsRemove: "watchWidgets.remove",
+  watchWidgetsConfigure: "watchWidgets.configure",
+  watchWidgetsSetLayout: "watchWidgets.setLayout",
+  watchWidgetsSetMobileProjection: "watchWidgets.setMobileProjection",
+  watchWidgetsMoveToPage: "watchWidgets.moveToPage",
+  watchNotificationsSubscribe: "watchNotifications.subscribe",
+  watchNotificationsHistory: "watchNotifications.history",
+  watchNotificationsSetPrefs: "watchNotifications.setPrefs",
+  watchConnectorsListInstances: "watchConnectors.listInstances",
+  watchConnectorsSubscribeInstances: "watchConnectors.subscribeInstances",
+  watchConnectorsCreateInstance: "watchConnectors.createInstance",
+  watchConnectorsUpdateInstance: "watchConnectors.updateInstance",
+  watchConnectorsDeleteInstance: "watchConnectors.deleteInstance",
+  watchConnectorsSetInstanceConfig: "watchConnectors.setInstanceConfig",
+  watchConnectorsRequestInstall: "watchConnectors.requestInstall",
+  watchConnectorsRequestUpgrade: "watchConnectors.requestUpgrade",
+  watchConnectorsPrepareInstallConfirm: "watchConnectors.prepareInstallConfirm",
+  watchConnectorsConfirmInstall: "watchConnectors.confirmInstall",
+  watchConnectorsConfirmUpgrade: "watchConnectors.confirmUpgrade",
+  watchConnectorsCancelInstallRequest: "watchConnectors.cancelInstallRequest",
+  watchConnectorsRollback: "watchConnectors.rollback",
+  watchConnectorsUninstall: "watchConnectors.uninstall",
+  watchConnectorsPreparePurge: "watchConnectors.preparePurge",
+  watchConnectorsPurgeInstanceData: "watchConnectors.purgeInstanceData",
+  watchConnectorSubscribe: "watchConnector.subscribe",
+  watchWidgetSourcePublish: "watchWidgetSource.publish",
+  watchWidgetSourceGet: "watchWidgetSource.get",
+  watchWidgetSourceSubscribe: "watchWidgetSource.subscribe",
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -1874,12 +1983,348 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+const WsWatchReadError = Schema.Union([
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  EnvironmentAuthorizationError,
+]);
+const WsWatchRevisionCheckedError = Schema.Union([
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  EnvironmentAuthorizationError,
+]);
+const WsWatchLayoutCheckedError = Schema.Union([
+  WatchPageError,
+  WatchPageRevisionConflictError,
+  WatchLayoutCollisionError,
+  EnvironmentAuthorizationError,
+]);
+
+const WsWatchPagesListRpc = Rpc.make(WS_METHODS.watchPagesList, {
+  payload: WatchPageListInput,
+  success: WatchPageListResult,
+  error: WsWatchReadError,
+});
+
+/** Streams the full watch page+widget list: one snapshot on subscribe, then a fresh list after every change. */
+const WsWatchPagesSubscribeRpc = Rpc.make(WS_METHODS.watchPagesSubscribe, {
+  payload: WatchPageListInput,
+  success: WatchPageListResult,
+  error: WsWatchReadError,
+  stream: true,
+});
+
+const WsWatchGalleryListRpc = Rpc.make(WS_METHODS.watchGalleryList, {
+  payload: Schema.Struct({}),
+  success: WatchGalleryListResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesCreateRpc = Rpc.make(WS_METHODS.watchPagesCreate, {
+  payload: WatchPageCreateInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesRenameRpc = Rpc.make(WS_METHODS.watchPagesRename, {
+  payload: WatchPageRenameInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesReorderRpc = Rpc.make(WS_METHODS.watchPagesReorder, {
+  payload: WatchPageReorderInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesDuplicateRpc = Rpc.make(WS_METHODS.watchPagesDuplicate, {
+  payload: WatchPageDuplicateInput,
+  success: WatchPageWithWidgetsResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesDeleteRpc = Rpc.make(WS_METHODS.watchPagesDelete, {
+  payload: WatchPageDeleteInput,
+  success: WatchPageDeleteResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesRestoreRpc = Rpc.make(WS_METHODS.watchPagesRestore, {
+  payload: WatchPageRestoreInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesUpdateScopeRpc = Rpc.make(WS_METHODS.watchPagesUpdateScope, {
+  payload: WatchPageUpdateScopeInput,
+  success: WatchPageResult,
+  error: WsWatchReadError,
+});
+
+const WsWatchPagesInstantiateFromGalleryRpc = Rpc.make(
+  WS_METHODS.watchPagesInstantiateFromGallery,
+  {
+    payload: WatchPageInstantiateFromGalleryInput,
+    success: WatchPageWithWidgetsResult,
+    error: WsWatchReadError,
+  },
+);
+
+const WsWatchWidgetsAddRpc = Rpc.make(WS_METHODS.watchWidgetsAdd, {
+  payload: WatchWidgetAddInput,
+  success: WatchWidgetResult,
+  error: WsWatchLayoutCheckedError,
+});
+
+const WsWatchWidgetsRemoveRpc = Rpc.make(WS_METHODS.watchWidgetsRemove, {
+  payload: WatchWidgetRemoveInput,
+  success: WatchWidgetRemoveResult,
+  error: WsWatchRevisionCheckedError,
+});
+
+const WsWatchWidgetsConfigureRpc = Rpc.make(WS_METHODS.watchWidgetsConfigure, {
+  payload: WatchWidgetConfigureInput,
+  success: WatchWidgetResult,
+  error: WsWatchRevisionCheckedError,
+});
+
+const WsWatchWidgetsSetLayoutRpc = Rpc.make(WS_METHODS.watchWidgetsSetLayout, {
+  payload: WatchWidgetSetLayoutInput,
+  success: WatchPageWithWidgetsResult,
+  error: WsWatchLayoutCheckedError,
+});
+
+const WsWatchWidgetsSetMobileProjectionRpc = Rpc.make(WS_METHODS.watchWidgetsSetMobileProjection, {
+  payload: WatchWidgetSetMobileProjectionInput,
+  success: WatchPageWithWidgetsResult,
+  error: WsWatchRevisionCheckedError,
+});
+
+const WsWatchWidgetsMoveToPageRpc = Rpc.make(WS_METHODS.watchWidgetsMoveToPage, {
+  payload: WatchWidgetMoveToPageInput,
+  success: WatchWidgetResult,
+  error: WsWatchLayoutCheckedError,
+});
+
+const WsWatchNotificationReadError = Schema.Union([
+  WatchNotificationError,
+  EnvironmentAuthorizationError,
+]);
+
+/**
+ * Streams the subscriber's prefs first, then each notification the server
+ * emits once; per-channel delivery decisions stay client-side.
+ */
+const WsWatchNotificationsSubscribeRpc = Rpc.make(WS_METHODS.watchNotificationsSubscribe, {
+  payload: Schema.Struct({}),
+  success: WatchNotificationStreamItem,
+  error: WsWatchNotificationReadError,
+  stream: true,
+});
+
+const WsWatchNotificationsHistoryRpc = Rpc.make(WS_METHODS.watchNotificationsHistory, {
+  payload: WatchNotificationsHistoryInput,
+  success: WatchNotificationsHistoryResult,
+  error: WsWatchNotificationReadError,
+});
+
+const WsWatchNotificationsSetPrefsRpc = Rpc.make(WS_METHODS.watchNotificationsSetPrefs, {
+  payload: WatchNotificationPrefs,
+  success: WatchNotificationsSetPrefsResult,
+  error: WsWatchNotificationReadError,
+});
+
+const WsWatchConnectorError = Schema.Union([WatchConnectorError, EnvironmentAuthorizationError]);
+
+const WsWatchConnectorsListInstancesRpc = Rpc.make(WS_METHODS.watchConnectorsListInstances, {
+  payload: WatchConnectorsListInput,
+  success: WatchConnectorsListResult,
+  error: WsWatchConnectorError,
+});
+
+/** Streams the connector list — packs, instances, pending install requests — on subscribe and after every change. */
+const WsWatchConnectorsSubscribeInstancesRpc = Rpc.make(
+  WS_METHODS.watchConnectorsSubscribeInstances,
+  {
+    payload: WatchConnectorsListInput,
+    success: WatchConnectorsListResult,
+    error: WsWatchConnectorError,
+    stream: true,
+  },
+);
+
+const WsWatchConnectorsCreateInstanceRpc = Rpc.make(WS_METHODS.watchConnectorsCreateInstance, {
+  payload: WatchConnectorCreateInstanceInput,
+  success: WatchConnectorInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsUpdateInstanceRpc = Rpc.make(WS_METHODS.watchConnectorsUpdateInstance, {
+  payload: WatchConnectorUpdateInstanceInput,
+  success: WatchConnectorInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsDeleteInstanceRpc = Rpc.make(WS_METHODS.watchConnectorsDeleteInstance, {
+  payload: WatchConnectorDeleteInstanceInput,
+  success: WatchConnectorDeleteInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsSetInstanceConfigRpc = Rpc.make(
+  WS_METHODS.watchConnectorsSetInstanceConfig,
+  {
+    payload: WatchConnectorSetInstanceConfigInput,
+    success: WatchConnectorInstanceResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+const WsWatchConnectorsRequestInstallRpc = Rpc.make(WS_METHODS.watchConnectorsRequestInstall, {
+  payload: WatchConnectorRequestInstallInput,
+  success: WatchConnectorInstallRequestResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsRequestUpgradeRpc = Rpc.make(WS_METHODS.watchConnectorsRequestUpgrade, {
+  payload: WatchConnectorRequestUpgradeInput,
+  success: WatchConnectorInstallRequestResult,
+  error: WsWatchConnectorError,
+});
+
+/**
+ * Returns the pending request plus the single-use confirmation token bound
+ * to its manifest hash. Minting needs only operate scope — the enforced
+ * boundary is `environment:maintain` on the confirm calls plus this
+ * method's absence from the MCP toolkit, so an agent can open a request
+ * but never rule on it.
+ */
+const WsWatchConnectorsPrepareInstallConfirmRpc = Rpc.make(
+  WS_METHODS.watchConnectorsPrepareInstallConfirm,
+  {
+    payload: WatchConnectorPrepareInstallConfirmInput,
+    success: WatchConnectorPrepareInstallConfirmResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+const WsWatchConnectorsConfirmInstallRpc = Rpc.make(WS_METHODS.watchConnectorsConfirmInstall, {
+  payload: WatchConnectorConfirmInstallInput,
+  success: WatchConnectorConfirmResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsConfirmUpgradeRpc = Rpc.make(WS_METHODS.watchConnectorsConfirmUpgrade, {
+  payload: WatchConnectorConfirmUpgradeInput,
+  success: WatchConnectorConfirmResult,
+  error: WsWatchConnectorError,
+});
+
+const WsWatchConnectorsCancelInstallRequestRpc = Rpc.make(
+  WS_METHODS.watchConnectorsCancelInstallRequest,
+  {
+    payload: WatchConnectorCancelInstallRequestInput,
+    success: WatchConnectorInstallRequestResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+/**
+ * Re-pins an instance to a previously-approved pack version — no fetch, no
+ * new code: the target must already be an approved pack row. Agent-callable.
+ */
+const WsWatchConnectorsRollbackRpc = Rpc.make(WS_METHODS.watchConnectorsRollback, {
+  payload: WatchConnectorRollbackInput,
+  success: WatchConnectorInstanceResult,
+  error: WsWatchConnectorError,
+});
+
+/** Soft-archives a pack and its instances — polling stops, config is retained, widgets degrade to placeholders. */
+const WsWatchConnectorsUninstallRpc = Rpc.make(WS_METHODS.watchConnectorsUninstall, {
+  payload: WatchConnectorUninstallInput,
+  success: WatchConnectorUninstallResult,
+  error: WsWatchConnectorError,
+});
+
+/**
+ * Describes what a purge destroys and returns a single-use token bound to
+ * that descriptor. Minting needs only operate scope — the purge itself is
+ * `environment:maintain` and absent from the MCP toolkit.
+ */
+const WsWatchConnectorsPreparePurgeRpc = Rpc.make(WS_METHODS.watchConnectorsPreparePurge, {
+  payload: WatchConnectorPreparePurgeInput,
+  success: WatchConnectorPreparePurgeResult,
+  error: WsWatchConnectorError,
+});
+
+/**
+ * The destructive counterpart to uninstall — requires the prepare-minted
+ * token. Not in the MCP toolkit: an agent can never complete a purge.
+ */
+const WsWatchConnectorsPurgeInstanceDataRpc = Rpc.make(
+  WS_METHODS.watchConnectorsPurgeInstanceData,
+  {
+    payload: WatchConnectorPurgeInstanceDataInput,
+    success: WatchConnectorPurgeResult,
+    error: WsWatchConnectorError,
+  },
+);
+
+/**
+ * Widget-facing connector data stream: transformed snapshots (shared fetch —
+ * N widgets on one instance share one poll) and typed error states. The
+ * payload's `refreshPolicy` feeds the instance's min-of-subscribers interval.
+ */
+const WsWatchConnectorSubscribeRpc = Rpc.make(WS_METHODS.watchConnectorSubscribe, {
+  payload: WatchConnectorSubscribeInput,
+  success: WatchConnectorStreamItem,
+  error: WsWatchConnectorError,
+  stream: true,
+});
+
+const WsWatchWidgetSourceError = Schema.Union([
+  WatchWidgetSourceError,
+  EnvironmentAuthorizationError,
+]);
+
+/**
+ * Publishes agent-authored TS/TSX: the server transpiles it into the cached
+ * single-file artifact and returns the source record. A bad build is data —
+ * `status: "failed"` — not a call error; only manifest, size, and rate-limit
+ * violations are call rejections.
+ */
+const WsWatchWidgetSourcePublishRpc = Rpc.make(WS_METHODS.watchWidgetSourcePublish, {
+  payload: WatchWidgetSourcePublishInput,
+  success: WatchWidgetSourcePublishResult,
+  error: WsWatchWidgetSourceError,
+});
+
+const WsWatchWidgetSourceGetRpc = Rpc.make(WS_METHODS.watchWidgetSourceGet, {
+  payload: WatchWidgetSourceGetInput,
+  success: WatchWidgetSourceGetResult,
+  error: WsWatchWidgetSourceError,
+});
+
+/** Emits the source record for readiness tracking: `null` while unknown, then each publish. */
+const WsWatchWidgetSourceSubscribeRpc = Rpc.make(WS_METHODS.watchWidgetSourceSubscribe, {
+  payload: WatchWidgetSourceSubscribeInput,
+  success: Schema.NullOr(WatchWidgetSourceRecord),
+  error: WsWatchWidgetSourceError,
+  stream: true,
+});
+
+/**
+ * Checks the connection's scopes against the scope each RPC declares, before
+ * the handler runs. Every RPC in `WsRpcGroup` carries it, so a handler cannot
+ * be added without authorization.
+ */
 export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthorization>()(
   "t3/contracts/RpcScopeAuthorization",
   { error: EnvironmentAuthorizationError },
 ) {}
 
-export const WsRpcGroup = RpcGroup.make(
+const WsRpcGroupCore = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -2079,3 +2524,54 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
 ).middleware(RpcScopeAuthorization);
+
+/**
+ * Watch-screen RPCs live in their own subgroup. `WsRpcGroup` merges it back in
+ * so clients see one group, but the server implements the two halves in
+ * separate handler layers — one giant `of`/`toLayer` instantiation over the
+ * whole union overflows the typechecker's instantiation budget.
+ */
+export const WsWatchRpcGroup = RpcGroup.make(
+  WsWatchPagesListRpc,
+  WsWatchPagesSubscribeRpc,
+  WsWatchGalleryListRpc,
+  WsWatchPagesCreateRpc,
+  WsWatchPagesRenameRpc,
+  WsWatchPagesReorderRpc,
+  WsWatchPagesDuplicateRpc,
+  WsWatchPagesDeleteRpc,
+  WsWatchPagesRestoreRpc,
+  WsWatchPagesUpdateScopeRpc,
+  WsWatchPagesInstantiateFromGalleryRpc,
+  WsWatchWidgetsAddRpc,
+  WsWatchWidgetsRemoveRpc,
+  WsWatchWidgetsConfigureRpc,
+  WsWatchWidgetsSetLayoutRpc,
+  WsWatchWidgetsSetMobileProjectionRpc,
+  WsWatchWidgetsMoveToPageRpc,
+  WsWatchNotificationsSubscribeRpc,
+  WsWatchNotificationsHistoryRpc,
+  WsWatchNotificationsSetPrefsRpc,
+  WsWatchConnectorsListInstancesRpc,
+  WsWatchConnectorsSubscribeInstancesRpc,
+  WsWatchConnectorsCreateInstanceRpc,
+  WsWatchConnectorsUpdateInstanceRpc,
+  WsWatchConnectorsDeleteInstanceRpc,
+  WsWatchConnectorsSetInstanceConfigRpc,
+  WsWatchConnectorsRequestInstallRpc,
+  WsWatchConnectorsRequestUpgradeRpc,
+  WsWatchConnectorsPrepareInstallConfirmRpc,
+  WsWatchConnectorsConfirmInstallRpc,
+  WsWatchConnectorsConfirmUpgradeRpc,
+  WsWatchConnectorsCancelInstallRequestRpc,
+  WsWatchConnectorsRollbackRpc,
+  WsWatchConnectorsUninstallRpc,
+  WsWatchConnectorsPreparePurgeRpc,
+  WsWatchConnectorsPurgeInstanceDataRpc,
+  WsWatchConnectorSubscribeRpc,
+  WsWatchWidgetSourcePublishRpc,
+  WsWatchWidgetSourceGetRpc,
+  WsWatchWidgetSourceSubscribeRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsRpcGroup = WsRpcGroupCore.merge(WsWatchRpcGroup);

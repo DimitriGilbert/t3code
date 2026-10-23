@@ -11,7 +11,8 @@
     "t3": "./dist/bin.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "vendor"
   ],
   "type": "module",
   "scripts": {
@@ -65,6 +66,8 @@
     "proper-lockfile": "4.1.2",
     "stream-chain": "^4.2.5",
     "stream-json": "3.6.0",
+    "tldts": "catalog:",
+    "tsc-rs": "0.6.0",
     "undici": "catalog:",
     "yaml": "catalog:",
     "yauzl": "^3.4.0"

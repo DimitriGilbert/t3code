@@ -97,6 +97,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  WsWatchRpcGroup,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -120,6 +121,11 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as WatchPageService from "./watch/WatchPageService.ts";
+import * as WidgetTranspileService from "./watch/WidgetTranspileService.ts";
+import * as ConnectorPoller from "./watch/connectors/ConnectorPoller.ts";
+import * as ConnectorService from "./watch/connectors/ConnectorService.ts";
+import * as UserNotificationService from "./notifications/UserNotificationService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -549,11 +555,63 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 
+// Watch handlers live on their own subgroup layer. The type-level cost of a
+// single `of`/`toLayer` instantiation grows with the RPC union, and adding the
+// watch methods to the main handlers object overflows the typechecker's
+// instantiation budget. `WsRpcGroup` stays whole for clients and
+// `RpcServer.make`; the handler context is just built in pieces.
+const ServerWsWatchRpcGroup = WsWatchRpcGroup.middleware(RpcInstrumentation);
+
+const WS_WATCH_METHOD_TAGS = [
+  WS_METHODS.watchPagesList,
+  WS_METHODS.watchPagesSubscribe,
+  WS_METHODS.watchGalleryList,
+  WS_METHODS.watchPagesCreate,
+  WS_METHODS.watchPagesRename,
+  WS_METHODS.watchPagesReorder,
+  WS_METHODS.watchPagesDuplicate,
+  WS_METHODS.watchPagesDelete,
+  WS_METHODS.watchPagesRestore,
+  WS_METHODS.watchPagesUpdateScope,
+  WS_METHODS.watchPagesInstantiateFromGallery,
+  WS_METHODS.watchWidgetsAdd,
+  WS_METHODS.watchWidgetsRemove,
+  WS_METHODS.watchWidgetsConfigure,
+  WS_METHODS.watchWidgetsSetLayout,
+  WS_METHODS.watchWidgetsSetMobileProjection,
+  WS_METHODS.watchWidgetsMoveToPage,
+  WS_METHODS.watchNotificationsSubscribe,
+  WS_METHODS.watchNotificationsHistory,
+  WS_METHODS.watchNotificationsSetPrefs,
+  WS_METHODS.watchConnectorsListInstances,
+  WS_METHODS.watchConnectorsSubscribeInstances,
+  WS_METHODS.watchConnectorsCreateInstance,
+  WS_METHODS.watchConnectorsUpdateInstance,
+  WS_METHODS.watchConnectorsDeleteInstance,
+  WS_METHODS.watchConnectorsSetInstanceConfig,
+  WS_METHODS.watchConnectorsRequestInstall,
+  WS_METHODS.watchConnectorsRequestUpgrade,
+  WS_METHODS.watchConnectorsPrepareInstallConfirm,
+  WS_METHODS.watchConnectorsConfirmInstall,
+  WS_METHODS.watchConnectorsConfirmUpgrade,
+  WS_METHODS.watchConnectorsCancelInstallRequest,
+  WS_METHODS.watchConnectorsRollback,
+  WS_METHODS.watchConnectorsUninstall,
+  WS_METHODS.watchConnectorsPreparePurge,
+  WS_METHODS.watchConnectorsPurgeInstanceData,
+  WS_METHODS.watchConnectorSubscribe,
+  WS_METHODS.watchWidgetSourcePublish,
+  WS_METHODS.watchWidgetSourceGet,
+  WS_METHODS.watchWidgetSourceSubscribe,
+] as const;
+
+const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(...WS_WATCH_METHOD_TAGS);
+
 // RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
 // crosses TypeScript's instantiation limit and the layer's requirements degrade to
-// `any`, so the handlers are registered as two disjoint, smaller groups.
-type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsRpcGroup>;
+// `any`, so the core handlers are registered as two disjoint, smaller groups.
+type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsCoreRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
 type SplitWsRpc = Extract<
   ServerWsRpc,
@@ -563,11 +621,145 @@ const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
   SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
 const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
   !isSplitWsRpc(rpc);
-const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
+const serverWsRpcs = Array.from(ServerWsCoreRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
-// Replaying each intervening event costs a shell refetch; past this gap a
-// single O(active-threads) snapshot is cheaper and bounded.
+
+const layerWsWatchRpc = ServerWsWatchRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const watchPages = yield* WatchPageService.WatchPageService;
+    const userNotifications = yield* UserNotificationService.UserNotificationService;
+    const connectors = yield* ConnectorService.ConnectorService;
+    const connectorPoller = yield* ConnectorPoller.ConnectorPoller;
+    const widgetSources = yield* WidgetTranspileService.WidgetTranspileService;
+    return ServerWsWatchRpcGroup.of({
+      [WS_METHODS.watchPagesList]: (input) => watchPages.list(input),
+      [WS_METHODS.watchPagesSubscribe]: (input) => watchPages.subscribeList(input),
+      [WS_METHODS.watchGalleryList]: (_input) => watchPages.listGallery(),
+      [WS_METHODS.watchPagesCreate]: (input) => watchPages.create(input),
+      [WS_METHODS.watchPagesRename]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.rename(input)),
+        ),
+      [WS_METHODS.watchPagesReorder]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.reorder(input)),
+        ),
+      [WS_METHODS.watchPagesDuplicate]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.duplicate(input)),
+        ),
+      [WS_METHODS.watchPagesDelete]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.delete(input)),
+        ),
+      [WS_METHODS.watchPagesRestore]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.restore(input)),
+        ),
+      [WS_METHODS.watchPagesUpdateScope]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.updateScope(input)),
+        ),
+      [WS_METHODS.watchPagesInstantiateFromGallery]: (input) =>
+        watchPages.instantiateFromGallery(input),
+      [WS_METHODS.watchWidgetsAdd]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.addWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsRemove]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.removeWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsConfigure]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
+          Effect.andThen(watchPages.configureWidget(input)),
+        ),
+      [WS_METHODS.watchWidgetsSetLayout]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.setLayout(input)),
+        ),
+      [WS_METHODS.watchWidgetsSetMobileProjection]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.page_id": input.pageId }).pipe(
+          Effect.andThen(watchPages.setMobileProjection(input)),
+        ),
+      [WS_METHODS.watchWidgetsMoveToPage]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.widget_id": input.widgetId }).pipe(
+          Effect.andThen(watchPages.moveToPage(input)),
+        ),
+      [WS_METHODS.watchNotificationsSubscribe]: (_input) => userNotifications.subscribe(),
+      [WS_METHODS.watchNotificationsHistory]: (input) => userNotifications.history(input),
+      [WS_METHODS.watchNotificationsSetPrefs]: (input) => userNotifications.setPrefs(input),
+      [WS_METHODS.watchConnectorsListInstances]: (input) => connectors.list(input),
+      [WS_METHODS.watchConnectorsSubscribeInstances]: (input) => connectors.subscribeList(input),
+      [WS_METHODS.watchConnectorsCreateInstance]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.createInstance(input)),
+        ),
+      [WS_METHODS.watchConnectorsUpdateInstance]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.updateInstance(input)),
+        ),
+      [WS_METHODS.watchConnectorsDeleteInstance]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.deleteInstance(input)),
+        ),
+      [WS_METHODS.watchConnectorsSetInstanceConfig]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.setInstanceConfig(input)),
+        ),
+      [WS_METHODS.watchConnectorsRequestInstall]: (input) => connectors.requestInstall(input),
+      [WS_METHODS.watchConnectorsRequestUpgrade]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.requestUpgrade(input)),
+        ),
+      [WS_METHODS.watchConnectorsPrepareInstallConfirm]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.prepareInstallConfirm(input)),
+        ),
+      [WS_METHODS.watchConnectorsConfirmInstall]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.confirmInstall(input)),
+        ),
+      [WS_METHODS.watchConnectorsConfirmUpgrade]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.confirmUpgrade(input)),
+        ),
+      [WS_METHODS.watchConnectorsCancelInstallRequest]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.request_id": input.requestId }).pipe(
+          Effect.andThen(connectors.cancelInstallRequest(input)),
+        ),
+      [WS_METHODS.watchConnectorsRollback]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.instance_id": input.instanceId }).pipe(
+          Effect.andThen(connectors.rollback(input)),
+        ),
+      [WS_METHODS.watchConnectorsUninstall]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.uninstall(input)),
+        ),
+      [WS_METHODS.watchConnectorsPreparePurge]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.preparePurge(input)),
+        ),
+      [WS_METHODS.watchConnectorsPurgeInstanceData]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.pack_id": input.packId }).pipe(
+          Effect.andThen(connectors.purgeInstanceData(input)),
+        ),
+      [WS_METHODS.watchConnectorSubscribe]: (input) => connectorPoller.subscribe(input),
+      [WS_METHODS.watchWidgetSourcePublish]: (input) => widgetSources.publish(input),
+      [WS_METHODS.watchWidgetSourceGet]: (input) =>
+        Effect.annotateCurrentSpan({ "watch.source_id": input.sourceId }).pipe(
+          Effect.andThen(widgetSources.get(input)),
+        ),
+      [WS_METHODS.watchWidgetSourceSubscribe]: (input) => widgetSources.subscribe(input),
+    });
+  }),
+);
+// When a resuming client's cursor is more than this many events behind the
+// current head, skip the per-event catch-up replay and send a fresh shell
+// snapshot instead. Replaying each intervening event costs a shell refetch;
+// past this gap a single O(active-threads) snapshot is cheaper and bounded.
+// Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
 const SHELL_RESUME_MAX_GAP = 1_000;
 // Row count alone does not bound replay memory: a few events with large tool
 // payloads can decode to gigabytes. Before replaying, sum the serialized
@@ -1731,6 +1923,8 @@ export const layerWsRpc = (
           issues: keybindingsConfig.issues,
           providers,
           ...editorConfig,
+          // Same discovery-with-timeout treatment as editors: a slow probe
+          // must not stall server.getConfig, so it degrades to no targets.
           remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
             remoteOpenTargets.resolveTargets(),
           ),
@@ -1769,6 +1963,7 @@ export const layerWsRpc = (
           threadSnapshotPagination: true,
           threadFind: true,
           threadFindProgressive: true,
+          watchScreen: true,
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -1854,7 +2049,7 @@ export const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = ServerWsCoreRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -3264,12 +3459,15 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(
-              session,
-              clientOrigin,
-              clientAnalyticsProps,
-              previewAutomationBroker,
-              serverBrowser,
+            Layer.mergeAll(
+              layerWsRpc(
+                session,
+                clientOrigin,
+                clientAnalyticsProps,
+                previewAutomationBroker,
+                serverBrowser,
+              ),
+              layerWsWatchRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

@@ -1,11 +1,17 @@
-import { ArrowLeftIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ChartNoAxesColumnIcon,
+  LayoutDashboardIcon,
+  SettingsIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { memo } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { usePullRequestsSupported } from "../../state/environments";
+import { usePullRequestsSupported, useWatchScreenSupported } from "../../state/environments";
+import { useWatchUnreadTotal } from "../watch/watchNotificationStore";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -135,10 +141,13 @@ function SidebarUtilityItem({
   icon,
   label,
   onClick,
+  badgeCount,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
+  /** Unread count surfaced on the icon (e.g. Watch notifications). */
+  badgeCount?: number;
 }) {
   return (
     <SidebarMenuItem className="shrink-0">
@@ -146,7 +155,19 @@ function SidebarUtilityItem({
         <TooltipTrigger
           render={
             <SidebarMenuButton aria-label={label} onClick={onClick} size="icon">
-              {icon}
+              <span className="relative inline-flex">
+                {icon}
+                {badgeCount === undefined || badgeCount === 0 ? null : (
+                  <Badge
+                    size="sm"
+                    variant="default"
+                    className="absolute -top-1.5 -right-2"
+                    aria-label={`${badgeCount} unread notifications`}
+                  >
+                    {badgeCount > 9 ? "9+" : badgeCount}
+                  </Badge>
+                )}
+              </span>
             </SidebarMenuButton>
           }
         />
@@ -164,6 +185,11 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const pullRequestsSupported = usePullRequestsSupported();
+  const watchScreenSupported = useWatchScreenSupported();
+  // Aggregate across environments: unread accrues for every environment the
+  // coordinator follows, and the badge is the ambient "something happened"
+  // signal — a non-active environment's alerts must surface here too.
+  const watchUnreadCount = useWatchUnreadTotal();
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);
@@ -186,6 +212,11 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
       setOpenMobile(false);
     }
     void navigate({ to: "/usage" });
+  };
+
+  const handleWatchClick = () => {
+    closeMobileSidebar();
+    void navigate({ to: "/watch" });
   };
 
   const handleBackClick = () => {
@@ -214,6 +245,14 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               icon={<PullRequestGlyph.pullRequest />}
               label="Pull Requests"
               onClick={handlePullRequestsClick}
+            />
+          ) : null}
+          {watchScreenSupported ? (
+            <SidebarUtilityItem
+              icon={<LayoutDashboardIcon />}
+              label="Watch"
+              onClick={handleWatchClick}
+              badgeCount={watchUnreadCount}
             />
           ) : null}
           <SidebarUtilityItem

@@ -40,6 +40,7 @@ import {
   type RenderFailureProps,
 } from "./components/RenderErrorBoundary";
 import { ArchivedThreadsRouteScreen } from "./features/archive/ArchivedThreadsRouteScreen";
+import { WatchRouteScreen } from "./features/watch/WatchScreen";
 import { useAgentNotificationNavigation } from "./features/agent-awareness/notificationNavigation";
 import { ConnectOnboardingRouteScreen } from "./features/cloud/ConnectOnboardingRouteScreen";
 import { useConnectOnboardingNavigation } from "./features/cloud/connectOnboardingNavigation";
@@ -643,6 +644,14 @@ const RootStackConfig = createWorkspaceStackNavigator({
         contentStyle: { backgroundColor: "transparent" },
         headerBackVisible: false,
         ...getCompactBrandHeaderOptions(),
+      },
+    }),
+    Watch: createNativeStackScreen({
+      screen: WatchRouteScreen,
+      linking: "watch",
+      options: {
+        ...DETAIL_HEADER_OPTIONS,
+        title: "Watch",
       },
     }),
     PullRequest: createNativeStackScreen({

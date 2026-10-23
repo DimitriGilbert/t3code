@@ -339,6 +339,30 @@
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"
     },
+    "./state/watch": {
+      "types": "./src/state/watch.ts",
+      "default": "./src/state/watch.ts"
+    },
+    "./state/watch-connectors": {
+      "types": "./src/state/watchConnectors.ts",
+      "default": "./src/state/watchConnectors.ts"
+    },
+    "./state/watch-mounts": {
+      "types": "./src/state/watchMounts.ts",
+      "default": "./src/state/watchMounts.ts"
+    },
+    "./state/watch-notifications": {
+      "types": "./src/state/watchNotifications.ts",
+      "default": "./src/state/watchNotifications.ts"
+    },
+    "./state/watch-pages": {
+      "types": "./src/state/watchPages.ts",
+      "default": "./src/state/watchPages.ts"
+    },
+    "./state/watch-widgets": {
+      "types": "./src/state/watchWidgets.ts",
+      "default": "./src/state/watchWidgets.ts"
+    },
     "./work-log/user-input": {
       "types": "./src/work-log/userInput.ts",
       "default": "./src/work-log/userInput.ts"
@@ -414,6 +438,10 @@
     "./mcp-apps": {
       "types": "./src/mcpApps/host.ts",
       "default": "./src/mcpApps/host.ts"
+    },
+    "./watch-app-bridge": {
+      "types": "./src/watchAppBridge.ts",
+      "default": "./src/watchAppBridge.ts"
     },
     "./state/mcp-apps": {
       "types": "./src/state/mcpApps.ts",

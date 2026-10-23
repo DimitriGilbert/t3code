@@ -24,6 +24,24 @@ export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   "@clerk/electron-passkeys",
   "node-gyp-build",
   "node-addon-api",
+  // tsc-rs loads through createRequire (see WidgetTranspileService): its JS
+  // API resolves the @tsc-rs/<os>-<arch> native compiler binary package by
+  // real path, so both the wrapper and every platform sibling stay external —
+  // an inlined require cannot find the staged binary on disk.
+  "tsc-rs",
+  // Platform binaries of `tsc-rs` only — "@tsc-rs/typescript" (the repo's
+  // typescript) is a different package family with @typescript/* binaries.
+  "@tsc-rs/linux-",
+  "@tsc-rs/darwin-",
+  "@tsc-rs/win32-",
+  // ws's optional accelerators. Nothing in this repo declares them, so they are
+  // not in the staged production install and the packaged app does not ship
+  // them either way -- ws wraps the require in try/catch and falls back to its
+  // JS paths. They are listed because they were being inlined from the dev
+  // store: both carry binding.gyp and prebuilds and load through
+  // node-gyp-build, and a native loader inlined into a bundle chunk searches
+  // for prebuilds that cannot be beside it. Listing them keeps that from
+  // becoming real if either is ever declared as a dependency.
   "bufferutil",
   "utf-8-validate",
 ] as const;

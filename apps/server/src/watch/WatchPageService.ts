@@ -406,11 +406,11 @@ export const layer = Layer.effect(
     const changesPubSub = yield* PubSub.sliding<void>(1);
     const notifyChanged = PubSub.publish(changesPubSub, undefined).pipe(Effect.asVoid);
 
-    const newPageId = crypto.randomUUIDv4.pipe(
+    const newPageId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) => WatchPageId.make(`watch-page:${uuid}`)),
       Effect.mapError((cause) => watchError("Could not generate watch page id.", { cause })),
     );
-    const newWidgetId = crypto.randomUUIDv4.pipe(
+    const newWidgetId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) => WatchWidgetId.make(`watch-widget:${uuid}`)),
       Effect.mapError((cause) => watchError("Could not generate watch widget id.", { cause })),
     );

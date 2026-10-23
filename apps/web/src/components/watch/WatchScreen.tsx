@@ -77,7 +77,11 @@ import {
 } from "~/state/entities";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { buildThreadRouteParams } from "~/threadRoutes";
-import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
+import {
+  useEnvironmentProviders,
+  useEnvironments,
+  usePrimaryEnvironmentId,
+} from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
@@ -140,7 +144,7 @@ function WatchLiveBoard(props: {
   const settings = useEnvironmentSettings(props.environmentId);
   const serverConfig = useServerConfigs().get(props.environmentId);
   const snoozeSupported = serverConfig?.environment.capabilities?.threadSnooze === true;
-  const providers = serverConfig?.providers ?? [];
+  const providers = useEnvironmentProviders().get(props.environmentId) ?? [];
   const threads = useThreadShells().filter(
     (thread) => thread.environmentId === props.environmentId,
   );

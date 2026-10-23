@@ -20,7 +20,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "
 import { ActivityIndicator, Platform, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { watchEnvironment } from "../../state/watch";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";

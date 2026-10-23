@@ -929,7 +929,7 @@ export const layer = Layer.effect(
             }
             return Stream.fail(infoResult.failure);
           }
-          const subscriberId = yield* crypto.randomUUIDv4.pipe(
+          const subscriberId = yield* crypto.randomUUIDv4().pipe(
             Effect.mapError(
               (cause) =>
                 new WatchConnectorError({

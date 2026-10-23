@@ -29,7 +29,11 @@ export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   // real path, so both the wrapper and every platform sibling stay external —
   // an inlined require cannot find the staged binary on disk.
   "tsc-rs",
-  "@tsc-rs/",
+  // Platform binaries of `tsc-rs` only — "@tsc-rs/typescript" (the repo's
+  // typescript) is a different package family with @typescript/* binaries.
+  "@tsc-rs/linux-",
+  "@tsc-rs/darwin-",
+  "@tsc-rs/win32-",
   // ws's optional accelerators. Nothing in this repo declares them, so they are
   // not in the staged production install and the packaged app does not ship
   // them either way -- ws wraps the require in try/catch and falls back to its

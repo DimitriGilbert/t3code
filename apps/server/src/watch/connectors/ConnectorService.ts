@@ -624,13 +624,13 @@ export const layer = Layer.effect(
         ? PackStore.urlResolvesLocal(origin.url).pipe(Effect.provide(packRuntime))
         : Effect.succeed(false);
 
-    const newInstanceId = crypto.randomUUIDv4.pipe(
+    const newInstanceId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) => WatchConnectorInstanceId.make(`watch-connector-instance:${uuid}`)),
       Effect.mapError((cause) =>
         connectorError("fetchFailed", "Could not generate connector instance id.", { cause }),
       ),
     );
-    const newRequestId = crypto.randomUUIDv4.pipe(
+    const newRequestId = crypto.randomUUIDv4().pipe(
       Effect.map((uuid) =>
         WatchConnectorInstallRequestId.make(`watch-connector-install-request:${uuid}`),
       ),

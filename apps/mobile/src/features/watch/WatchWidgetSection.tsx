@@ -8,8 +8,8 @@ import type { WatchWidget, WatchWidgetErrorState } from "@t3tools/contracts";
 import type { ReactNode } from "react";
 import { Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { cn } from "../../lib/cn";
 
 /**

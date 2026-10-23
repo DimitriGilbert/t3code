@@ -47,9 +47,9 @@ import { Alert } from "react-native";
 import { View } from "react-native";
 import type { ReactNode } from "react";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
-import { RowPressable } from "../../components/RowPressable";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { RowPressable } from "../../components/ui/RowPressable";
 import { StatusPill } from "../../components/StatusPill";
 import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/time";

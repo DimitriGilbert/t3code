@@ -170,15 +170,16 @@ export function registerNavigationHistoryCommands(router: AnyRouter): () => void
   );
 }
 
-// Escape leaves the pull requests page when no scope (a selection, a dialog,
+// Escape leaves sidebar utility pages when no scope (a selection, a dialog,
 // a drag) claimed it, so it observes after every other scope.
-function registerPullRequestsEscapeCommand(router: AnyRouter): () => void {
+const ESCAPE_EXIT_PATHS = new Set(["/pull-requests", "/clanker"]);
+function registerUtilityPageEscapeCommand(router: AnyRouter): () => void {
   return registerCommands(
     {},
     {
       observe: (event, consumed) => {
         if (consumed || event.repeat || event.isComposing || event.key !== "Escape") return;
-        if (router.state.location.pathname !== "/pull-requests") return;
+        if (!ESCAPE_EXIT_PATHS.has(router.state.location.pathname)) return;
         event.preventDefault();
         const activeElement = document.activeElement;
         if (activeElement instanceof HTMLElement) activeElement.blur();
@@ -272,7 +273,7 @@ function registerAppShellCommands(router: AnyRouter, shellElement: Element): () 
   const disposers = [
     registerThreadUndoCommands(router, readSidebarVisible),
     registerNavigationHistoryCommands(router),
-    registerPullRequestsEscapeCommand(router),
+    registerUtilityPageEscapeCommand(router),
     registerMenuAction("open-settings", () => {
       if (!/^\/settings(\/|$)/.test(router.state.location.pathname))
         void router.navigate({ to: "/settings" });

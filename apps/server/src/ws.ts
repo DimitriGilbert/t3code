@@ -98,6 +98,8 @@ import {
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
+import { buildClankerWaves } from "@t3tools/clanker/dag";
+import { parseClankerWorkflow } from "@t3tools/clanker/parse";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -120,6 +122,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as ClankerWorkflowService from "./clanker/ClankerWorkflowService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -1258,6 +1261,7 @@ export const layerWsRpc = (
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
+      const clankerWorkflows = yield* ClankerWorkflowService.ClankerWorkflowService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -2125,6 +2129,47 @@ export const layerWsRpc = (
         [WS_METHODS.scheduledTasksGetWebhookDelivery]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
+          ),
+        // Pure content validation: it works without a project, so it does not
+        // go through ClankerWorkflowService.
+        [WS_METHODS.clankerWorkflowsValidate]: (input) =>
+          Effect.succeed({
+            diagnostics: (() => {
+              const result = parseClankerWorkflow(input.content);
+              if (result.workflow === undefined) return result.diagnostics;
+              return [
+                ...result.diagnostics,
+                ...buildClankerWaves(result.workflow.steps).diagnostics,
+              ];
+            })(),
+          }),
+        [WS_METHODS.clankerWorkflowsList]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(
+              clankerWorkflows
+                .list(input)
+                .pipe(Effect.map((workflows) => ({ workflows: [...workflows] }))),
+            ),
+          ),
+        [WS_METHODS.clankerWorkflowsSubscribe]: (input) =>
+          clankerWorkflows
+            .subscribe(input)
+            .pipe(Stream.map((workflows) => ({ workflows: [...workflows] }))),
+        [WS_METHODS.clankerWorkflowsGet]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(clankerWorkflows.get(input)),
+          ),
+        [WS_METHODS.clankerWorkflowsCreate]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(clankerWorkflows.create(input)),
+          ),
+        [WS_METHODS.clankerWorkflowsUpdate]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(clankerWorkflows.update(input)),
+          ),
+        [WS_METHODS.clankerWorkflowsDelete]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(clankerWorkflows.delete(input)),
           ),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) => loadServerConfig({ usageLimitsCommand: false }),

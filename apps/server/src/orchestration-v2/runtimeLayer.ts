@@ -54,6 +54,7 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ClankerWorkflowService from "../clanker/ClankerWorkflowService.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -282,6 +283,11 @@ const layerThreadLifecycleProvided = ThreadLifecycleService.layer.pipe(
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
+// WorkspacePaths and the platform FileSystem/Path come from the outer
+// server-wide context, like every other workspace service here.
+const layerClankerWorkflowProvided = ClankerWorkflowService.layer.pipe(
+  Layer.provide(layerProjectService),
+);
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -367,6 +373,7 @@ export const layerProduction = Layer.mergeAll(
   layerThreadLifecycleProvided,
   layerScheduledTaskProvided,
   layerSecretRequestsProvided,
+  layerClankerWorkflowProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

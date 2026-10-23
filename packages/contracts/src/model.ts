@@ -123,6 +123,7 @@ const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 const DEVIN_DRIVER_KIND = ProviderDriverKind.make("devin");
+const ZCODE_DRIVER_KIND = ProviderDriverKind.make("zcode");
 
 export const DEFAULT_MODEL = "gpt-6-astra";
 
@@ -158,6 +159,9 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
   // "default" defers to the Devin session's current model selection.
   [DEVIN_DRIVER_KIND]: "default",
+  // "default" defers to the session's current model, which the ZCode bridge
+  // reads from ~/.zcode config.
+  [ZCODE_DRIVER_KIND]: "default",
 };
 
 export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
@@ -207,4 +211,5 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [PI_DRIVER_KIND]: "Pi",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
   [DEVIN_DRIVER_KIND]: "Devin",
+  [ZCODE_DRIVER_KIND]: "ZCode",
 };

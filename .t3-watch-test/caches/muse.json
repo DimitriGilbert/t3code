@@ -1,0 +1,23 @@
+{
+  "displayName": "Muse Code",
+  "showInteractionModeToggle": false,
+  "reportsContextWindow": true,
+  "supportedRuntimeModes": ["approval-required", "full-access"],
+  "enabled": false,
+  "installed": false,
+  "version": null,
+  "status": "disabled",
+  "auth": {
+    "status": "unknown"
+  },
+  "checkedAt": "2026-10-15T13:11:36.091Z",
+  "message": "Muse Code is disabled in T3 Code settings.",
+  "models": [],
+  "slashCommands": [],
+  "skills": [],
+  "instanceId": "muse",
+  "driver": "muse",
+  "continuation": {
+    "groupKey": "muse:instance:muse"
+  }
+}

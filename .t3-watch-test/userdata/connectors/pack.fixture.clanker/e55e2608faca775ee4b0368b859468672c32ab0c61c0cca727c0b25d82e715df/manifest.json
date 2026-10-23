@@ -1,0 +1,13 @@
+{
+  "id": "pack.fixture.clanker",
+  "schemaVersion": 1,
+  "operations": [
+    {
+      "name": "clanker.watchRuns",
+      "description": "Watch .clanker/runs/*/state.json and expose run status snapshots."
+    }
+  ],
+  "egressHosts": [],
+  "secretKeys": [],
+  "transport": "file"
+}

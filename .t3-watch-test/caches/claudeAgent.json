@@ -1,0 +1,1229 @@
+{
+  "displayName": "Claude",
+  "showInteractionModeToggle": true,
+  "reportsContextWindow": true,
+  "enabled": true,
+  "installed": true,
+  "version": "2.1.291",
+  "status": "ready",
+  "auth": {
+    "status": "authenticated"
+  },
+  "checkedAt": "2026-10-15T13:11:36.016Z",
+  "message": "Claude Code v2.1.291 is too old for Claude Haiku 5.5. Upgrade to v2.1.293 or newer to access it.",
+  "models": [
+    {
+      "slug": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "aliases": ["opus", "opus-5.5", "claude-opus-5.5"],
+      "isCustom": false,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium",
+                "isDefault": true
+              },
+              {
+                "id": "high",
+                "label": "High"
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "description": "xhigh effort plus multi-agent workflow orchestration"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "aliases": ["sonnet", "sonnet-5.5", "claude-sonnet-5.5"],
+      "isCustom": false,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "aliases": ["fable", "fable-5.1", "claude-fable-5.1"],
+      "isCustom": false,
+      "isDefault": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium",
+                "isDefault": true
+              },
+              {
+                "id": "high",
+                "label": "High"
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "description": "xhigh effort plus multi-agent workflow orchestration"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium",
+                "isDefault": true
+              },
+              {
+                "id": "high",
+                "label": "High"
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "description": "xhigh effort plus multi-agent workflow orchestration"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-opus-5",
+      "name": "Claude Opus 5",
+      "aliases": ["opus-5", "claude-opus-5.0", "claude-opus-5-0"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "description": "xhigh effort plus multi-agent workflow orchestration"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-opus-4-8",
+      "name": "Claude Opus 4.8",
+      "aliases": ["opus-4.8", "claude-opus-4.8"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "description": "xhigh effort plus multi-agent workflow orchestration"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-opus-4-7",
+      "name": "Claude Opus 4.7",
+      "aliases": ["opus-4.7", "claude-opus-4.7"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High"
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High",
+                "isDefault": true
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-opus-4-6",
+      "name": "Claude Opus 4.6",
+      "aliases": ["opus-4.6", "claude-opus-4.6", "claude-opus-4-6-20251117"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          },
+          {
+            "id": "contextWindow",
+            "label": "Context Window",
+            "type": "select",
+            "options": [
+              {
+                "id": "200k",
+                "label": "200k"
+              },
+              {
+                "id": "1m",
+                "label": "1M",
+                "isDefault": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-opus-4-5",
+      "name": "Claude Opus 4.5",
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              }
+            ]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "aliases": ["sonnet-5", "claude-sonnet-5.0", "claude-sonnet-5-0"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "xhigh",
+                "label": "Extra High"
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-sonnet-4-6",
+      "name": "Claude Sonnet 4.6",
+      "aliases": ["sonnet-4.6", "claude-sonnet-4.6", "claude-sonnet-4-6-20251117"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              {
+                "id": "low",
+                "label": "Low"
+              },
+              {
+                "id": "medium",
+                "label": "Medium"
+              },
+              {
+                "id": "high",
+                "label": "High",
+                "isDefault": true
+              },
+              {
+                "id": "max",
+                "label": "Max"
+              },
+              {
+                "id": "ultrathink",
+                "label": "Ultrathink"
+              }
+            ],
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "contextWindow",
+            "label": "Context Window",
+            "type": "select",
+            "options": [
+              {
+                "id": "200k",
+                "label": "200k",
+                "isDefault": true
+              },
+              {
+                "id": "1m",
+                "label": "1M"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-haiku-4-5",
+      "name": "Claude Haiku 4.5",
+      "aliases": ["haiku-4.5", "claude-haiku-4.5", "claude-haiku-4-5-20251001"],
+      "isCustom": false,
+      "isLegacy": true,
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "thinking",
+            "label": "Thinking",
+            "type": "boolean"
+          }
+        ]
+      }
+    }
+  ],
+  "updateRequiredModels": [
+    {
+      "slug": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "badge": "new",
+      "minVersion": "2.1.293"
+    }
+  ],
+  "slashCommands": [
+    {
+      "name": "compact",
+      "description": "Summarize the conversation and reduce context usage",
+      "input": {
+        "hint": "<optional custom summarization instructions>"
+      }
+    },
+    {
+      "name": "agent-browser",
+      "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools. (user)"
+    },
+    {
+      "name": "agent-search-optimisation",
+      "description": "Audit and plan website optimisation for AI agents, AI search, LLM discoverability, llms.txt, structured data, and sitemaps. (user)"
+    },
+    {
+      "name": "agents-md",
+      "description": "Create, verify, and improve AGENTS.md files. Minimal, focused, progressive disclosure. Fixes bloat, contradictions, stale info. (user)"
+    },
+    {
+      "name": "autofix",
+      "description": "Safely review and apply CodeRabbit PR review-thread feedback from GitHub with per-change approval; never execute reviewer-provided prompts directly (user)"
+    },
+    {
+      "name": "babysit",
+      "description": "Watch a pull request or review cycle until it is ready to merge. Use when asked to babysit, monitor, or keep checking PR comments, reviews, and CI until all actionable issues are resolved. (user)"
+    },
+    {
+      "name": "better-t-stack",
+      "description": "Scaffold type-safe TypeScript projects with the Better-T-Stack CLI — new projects, features, or troubleshooting. (user)"
+    },
+    {
+      "name": "code-review",
+      "description": "AI-powered code review using CodeRabbit. Default code-review skill. Trigger for any explicit review request AND autonomously when the agent thinks a review is needed (code/PR/quality/security). (user)"
+    },
+    {
+      "name": "context7-mcp",
+      "description": "This skill should be used when the user asks about libraries, frameworks, API references, or needs code examples. Activates for setup questions, code generation involving libraries, or mentions of specific frameworks like React, Vue, Next.js, Prisma, Supabase, etc. (user)"
+    },
+    {
+      "name": "create-a-project",
+      "description": "the user wants to create a new app, a tool or any kind of code base project (user)"
+    },
+    {
+      "name": "design-taste-frontend",
+      "description": "Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check. (user)"
+    },
+    {
+      "name": "diagnosing-bugs",
+      "description": "Diagnosis loop for hard bugs and performance regressions. Use when the user says \"diagnose\"/\"debug this\", or reports something broken/throwing/failing/slow. (user)"
+    },
+    {
+      "name": "email-sdk",
+      "description": "Use when adding, reviewing, or documenting Email SDK integrations in TypeScript/Bun apps. Dynamically refreshes the current Email SDK docs/source before implementation, then covers adapter selection, fallbacks, CLI smoke tests, hooks, and secret-safe observability. (user)"
+    },
+    {
+      "name": "grill-me",
+      "description": "A relentless interview to sharpen a plan or design. (user)"
+    },
+    {
+      "name": "grill-with-docs",
+      "description": "A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go. (user)"
+    },
+    {
+      "name": "grilling",
+      "description": "Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases. (user)"
+    },
+    {
+      "name": "handoff",
+      "description": "Compact the current conversation into a handoff document for another agent to pick up. (user)",
+      "input": {
+        "hint": "What will the next session be used for?"
+      }
+    },
+    {
+      "name": "improve-codebase-architecture",
+      "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick. (user)"
+    },
+    {
+      "name": "not-ai-writer",
+      "description": "Create and edit content to sound authentically human, avoiding AI detection markers and generated writing patterns. (user)"
+    },
+    {
+      "name": "port-book",
+      "description": "Reserve a local port before running any server, so two projects never collide. Use whenever you are about to bind, expose, or hardcode a port — a dev server, API, preview, docker -p mapping, test fixture, or anything that calls .bind()/listen()/--port. Also use when a port is already in use, when you need to know what a port belongs to, or when releasing one. Triggers - \"port-book\", \"which port\", \"port already in use\", \"start a dev server\", \"pick a port\", \"reserve a port\", \"free the port\". (user)"
+    },
+    {
+      "name": "research",
+      "description": "Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent. (user)"
+    },
+    {
+      "name": "resolving-merge-conflicts",
+      "description": "Use when you need to resolve an in-progress git merge/rebase conflict. (user)"
+    },
+    {
+      "name": "subagent-orchestration",
+      "description": "Multi-phase development with implementer/validator subagents, auto-retry, and automated build/test validation. For complex builds, not single-file tasks. (user)"
+    },
+    {
+      "name": "subagent-planificator",
+      "description": "Collaborative multi-agent planning with specialist cross-review and iterative consensus-building through discussion rounds. (user)"
+    },
+    {
+      "name": "subagent-review",
+      "description": "Deep multi-agent code review producing verified findings and fix plans. Triggers on \"deep review\", \"security review\", \"code audit\", \"find problems\". (user)"
+    },
+    {
+      "name": "tdd",
+      "description": "Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions \"red-green-refactor\", or wants integration tests. (user)"
+    },
+    {
+      "name": "teach",
+      "description": "Teach the user a new skill or concept, within this workspace. (user)",
+      "input": {
+        "hint": "What would you like to learn about?"
+      }
+    },
+    {
+      "name": "to-spec",
+      "description": "Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed. (user)"
+    },
+    {
+      "name": "writing-great-skills",
+      "description": "Reference for writing and editing skills well — the vocabulary and principles that make a skill predictable. (user)"
+    },
+    {
+      "name": "contribution-triage",
+      "description": "Enforce T3 Code's PR contribution policy by closing ineligible submissions and triggering Macroscope review for eligible work within authorized scope. Supports explicit dry runs. Use for contribution moderation, not installation diagnostics or a full code review. (project)"
+    },
+    {
+      "name": "test-t3-app",
+      "description": "Test T3 Code's web and desktop UI through its built-in Browser panel against isolated development state. Use for browser verification, browser pairing recovery, and test fixtures. Use test-t3-mobile for native mobile verification. (project)"
+    },
+    {
+      "name": "test-t3-mobile",
+      "description": "Test T3 Code's native iOS and Android app through its Device panel and returned AgentDevice command. Use for mobile verification, native-client builds, Metro launch, and mobile pairing against isolated development state. (project)"
+    },
+    {
+      "name": "deep-research",
+      "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)"
+    },
+    {
+      "name": "design",
+      "description": "Grant or revoke Claude agent access to your Design projects",
+      "input": {
+        "hint": "consent | revoke"
+      }
+    },
+    {
+      "name": "design-sync",
+      "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+      "input": {
+        "hint": "[<project hint, e.g. \"Acme DS\">]"
+      }
+    },
+    {
+      "name": "dataviz",
+      "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\"."
+    },
+    {
+      "name": "update-config",
+      "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command."
+    },
+    {
+      "name": "verify",
+      "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe."
+    },
+    {
+      "name": "debug",
+      "description": "Enable debug logging for this session and help diagnose issues",
+      "input": {
+        "hint": "[issue description]"
+      }
+    },
+    {
+      "name": "simplify",
+      "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+      "input": {
+        "hint": "[<target>]"
+      }
+    },
+    {
+      "name": "batch",
+      "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+      "input": {
+        "hint": "<instruction>"
+      }
+    },
+    {
+      "name": "fewer-permission-prompts",
+      "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts."
+    },
+    {
+      "name": "doctor",
+      "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+      "input": {
+        "hint": "[prompt-audit [<path>]]"
+      }
+    },
+    {
+      "name": "loop",
+      "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+      "input": {
+        "hint": "[interval] [prompt]"
+      }
+    },
+    {
+      "name": "claude-api",
+      "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file)."
+    },
+    {
+      "name": "workflow-authoring",
+      "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one."
+    },
+    {
+      "name": "run",
+      "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library)."
+    },
+    {
+      "name": "run-skill-generator",
+      "description": "Author or improve the run-<unit> skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment."
+    },
+    {
+      "name": "plugin-authoring",
+      "description": "Make a mod: a live pane, band, status line, toast or hook inside Claude Code (terminal or desktop Code tab), written as a plugin of function hooks that hot-reloads in this session. Load before writing or debugging a hooks module."
+    },
+    {
+      "name": "advisor",
+      "description": "Let Claude consult a stronger model at key moments",
+      "input": {
+        "hint": "[fable|opus|sonnet|off]"
+      }
+    },
+    {
+      "name": "agents",
+      "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+    },
+    {
+      "name": "auto-mode-setup",
+      "description": "Teach auto mode about your environment, plus optional rule tweaks",
+      "input": {
+        "hint": "[--request-id <uuid>] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 <64-hex> --apply-file <path>)"
+      }
+    },
+    {
+      "name": "autocompact",
+      "description": "Configure the auto-compact window size",
+      "input": {
+        "hint": "[auto|<tokens>]"
+      }
+    },
+    {
+      "name": "clear",
+      "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+      "input": {
+        "hint": "[name]"
+      }
+    },
+    {
+      "name": "color",
+      "description": "Set the prompt bar color for this session",
+      "input": {
+        "hint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]"
+      }
+    },
+    {
+      "name": "config",
+      "description": "Set a setting by key",
+      "input": {
+        "hint": "key=value"
+      }
+    },
+    {
+      "name": "output-style",
+      "description": "List output styles or switch to one",
+      "input": {
+        "hint": "[style]"
+      }
+    },
+    {
+      "name": "context",
+      "description": "Show current context usage"
+    },
+    {
+      "name": "effort",
+      "description": "Set effort level for model usage",
+      "input": {
+        "hint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>"
+      }
+    },
+    {
+      "name": "fast",
+      "description": "Toggle fast mode (Opus 5.5)",
+      "input": {
+        "hint": "[on|off]"
+      }
+    },
+    {
+      "name": "focus",
+      "description": "Toggle focus view: just your prompt, summary, and response",
+      "input": {
+        "hint": "[on|off]"
+      }
+    },
+    {
+      "name": "heapdump",
+      "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory"
+    },
+    {
+      "name": "init",
+      "description": "Initialize a new CLAUDE.md file with codebase documentation"
+    },
+    {
+      "name": "mcp",
+      "description": "Manage MCP servers",
+      "input": {
+        "hint": "[reconnect|enable|disable [<server>|all]]"
+      }
+    },
+    {
+      "name": "import",
+      "description": "Import config from another AI coding agent"
+    },
+    {
+      "name": "model",
+      "description": "Set the AI model for Claude Code",
+      "input": {
+        "hint": "<model>"
+      }
+    },
+    {
+      "name": "__remote-workflow",
+      "description": "Run the workflow script delivered in this session environment (server-launched sessions only)"
+    },
+    {
+      "name": "workflow-launch-exec",
+      "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)"
+    },
+    {
+      "name": "reload-plugins",
+      "description": "Activate pending plugin changes in the current session",
+      "input": {
+        "hint": "[--force]"
+      }
+    },
+    {
+      "name": "reload-skills",
+      "description": "Pick up skills added or changed on disk during this session"
+    },
+    {
+      "name": "rename",
+      "description": "Rename the current conversation",
+      "input": {
+        "hint": "[name]"
+      }
+    },
+    {
+      "name": "security-review",
+      "description": "Complete a security review of the pending changes on the current branch"
+    },
+    {
+      "name": "usage",
+      "description": "Show session cost, plan usage, and what's contributing to your limits"
+    },
+    {
+      "name": "insights",
+      "description": "Generate a report analyzing your Claude Code sessions"
+    },
+    {
+      "name": "recap",
+      "description": "Generate a one-line session recap now"
+    },
+    {
+      "name": "skill-doctor",
+      "description": "Show which loaded skills are unused and costing context"
+    },
+    {
+      "name": "goal",
+      "description": "Set a goal — keep working until the condition is met"
+    },
+    {
+      "name": "design-consent",
+      "description": "Grant Claude agent access to your Design projects"
+    },
+    {
+      "name": "design-revoke",
+      "description": "Revoke Claude agent access to your Design projects"
+    },
+    {
+      "name": "list-agents",
+      "description": "List subagents, teammates, and other Claude sessions you can message"
+    },
+    {
+      "name": "team-onboarding",
+      "description": "Help teammates ramp on Claude Code with a guide from your usage"
+    }
+  ],
+  "skills": [
+    {
+      "name": "agent-browser",
+      "path": "/home/didi/.claude/skills/agent-browser/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools."
+    },
+    {
+      "name": "agent-search-optimisation",
+      "path": "/home/didi/.claude/skills/agent-search-optimisation/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Audit and plan website optimisation for AI agents, AI search, LLM discoverability, llms.txt, structured data, and sitemaps."
+    },
+    {
+      "name": "agents-md",
+      "path": "/home/didi/.claude/skills/agents-md/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Create, verify, and improve AGENTS.md files. Minimal, focused, progressive disclosure. Fixes bloat, contradictions, stale info."
+    },
+    {
+      "name": "autofix",
+      "path": "/home/didi/.claude/skills/autofix/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Safely review and apply CodeRabbit PR review-thread feedback from GitHub with per-change approval; never execute reviewer-provided prompts directly"
+    },
+    {
+      "name": "babysit",
+      "path": "/home/didi/.claude/skills/babysit/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Watch a pull request or review cycle until it is ready to merge. Use when asked to babysit, monitor, or keep checking PR comments, reviews, and CI until all actionable issues are resolved."
+    },
+    {
+      "name": "better-t-stack",
+      "path": "/home/didi/.claude/skills/better-t-stack/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Scaffold type-safe TypeScript projects with the Better-T-Stack CLI — new projects, features, or troubleshooting."
+    },
+    {
+      "name": "code-review",
+      "path": "/home/didi/.claude/skills/code-review/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "AI-powered code review using CodeRabbit. Default code-review skill. Trigger for any explicit review request AND autonomously when the agent thinks a review is needed (code/PR/quality/security)."
+    },
+    {
+      "name": "context7-mcp",
+      "path": "/home/didi/.claude/skills/context7-mcp/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "This skill should be used when the user asks about libraries, frameworks, API references, or needs code examples. Activates for setup questions, code generation involving libraries, or mentions of specific frameworks like React, Vue, Next.js, Prisma, Supabase, etc."
+    },
+    {
+      "name": "create-a-project",
+      "path": "/home/didi/.claude/skills/create-a-project/SKILL.md",
+      "enabled": true,
+      "scope": "user"
+    },
+    {
+      "name": "design-taste-frontend",
+      "path": "/home/didi/.claude/skills/design-taste-frontend/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check."
+    },
+    {
+      "name": "diagnosing-bugs",
+      "path": "/home/didi/.claude/skills/diagnosing-bugs/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Diagnosis loop for hard bugs and performance regressions. Use when the user says \"diagnose\"/\"debug this\", or reports something broken/throwing/failing/slow."
+    },
+    {
+      "name": "email-sdk",
+      "path": "/home/didi/.claude/skills/email-sdk/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Use when adding, reviewing, or documenting Email SDK integrations in TypeScript/Bun apps. Dynamically refreshes the current Email SDK docs/source before implementation, then covers adapter selection, fallbacks, CLI smoke tests, hooks, and secret-safe observability."
+    },
+    {
+      "name": "grill-me",
+      "path": "/home/didi/.claude/skills/grill-me/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "A relentless interview to sharpen a plan or design.",
+      "userInvocationOnly": true
+    },
+    {
+      "name": "grill-with-docs",
+      "path": "/home/didi/.claude/skills/grill-with-docs/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go.",
+      "userInvocationOnly": true
+    },
+    {
+      "name": "grilling",
+      "path": "/home/didi/.claude/skills/grilling/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases."
+    },
+    {
+      "name": "handoff",
+      "path": "/home/didi/.claude/skills/handoff/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Compact the current conversation into a handoff document for another agent to pick up.",
+      "userInvocationOnly": true
+    },
+    {
+      "name": "improve-codebase-architecture",
+      "path": "/home/didi/.claude/skills/improve-codebase-architecture/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.",
+      "userInvocationOnly": true
+    },
+    {
+      "name": "not-ai-writer",
+      "path": "/home/didi/.claude/skills/not-ai-writer/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Create and edit content to sound authentically human, avoiding AI detection markers and generated writing patterns."
+    },
+    {
+      "name": "port-book",
+      "path": "/home/didi/.claude/skills/port-book/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Reserve a local port before running any server, so two projects never collide. Use whenever you are about to bind, expose, or hardcode a port — a dev server, API, preview, docker -p mapping, test fixture, or anything that calls .bind()/listen()/--port. Also use when a port is already in use, when you need to know what a port belongs to, or when releasing one. Triggers - \"port-book\", \"which port\", \"port already in use\", \"start a dev server\", \"pick a port\", \"reserve a port\", \"free the port\"."
+    },
+    {
+      "name": "research",
+      "path": "/home/didi/.claude/skills/research/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent."
+    },
+    {
+      "name": "resolving-merge-conflicts",
+      "path": "/home/didi/.claude/skills/resolving-merge-conflicts/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Use when you need to resolve an in-progress git merge/rebase conflict."
+    },
+    {
+      "name": "shadcn",
+      "path": "/home/didi/.claude/skills/shadcn/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Manages shadcn components and projects — adding, searching, fixing, debugging, styling, and composing UI, including chat interfaces. Provides project context, component docs, and usage examples. Applies when working with shadcn/ui, component registries, presets, --preset codes, or any project with a components.json file. Also triggers for \"shadcn init\", \"create an app with --preset\", or \"switch to --preset\".",
+      "userInvocable": false
+    },
+    {
+      "name": "subagent-orchestration",
+      "path": "/home/didi/.claude/skills/subagent-orchestration/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Multi-phase development with implementer/validator subagents, auto-retry, and automated build/test validation. For complex builds, not single-file tasks."
+    },
+    {
+      "name": "subagent-planificator",
+      "path": "/home/didi/.claude/skills/subagent-planificator/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Collaborative multi-agent planning with specialist cross-review and iterative consensus-building through discussion rounds."
+    },
+    {
+      "name": "subagent-review",
+      "path": "/home/didi/.claude/skills/subagent-review/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Deep multi-agent code review producing verified findings and fix plans. Triggers on \"deep review\", \"security review\", \"code audit\", \"find problems\"."
+    },
+    {
+      "name": "tdd",
+      "path": "/home/didi/.claude/skills/tdd/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions \"red-green-refactor\", or wants integration tests."
+    },
+    {
+      "name": "teach",
+      "path": "/home/didi/.claude/skills/teach/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Teach the user a new skill or concept, within this workspace.",
+      "userInvocationOnly": true
+    },
+    {
+      "name": "to-spec",
+      "path": "/home/didi/.claude/skills/to-spec/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed.",
+      "userInvocationOnly": true
+    },
+    {
+      "name": "writing-great-skills",
+      "path": "/home/didi/.claude/skills/writing-great-skills/SKILL.md",
+      "enabled": true,
+      "scope": "user",
+      "description": "Reference for writing and editing skills well — the vocabulary and principles that make a skill predictable.",
+      "userInvocationOnly": true
+    }
+  ],
+  "usageLimits": {
+    "checkedAt": "2026-10-15T13:11:36.016Z",
+    "windows": [],
+    "unavailable": {
+      "reason": "unsupported"
+    }
+  },
+  "instanceId": "claudeAgent",
+  "driver": "claudeAgent",
+  "continuation": {
+    "groupKey": "claude:home:/home/didi/.claude"
+  },
+  "versionAdvisory": {
+    "status": "behind_latest",
+    "currentVersion": "2.1.291",
+    "latestVersion": "2.1.300",
+    "updateCommand": "npm install -g --prefix /home/didi/.npm-global --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@latest",
+    "canUpdate": true,
+    "canInstallVersion": true,
+    "checkedAt": "2026-10-15T13:11:38.948Z",
+    "message": "Install the update now or review provider settings."
+  },
+  "compatibilityAdvisory": {
+    "status": "supported",
+    "message": null,
+    "recommendedVersion": null,
+    "recommendedRange": ">=2.1.280",
+    "latestVersionStatus": "supported"
+  }
+}

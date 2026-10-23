@@ -1,0 +1,28 @@
+{
+  "displayName": "OpenCode",
+  "showInteractionModeToggle": false,
+  "enabled": false,
+  "installed": false,
+  "version": null,
+  "status": "disabled",
+  "auth": {
+    "status": "unknown"
+  },
+  "checkedAt": "2026-10-15T13:11:36.080Z",
+  "message": "OpenCode is disabled in T3 Code settings.",
+  "models": [],
+  "slashCommands": [],
+  "skills": [],
+  "usageLimits": {
+    "checkedAt": "2026-10-15T13:11:36.081Z",
+    "windows": [],
+    "unavailable": {
+      "reason": "unsupported"
+    }
+  },
+  "instanceId": "opencode",
+  "driver": "opencode",
+  "continuation": {
+    "groupKey": "opencode:instance:opencode"
+  }
+}

@@ -1058,8 +1058,8 @@ function acpElicitationFieldChoices(
  * Maps a form-mode `elicitation/create` requestedSchema onto user-input
  * questions: one per property, with enum/oneOf/anyOf options, `multiSelect`
  * for array-typed fields, and the boolean fallback for bare `type: "boolean"`.
- * Devin's ask-user form is the verified `oneOf` sender (title + const per
- * option).
+ * Devin's ask-user form and ZCode's AskUserQuestion are the verified `oneOf`
+ * senders (title + const per option).
  */
 export function acpElicitationFormQuestions(input: {
   readonly requestedSchema: unknown;
@@ -3550,7 +3550,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           );
           // Same capture as the post-settle path: providers that surface their
           // proposed plan through a tool call (Grok plan.md writes, Devin's
-          // write_plan card) need it in-turn, while plan mode is active.
+          // write_plan card, ZCode's ExitPlanMode card) need it in-turn, while
+          // plan mode is active.
           const proposedPlanMarkdown = flavor.extractProposedPlanMarkdown?.(toolCall);
           if (proposedPlanMarkdown !== undefined && proposedPlanMarkdown.length > 0) {
             yield* captureProposedPlan({ planMarkdown: proposedPlanMarkdown });

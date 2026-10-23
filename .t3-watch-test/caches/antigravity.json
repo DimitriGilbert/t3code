@@ -1,0 +1,28 @@
+{
+  "displayName": "Antigravity",
+  "showInteractionModeToggle": false,
+  "enabled": false,
+  "installed": false,
+  "version": null,
+  "status": "disabled",
+  "auth": {
+    "status": "unknown",
+    "type": "oauth-personal"
+  },
+  "checkedAt": "2026-10-15T13:11:36.084Z",
+  "message": "Antigravity is disabled in T3 Code settings.",
+  "models": [],
+  "slashCommands": [],
+  "skills": [],
+  "setup": {
+    "canAuthenticate": true,
+    "canInstall": true
+  },
+  "supportsConversationRollback": false,
+  "supportsTextGeneration": false,
+  "instanceId": "antigravity",
+  "driver": "antigravity",
+  "continuation": {
+    "groupKey": "antigravity:instance:antigravity"
+  }
+}

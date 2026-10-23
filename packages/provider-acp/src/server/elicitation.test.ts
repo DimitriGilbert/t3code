@@ -30,10 +30,9 @@ describe("acpElicitationFormQuestions", () => {
     ]);
   });
 
-  it("maps oneOf/anyOf const+title variants with the sentinel value preserved", () => {
+  it("maps devin's oneOf const+title ask-user form with the sentinel value preserved", () => {
     // Devin's ask-user form is the verified live shape: titled `oneOf`
     // entries where the wire value is the `const` behind a readable title.
-    // ZCode uses the same encoding with a `__skip__` sentinel.
     const questions = acpElicitationFormQuestions({
       message: "Should you pick option A or option B?",
       requestedSchema: {
@@ -58,6 +57,38 @@ describe("acpElicitationFormQuestions", () => {
     expect(questions).toHaveLength(2);
     expect(questions[0]?.options).toEqual([
       { label: "Choose option A.", description: "Choose option A.", value: "Option A" },
+      { label: "Skip this question", description: "Skip this question", value: "__skip__" },
+    ]);
+    // Free-text companion fields keep no options.
+    expect(questions[1]?.options).toEqual([]);
+  });
+
+  it("maps oneOf/anyOf const+title variants with the sentinel value preserved", () => {
+    // ZCode's AskUserQuestion form: titled options where the wire value is the
+    // `const` (e.g. the `__skip__` sentinel behind a readable title).
+    const questions = acpElicitationFormQuestions({
+      message: "Please answer the question.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          q_0: {
+            type: "string",
+            title: "Which approach?",
+            oneOf: [
+              { const: "fast", title: "Fast path" },
+              { const: "__skip__", title: "Skip this question" },
+            ],
+          },
+          q_0_other: {
+            type: "string",
+            title: "or type a custom value",
+          },
+        },
+      },
+    });
+    expect(questions).toHaveLength(2);
+    expect(questions[0]?.options).toEqual([
+      { label: "Fast path", description: "Fast path", value: "fast" },
       { label: "Skip this question", description: "Skip this question", value: "__skip__" },
     ]);
     // Free-text companion fields keep no options.

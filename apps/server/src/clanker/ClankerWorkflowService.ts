@@ -1,7 +1,8 @@
 /**
  * Project-local storage for Clanker workflow files, flat under
  * `<workspaceRoot>/.clanker/workflows/`; the canonical wire id is the
- * normalized project-relative POSIX path (`ClankerWorkflowPath`).
+ * normalized project-relative POSIX path (`ClankerWorkflowPath`). Mutations
+ * publish a dirty signal that `subscribe` turns into a fresh list emission.
  */
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";

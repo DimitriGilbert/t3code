@@ -197,7 +197,8 @@ export const ClankerRunSummary = Schema.Struct({
   stepTotal: NonNegativeInt,
   passedSteps: NonNegativeInt,
   failedSteps: NonNegativeInt,
-  runningSteps: NonNegativeInt,
+  /** Names of the steps currently executing, so a list row can name them without fetching the detail. */
+  runningStepNames: Schema.Array(Schema.String),
 });
 export type ClankerRunSummary = typeof ClankerRunSummary.Type;
 

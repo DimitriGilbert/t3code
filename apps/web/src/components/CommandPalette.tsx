@@ -65,6 +65,7 @@ import {
   LinkIcon,
   MessageSquareIcon,
   PaletteIcon,
+  PlayIcon,
   RotateCcwIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -1647,6 +1648,8 @@ function OpenCommandPaletteDialog(props: {
   }
 
   const clankerProjectRef = contextualProjectRef ?? contextualProjectGroup?.memberProjectRefs[0];
+  const clankerProjectSearch =
+    clankerProjectRef === undefined ? {} : { project: scopedProjectKey(clankerProjectRef) };
   actionItems.push({
     kind: "action",
     value: "action:clanker-workflows",
@@ -1655,11 +1658,18 @@ function OpenCommandPaletteDialog(props: {
     ...(contextualProjectGroup ? { description: contextualProjectGroup.displayName } : {}),
     icon: <WorkflowIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
-      await navigate({
-        to: "/clanker",
-        search:
-          clankerProjectRef === undefined ? {} : { project: scopedProjectKey(clankerProjectRef) },
-      });
+      await navigate({ to: "/clanker", search: clankerProjectSearch });
+    },
+  });
+  actionItems.push({
+    kind: "action",
+    value: "action:clanker-runs",
+    searchTerms: ["clanker", "run", "runs", "workflow", "progress", "steps", "dag"],
+    title: "Clanker runs",
+    ...(contextualProjectGroup ? { description: contextualProjectGroup.displayName } : {}),
+    icon: <PlayIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/clanker", search: { ...clankerProjectSearch, tab: "runs" as const } });
     },
   });
 

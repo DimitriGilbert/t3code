@@ -567,7 +567,9 @@ export const layer = Layer.effect(
         passedSteps: steps.filter((step) => step.status === "passed" || step.status === "skipped")
           .length,
         failedSteps: steps.filter((step) => step.status === "failed").length,
-        runningSteps: steps.filter((step) => step.status === "running").length,
+        runningStepNames: Object.entries(persisted.steps)
+          .filter(([, step]) => step.status === "running")
+          .map(([stepName]) => stepName),
       };
     };
 

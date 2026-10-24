@@ -1,11 +1,8 @@
 /**
- * Project-local storage for Clanker workflow files. Workflows live flat in
- * `<workspaceRoot>/.clanker/workflows/`; the canonical id crossing the wire is
- * the normalized project-relative POSIX path (`ClankerWorkflowPath`, e.g.
- * `.clanker/workflows/deploy.yaml`), matching the contract's "project-relative
- * path" convention. Every mutation publishes a per-project dirty signal that
- * `subscribe` turns into a fresh list emission; filesystem watching is
- * deliberately out of scope for v1.
+ * Project-local storage for Clanker workflow files under
+ * `<workspaceRoot>/.clanker/workflows/`; the wire id is the normalized
+ * project-relative POSIX path. Mutations publish a dirty signal that
+ * `subscribe` turns into a fresh list emission.
  */
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -70,7 +67,7 @@ export class ClankerWorkflowService extends Context.Service<
 
 const scaffoldContent = (
   slug: string,
-) => `# Clanker workflow — edit the name, description, and steps below.
+) => `# Clanker workflow: edit the name, description, and steps below.
 name: ${slug}
 version: "1.0.0"
 description: Describe what this workflow does.

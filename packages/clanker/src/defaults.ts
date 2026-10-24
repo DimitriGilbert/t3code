@@ -1,22 +1,8 @@
 /**
  * Merge a workflow's `defaults` block into each step, matching the Clanker
- * runner's semantics (the schema.json prose says "replaces", but the runner's
- * `mergeHooks`/`mergeQAChecks` merge — runner behavior wins for
- * compatibility):
- *
- * - Scalar fields (`timeout`, `retry`, `concurrency`, `template_engine`,
- *   `output_format`): the step's value wins when set, defaults fill gaps.
- * - `hooks`: merged per phase. For a shared phase the step's entries come
- *   first and the defaults' entries are appended after; phases declared on
- *   only one side survive untouched.
- * - `qa.checks`: concatenated, step checks first then defaults checks.
- * - `qa.on_fail` / `qa.escalate`: the step's value wins, falling back to the
- *   defaults' when unset.
- * - `models`: `defaults.model`/`defaults.provider` only apply when the step
- *   declares no models, producing `{ id: defaults.model ?? "default",
- *   provider: defaults.provider }`. An explicit step model without
- *   `provider` means "harness default", not workflow default, so provider is
- *   never injected into declared step models.
+ * runner: step values win over defaults, `hooks`/`qa.checks` concatenate
+ * step-first, and `defaults.model`/`provider` never inject into declared
+ * step models.
  */
 import type {
   ClankerDefaults,

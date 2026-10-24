@@ -188,6 +188,7 @@ export function ClankerWorkflowEditor({
     }
   });
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Debounced validation owns the timer lifecycle, including unmount cleanup; the text change itself is not a single handler call site.
   useEffect(() => {
     if (!dirty) return;
     const timer = window.setTimeout(() => void runValidation(text), VALIDATE_DEBOUNCE_MS);

@@ -1,11 +1,8 @@
 /**
  * Effect Schema port of the Clanker workflow file format
- * (`workflow.schema.json`). Every field the JSON Schema allows decodes here,
- * plus the zod-dialect step keys the real Clanker parser accepts
- * (`conditions`, `conditions_mode`, `run`); constructs T3 Code does not
- * execute (sub-workflows, fn hooks, agent files, escalation handlers, jinja2
- * templates, condition/run execution constructs) still decode and surface as
- * diagnostics in `parse.ts`.
+ * (`workflow.schema.json`), including the zod-dialect step keys the real
+ * Clanker parser accepts. Constructs T3 Code does not execute still decode
+ * and surface as diagnostics in `parse.ts`.
  */
 import * as Schema from "effect/Schema";
 

@@ -26,6 +26,10 @@
     "./runState": {
       "types": "./src/runState.ts",
       "import": "./src/runState.ts"
+    },
+    "./runner": {
+      "types": "./src/runner.ts",
+      "import": "./src/runner.ts"
     }
   },
   "scripts": {

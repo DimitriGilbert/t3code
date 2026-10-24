@@ -121,6 +121,12 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.clankerWorkflowsCreate]: AuthOrchestrationOperateScope,
   [WS_METHODS.clankerWorkflowsUpdate]: AuthOrchestrationOperateScope,
   [WS_METHODS.clankerWorkflowsDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.clankerRunsList]: AuthOrchestrationReadScope,
+  [WS_METHODS.clankerRunsSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.clankerRunsGet]: AuthOrchestrationReadScope,
+  [WS_METHODS.clankerRunsStart]: AuthOrchestrationOperateScope,
+  [WS_METHODS.clankerRunsCancel]: AuthOrchestrationOperateScope,
+  [WS_METHODS.clankerRunsResume]: AuthOrchestrationOperateScope,
   [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
   // Delivery logs hold request bodies, so they need the same scope as the URL.
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: AuthOrchestrationOperateScope,

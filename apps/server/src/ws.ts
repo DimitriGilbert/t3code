@@ -2259,6 +2259,20 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
             Effect.andThen(clankerWorkflows.delete(input)),
           ),
+        // Run execution is wired up with ClankerRunService in a later phase;
+        // the handlers exist so the group's method table stays exhaustive.
+        [WS_METHODS.clankerRunsList]: () =>
+          Effect.die(new Error("clanker.runs.list is not implemented yet.")),
+        [WS_METHODS.clankerRunsSubscribe]: () =>
+          Stream.die(new Error("clanker.runs.subscribe is not implemented yet.")),
+        [WS_METHODS.clankerRunsGet]: () =>
+          Effect.die(new Error("clanker.runs.get is not implemented yet.")),
+        [WS_METHODS.clankerRunsStart]: () =>
+          Effect.die(new Error("clanker.runs.start is not implemented yet.")),
+        [WS_METHODS.clankerRunsCancel]: () =>
+          Effect.die(new Error("clanker.runs.cancel is not implemented yet.")),
+        [WS_METHODS.clankerRunsResume]: () =>
+          Effect.die(new Error("clanker.runs.resume is not implemented yet.")),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({ usageLimitsCommand: false, workspaceSnapshotsOnDemand: false }),

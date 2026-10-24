@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
 /** Project-relative path to a `.yml`/`.yaml`/`.json` clanker workflow file. */
 export const ClankerWorkflowPath = TrimmedNonEmptyString.pipe(Schema.brand("ClankerWorkflowPath"));
@@ -145,7 +146,6 @@ export const ClankerWorkflowValidateResult = Schema.Struct({
 });
 export type ClankerWorkflowValidateResult = typeof ClankerWorkflowValidateResult.Type;
 
-// --- Run contracts -------------------------------------------------------
 // Run-state field shapes mirror `packages/clanker/src/runState.ts` (which in
 // turn mirrors the Clanker CLI's `state.json` artifact). They are redeclared
 // here so contracts stays free of an @t3tools/clanker dependency.
@@ -196,7 +196,8 @@ export const ClankerRunSummary = Schema.Struct({
   stepTotal: NonNegativeInt,
   passedSteps: NonNegativeInt,
   failedSteps: NonNegativeInt,
-  runningSteps: NonNegativeInt,
+  /** Names of the steps currently executing, so a list row can name them without fetching the detail. */
+  runningStepNames: Schema.Array(Schema.String),
 });
 export type ClankerRunSummary = typeof ClankerRunSummary.Type;
 
@@ -286,6 +287,13 @@ export const ClankerRunStartInput = Schema.Struct({
   providerInstanceId: Schema.optional(ProviderInstanceId),
   model: Schema.optional(TrimmedNonEmptyString),
   startFromStep: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Modes for the step threads the run launches. Absent resolves to the
+   * project's effective defaults server-side; callers that launch on an
+   * agent's behalf (MCP) pass modes already capped to that caller's limits.
+   */
+  runtimeMode: Schema.optional(RuntimeMode),
+  interactionMode: Schema.optional(ProviderInteractionMode),
 });
 export type ClankerRunStartInput = typeof ClankerRunStartInput.Type;
 
@@ -304,6 +312,9 @@ export const ClankerRunResumeInput = Schema.Struct({
   projectId: ProjectId,
   runId: ClankerRunId,
   startFromStep: Schema.optional(TrimmedNonEmptyString),
+  /** Same resolution as {@link ClankerRunStartInput}'s mode fields. */
+  runtimeMode: Schema.optional(RuntimeMode),
+  interactionMode: Schema.optional(ProviderInteractionMode),
 });
 export type ClankerRunResumeInput = typeof ClankerRunResumeInput.Type;
 

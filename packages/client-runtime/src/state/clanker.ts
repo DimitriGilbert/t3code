@@ -61,5 +61,31 @@ export function createClankerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.projectId]),
       },
     }),
+    runs: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:clanker:runs",
+      tag: WS_METHODS.clankerRunsList,
+      staleTimeMs: 15_000,
+    }),
+    runsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:clanker:runs-live",
+      tag: WS_METHODS.clankerRunsSubscribe,
+    }),
+    run: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:clanker:run",
+      tag: WS_METHODS.clankerRunsGet,
+      staleTimeMs: 5_000,
+    }),
+    startRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:clanker:run-start",
+      tag: WS_METHODS.clankerRunsStart,
+    }),
+    cancelRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:clanker:run-cancel",
+      tag: WS_METHODS.clankerRunsCancel,
+    }),
+    resumeRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:clanker:run-resume",
+      tag: WS_METHODS.clankerRunsResume,
+    }),
   };
 }

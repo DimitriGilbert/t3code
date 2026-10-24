@@ -57,6 +57,8 @@ import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ClankerWorkflowService from "../clanker/ClankerWorkflowService.ts";
+import * as ClankerRunService from "../clanker/ClankerRunService.ts";
+import * as ProcessRunner from "../processRunner.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -290,6 +292,20 @@ const layerSecretRequestsProvided = SecretRequests.layer.pipe(
 const layerClankerWorkflowProvided = ClankerWorkflowService.layer.pipe(
   Layer.provide(layerProjectService),
 );
+const layerClankerRunExecutorProvided = ClankerRunService.layerExecutor.pipe(
+  Layer.provide(
+    Layer.mergeAll(layerThreadLaunchProvided, layerThreadManagementProvided, ProcessRunner.layer),
+  ),
+);
+const layerClankerRunProvided = ClankerRunService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerProjectService,
+      layerClankerWorkflowProvided,
+      layerClankerRunExecutorProvided,
+    ),
+  ),
+);
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -379,6 +395,7 @@ export const layerProduction = Layer.mergeAll(
     Layer.provide(Layer.merge(layerOrchestratorProvided, layerCommandOutputHubProvided)),
   ),
   layerClankerWorkflowProvided,
+  layerClankerRunProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

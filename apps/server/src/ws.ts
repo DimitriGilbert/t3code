@@ -125,6 +125,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
+import * as ClankerRunService from "./clanker/ClankerRunService.ts";
 import * as ClankerWorkflowService from "./clanker/ClankerWorkflowService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
@@ -1287,6 +1288,7 @@ export const layerWsRpc = (
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const clankerWorkflows = yield* ClankerWorkflowService.ClankerWorkflowService;
+      const clankerRuns = yield* ClankerRunService.ClankerRunService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -2259,20 +2261,33 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
             Effect.andThen(clankerWorkflows.delete(input)),
           ),
-        // Run execution is wired up with ClankerRunService in a later phase;
-        // the handlers exist so the group's method table stays exhaustive.
-        [WS_METHODS.clankerRunsList]: () =>
-          Effect.die(new Error("clanker.runs.list is not implemented yet.")),
-        [WS_METHODS.clankerRunsSubscribe]: () =>
-          Stream.die(new Error("clanker.runs.subscribe is not implemented yet.")),
-        [WS_METHODS.clankerRunsGet]: () =>
-          Effect.die(new Error("clanker.runs.get is not implemented yet.")),
-        [WS_METHODS.clankerRunsStart]: () =>
-          Effect.die(new Error("clanker.runs.start is not implemented yet.")),
-        [WS_METHODS.clankerRunsCancel]: () =>
-          Effect.die(new Error("clanker.runs.cancel is not implemented yet.")),
-        [WS_METHODS.clankerRunsResume]: () =>
-          Effect.die(new Error("clanker.runs.resume is not implemented yet.")),
+        [WS_METHODS.clankerRunsList]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(
+              clankerRuns.list(input).pipe(Effect.map((runs) => ({ runs: [...runs] }))),
+            ),
+          ),
+        [WS_METHODS.clankerRunsSubscribe]: (input) =>
+          clankerRuns.subscribe(input).pipe(Stream.map((runs) => ({ runs: [...runs] }))),
+        [WS_METHODS.clankerRunsGet]: (input) =>
+          Effect.annotateCurrentSpan({
+            "project.id": input.projectId,
+            "clanker.run_id": input.runId,
+          }).pipe(Effect.andThen(clankerRuns.get(input))),
+        [WS_METHODS.clankerRunsStart]: (input) =>
+          Effect.annotateCurrentSpan({ "project.id": input.projectId }).pipe(
+            Effect.andThen(clankerRuns.start(input)),
+          ),
+        [WS_METHODS.clankerRunsCancel]: (input) =>
+          Effect.annotateCurrentSpan({
+            "project.id": input.projectId,
+            "clanker.run_id": input.runId,
+          }).pipe(Effect.andThen(clankerRuns.cancel(input))),
+        [WS_METHODS.clankerRunsResume]: (input) =>
+          Effect.annotateCurrentSpan({
+            "project.id": input.projectId,
+            "clanker.run_id": input.runId,
+          }).pipe(Effect.andThen(clankerRuns.resume(input))),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({ usageLimitsCommand: false, workspaceSnapshotsOnDemand: false }),

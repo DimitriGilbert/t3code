@@ -361,6 +361,16 @@ import {
 } from "./scheduledTask.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
+  ClankerRunCancelInput,
+  ClankerRunDetail,
+  ClankerRunError,
+  ClankerRunGetInput,
+  ClankerRunListInput,
+  ClankerRunListResult,
+  ClankerRunResumeInput,
+  ClankerRunResumeResult,
+  ClankerRunStartInput,
+  ClankerRunStartResult,
   ClankerWorkflowCreateInput,
   ClankerWorkflowDeleteInput,
   ClankerWorkflowDocument,
@@ -545,6 +555,12 @@ export const WS_METHODS = {
   clankerWorkflowsUpdate: "clanker.workflows.update",
   clankerWorkflowsDelete: "clanker.workflows.delete",
   clankerWorkflowsValidate: "clanker.workflows.validate",
+  clankerRunsList: "clanker.runs.list",
+  clankerRunsSubscribe: "clanker.runs.subscribe",
+  clankerRunsGet: "clanker.runs.get",
+  clankerRunsStart: "clanker.runs.start",
+  clankerRunsCancel: "clanker.runs.cancel",
+  clankerRunsResume: "clanker.runs.resume",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -1952,6 +1968,44 @@ const WsClankerWorkflowsValidateRpc = Rpc.make(WS_METHODS.clankerWorkflowsValida
   error: EnvironmentAuthorizationError,
 });
 
+const ClankerRunRpcError = Schema.Union([ClankerRunError, EnvironmentAuthorizationError]);
+
+const WsClankerRunsListRpc = Rpc.make(WS_METHODS.clankerRunsList, {
+  payload: ClankerRunListInput,
+  success: ClankerRunListResult,
+  error: ClankerRunRpcError,
+});
+
+const WsClankerRunsSubscribeRpc = Rpc.make(WS_METHODS.clankerRunsSubscribe, {
+  payload: ClankerRunListInput,
+  success: ClankerRunListResult,
+  error: ClankerRunRpcError,
+  stream: true,
+});
+
+const WsClankerRunsGetRpc = Rpc.make(WS_METHODS.clankerRunsGet, {
+  payload: ClankerRunGetInput,
+  success: ClankerRunDetail,
+  error: ClankerRunRpcError,
+});
+
+const WsClankerRunsStartRpc = Rpc.make(WS_METHODS.clankerRunsStart, {
+  payload: ClankerRunStartInput,
+  success: ClankerRunStartResult,
+  error: Schema.Union([ClankerRunError, ClankerWorkflowError, EnvironmentAuthorizationError]),
+});
+
+const WsClankerRunsCancelRpc = Rpc.make(WS_METHODS.clankerRunsCancel, {
+  payload: ClankerRunCancelInput,
+  error: ClankerRunRpcError,
+});
+
+const WsClankerRunsResumeRpc = Rpc.make(WS_METHODS.clankerRunsResume, {
+  payload: ClankerRunResumeInput,
+  success: ClankerRunResumeResult,
+  error: Schema.Union([ClankerRunError, ClankerWorkflowError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2048,6 +2102,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsClankerWorkflowsUpdateRpc,
   WsClankerWorkflowsDeleteRpc,
   WsClankerWorkflowsValidateRpc,
+  WsClankerRunsListRpc,
+  WsClankerRunsSubscribeRpc,
+  WsClankerRunsGetRpc,
+  WsClankerRunsStartRpc,
+  WsClankerRunsCancelRpc,
+  WsClankerRunsResumeRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

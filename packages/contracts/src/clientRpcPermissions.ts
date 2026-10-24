@@ -46,6 +46,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.clankerWorkflowsCreate]: AuthOrchestrationOperateScope,
   [WS_METHODS.clankerWorkflowsUpdate]: AuthOrchestrationOperateScope,
   [WS_METHODS.clankerWorkflowsDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.clankerRunsStart]: AuthOrchestrationOperateScope,
+  [WS_METHODS.clankerRunsCancel]: AuthOrchestrationOperateScope,
+  [WS_METHODS.clankerRunsResume]: AuthOrchestrationOperateScope,
 
   [WS_METHODS.scheduledTasksUpsert]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksSetEnabled]: AuthOrchestrationOperateScope,

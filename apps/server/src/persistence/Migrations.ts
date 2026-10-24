@@ -75,6 +75,7 @@ import Migration0069 from "./Migrations/069_WatchScreen.ts";
 import Migration0070 from "./Migrations/070_WatchNotifications.ts";
 import Migration0071 from "./Migrations/071_WatchConnectors.ts";
 import Migration0072 from "./Migrations/072_WatchConnectorVersioning.ts";
+import Migration0073 from "./Migrations/073_ThreadMessageSearch.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -150,6 +151,7 @@ const migrationEntries = [
   [70, "WatchNotifications", Migration0070],
   [71, "WatchConnectors", Migration0071],
   [72, "WatchConnectorVersioning", Migration0072],
+  [73, "ThreadMessageSearch", Migration0073],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

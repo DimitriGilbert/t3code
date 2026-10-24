@@ -146,7 +146,6 @@ export const ClankerWorkflowValidateResult = Schema.Struct({
 });
 export type ClankerWorkflowValidateResult = typeof ClankerWorkflowValidateResult.Type;
 
-// --- Run contracts -------------------------------------------------------
 // Run-state field shapes mirror `packages/clanker/src/runState.ts` (which in
 // turn mirrors the Clanker CLI's `state.json` artifact). They are redeclared
 // here so contracts stays free of an @t3tools/clanker dependency.

@@ -123,7 +123,6 @@ const PROMPT_FILE_UNSAFE_CHARS = /[^a-zA-Z0-9_-]+/g;
  */
 const TURN_SETTLE_WAIT_MS = Duration.toMillis(Duration.days(7));
 
-// --- Executor --------------------------------------------------------------
 // The service-facing boundary for everything a run touches outside its own
 // files: provider turns (thread launch, queued sends, settle waits, turn
 // interrupt) and shell commands. Tests substitute this service; the engine
@@ -383,8 +382,6 @@ export const layerExecutor = Layer.effect(
   }),
 );
 
-// --- Run service -----------------------------------------------------------
-
 interface RunRecord {
   readonly runId: ClankerRunId;
   readonly projectId: ProjectId;
@@ -624,8 +621,6 @@ export const layer = Layer.effect(
         .filter((summary): summary is ClankerRunSummary => summary !== null)
         .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     });
-
-    // --- Engine driving -----------------------------------------------------
 
     const stepLockFor = (record: RunRecord, stepName: string) =>
       // runsMutex is never held across other awaits, so it can guard the
@@ -935,17 +930,18 @@ export const layer = Layer.effect(
      * Apply a transition under the run mutex: snapshot the engine state,
      * persist it, then fork the emitted actions.
      */
-    const applyTransition = (
+    const applyTransition: (
       record: RunRecord,
       transition: ClankerEngineTransition,
-    ): Effect.Effect<void, ClankerRunIoError> =>
-      Effect.gen(function* () {
+    ) => Effect.Effect<void, ClankerRunIoError> = Effect.fn("ClankerRunService.applyTransition")(
+      function* (record, transition) {
         record.state = transition.state;
         record.updatedAt = yield* nowIso;
         yield* persistState(record);
         yield* dispatchActions(record, transition.actions);
         yield* notifyChanged(record.projectId);
-      });
+      },
+    );
 
     const settle = (
       record: RunRecord,

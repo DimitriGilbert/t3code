@@ -139,6 +139,10 @@
       "types": "./src/state/attachments.ts",
       "default": "./src/state/attachments.ts"
     },
+    "./state/clanker": {
+      "types": "./src/state/clanker.ts",
+      "default": "./src/state/clanker.ts"
+    },
     "./text-paste": {
       "types": "./src/textPaste.ts",
       "default": "./src/textPaste.ts"

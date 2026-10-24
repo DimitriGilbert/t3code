@@ -1,0 +1,42 @@
+{
+  "name": "@t3tools/clanker",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./format": {
+      "types": "./src/format.ts",
+      "import": "./src/format.ts"
+    },
+    "./parse": {
+      "types": "./src/parse.ts",
+      "import": "./src/parse.ts"
+    },
+    "./dag": {
+      "types": "./src/dag.ts",
+      "import": "./src/dag.ts"
+    },
+    "./refs": {
+      "types": "./src/refs.ts",
+      "import": "./src/refs.ts"
+    },
+    "./defaults": {
+      "types": "./src/defaults.ts",
+      "import": "./src/defaults.ts"
+    },
+    "./runState": {
+      "types": "./src/runState.ts",
+      "import": "./src/runState.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir ."
+  },
+  "dependencies": {
+    "effect": "catalog:",
+    "yaml": "catalog:"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}

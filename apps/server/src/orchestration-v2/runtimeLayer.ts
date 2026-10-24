@@ -62,6 +62,7 @@ import * as ConnectorService from "../watch/connectors/ConnectorService.ts";
 import * as ConfirmationTokens from "../watch/connectors/ConfirmationTokens.ts";
 import * as PackStore from "../watch/connectors/PackStore.ts";
 import * as UserNotificationService from "../notifications/UserNotificationService.ts";
+import * as ClankerWorkflowService from "../clanker/ClankerWorkflowService.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -290,6 +291,11 @@ const layerThreadLifecycleProvided = ThreadLifecycleService.layer.pipe(
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
+// WorkspacePaths and the platform FileSystem/Path come from the outer
+// server-wide context, like every other workspace service here.
+const layerClankerWorkflowProvided = ClankerWorkflowService.layer.pipe(
+  Layer.provide(layerProjectService),
+);
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -406,6 +412,7 @@ export const layerProduction = Layer.mergeAll(
   layerConnectorsProvided,
   layerConnectorPollerProvided,
   layerUserNotificationsProvided,
+  layerClankerWorkflowProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

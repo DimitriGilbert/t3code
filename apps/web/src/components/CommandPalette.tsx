@@ -1,7 +1,11 @@
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  scopedProjectKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import {
   canCreateProjectInEnvironment,
   getCloneDestinationBrowsePath,
@@ -65,6 +69,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   TextSearchIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
 import {
@@ -1686,6 +1691,23 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  const clankerProjectRef = contextualProjectRef ?? contextualProjectGroup?.memberProjectRefs[0];
+  actionItems.push({
+    kind: "action",
+    value: "action:clanker-workflows",
+    searchTerms: ["clanker", "workflow", "workflows", "yaml", "automation", "dag"],
+    title: "Clanker workflows",
+    ...(contextualProjectGroup ? { description: contextualProjectGroup.displayName } : {}),
+    icon: <WorkflowIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({
+        to: "/clanker",
+        search:
+          clankerProjectRef === undefined ? {} : { project: scopedProjectKey(clankerProjectRef) },
+      });
+    },
+  });
 
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const settingsSearchItems: CommandPaletteActionItem[] = searchSettings(

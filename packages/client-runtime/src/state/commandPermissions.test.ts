@@ -120,6 +120,23 @@ describe("command permissions", () => {
     ),
   );
 
+  it.effect("requires the orchestration operate grant to write clanker workflows", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const write = createCommandPermissions(runtime, WS_METHODS.clankerWorkflowsUpdate);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(write.permissionAtom(env))).toBe(false);
+        expect((yield* write.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(write.permissionAtom(env))).toBe(true);
+        yield* write.authorize(registry, env);
+      }),
+    ),
+  );
+
   it.effect("uses the target grant for both availability and execution", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -35,6 +35,7 @@ import { Route as SettingsAppearanceRouteImport } from './routes/settings.appear
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatClankerRouteImport } from './routes/_chat.clanker'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
 
@@ -168,6 +169,11 @@ const ChatNewRoute = ChatNewRouteImport.update({
   path: '/new',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatClankerRoute = ChatClankerRouteImport.update({
+  id: '/clanker',
+  path: '/clanker',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatDraftDraftIdRoute = ChatDraftDraftIdRouteImport.update({
   id: '/draft/$draftId',
   path: '/draft/$draftId',
@@ -189,6 +195,7 @@ export interface FileRoutesByFullPath {
   '/usage': typeof UsageRoute
   '/watch': typeof WatchRoute
   '/welcome': typeof WelcomeRoute
+  '/clanker': typeof ChatClankerRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -217,6 +224,7 @@ export interface FileRoutesByTo {
   '/usage': typeof UsageRoute
   '/watch': typeof WatchRoute
   '/welcome': typeof WelcomeRoute
+  '/clanker': typeof ChatClankerRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -248,6 +256,7 @@ export interface FileRoutesById {
   '/usage': typeof UsageRoute
   '/watch': typeof WatchRoute
   '/welcome': typeof WelcomeRoute
+  '/_chat/clanker': typeof ChatClankerRoute
   '/_chat/new': typeof ChatNewRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -280,6 +289,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/watch'
     | '/welcome'
+    | '/clanker'
     | '/new'
     | '/pull-requests'
     | '/projects/$projectKey'
@@ -308,6 +318,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/watch'
     | '/welcome'
+    | '/clanker'
     | '/new'
     | '/pull-requests'
     | '/projects/$projectKey'
@@ -338,6 +349,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/watch'
     | '/welcome'
+    | '/_chat/clanker'
     | '/_chat/new'
     | '/_chat/pull-requests'
     | '/projects/$projectKey'
@@ -556,6 +568,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatNewRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/clanker': {
+      id: '/_chat/clanker'
+      path: '/clanker'
+      fullPath: '/clanker'
+      preLoaderRoute: typeof ChatClankerRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/draft/$draftId': {
       id: '/_chat/draft/$draftId'
       path: '/draft/$draftId'
@@ -574,6 +593,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface ChatRouteChildren {
+  ChatClankerRoute: typeof ChatClankerRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatIndexRoute: typeof ChatIndexRoute
@@ -582,6 +602,7 @@ interface ChatRouteChildren {
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatClankerRoute: ChatClankerRoute,
   ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatIndexRoute: ChatIndexRoute,

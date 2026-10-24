@@ -429,6 +429,18 @@ import {
   WatchWidgetTransferError,
 } from "./watch.ts";
 import {
+  ClankerWorkflowCreateInput,
+  ClankerWorkflowDeleteInput,
+  ClankerWorkflowDocument,
+  ClankerWorkflowError,
+  ClankerWorkflowGetInput,
+  ClankerWorkflowListInput,
+  ClankerWorkflowListResult,
+  ClankerWorkflowUpdateInput,
+  ClankerWorkflowValidateInput,
+  ClankerWorkflowValidateResult,
+} from "./clanker.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -592,6 +604,14 @@ export const WS_METHODS = {
   secretsAnswerRequest: "secrets.answerRequest",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  clankerWorkflowsList: "clanker.workflows.list",
+  clankerWorkflowsSubscribe: "clanker.workflows.subscribe",
+  clankerWorkflowsGet: "clanker.workflows.get",
+  clankerWorkflowsCreate: "clanker.workflows.create",
+  clankerWorkflowsUpdate: "clanker.workflows.update",
+  clankerWorkflowsDelete: "clanker.workflows.delete",
+  clankerWorkflowsValidate: "clanker.workflows.validate",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -1969,6 +1989,50 @@ const WsScheduledTasksGetWebhookDeliveryRpc = Rpc.make(
   },
 );
 
+const ClankerWorkflowRpcError = Schema.Union([ClankerWorkflowError, EnvironmentAuthorizationError]);
+
+const WsClankerWorkflowsListRpc = Rpc.make(WS_METHODS.clankerWorkflowsList, {
+  payload: ClankerWorkflowListInput,
+  success: ClankerWorkflowListResult,
+  error: ClankerWorkflowRpcError,
+});
+
+const WsClankerWorkflowsSubscribeRpc = Rpc.make(WS_METHODS.clankerWorkflowsSubscribe, {
+  payload: ClankerWorkflowListInput,
+  success: ClankerWorkflowListResult,
+  error: ClankerWorkflowRpcError,
+  stream: true,
+});
+
+const WsClankerWorkflowsGetRpc = Rpc.make(WS_METHODS.clankerWorkflowsGet, {
+  payload: ClankerWorkflowGetInput,
+  success: ClankerWorkflowDocument,
+  error: ClankerWorkflowRpcError,
+});
+
+const WsClankerWorkflowsCreateRpc = Rpc.make(WS_METHODS.clankerWorkflowsCreate, {
+  payload: ClankerWorkflowCreateInput,
+  success: ClankerWorkflowDocument,
+  error: ClankerWorkflowRpcError,
+});
+
+const WsClankerWorkflowsUpdateRpc = Rpc.make(WS_METHODS.clankerWorkflowsUpdate, {
+  payload: ClankerWorkflowUpdateInput,
+  success: ClankerWorkflowDocument,
+  error: ClankerWorkflowRpcError,
+});
+
+const WsClankerWorkflowsDeleteRpc = Rpc.make(WS_METHODS.clankerWorkflowsDelete, {
+  payload: ClankerWorkflowDeleteInput,
+  error: ClankerWorkflowRpcError,
+});
+
+const WsClankerWorkflowsValidateRpc = Rpc.make(WS_METHODS.clankerWorkflowsValidate, {
+  payload: ClankerWorkflowValidateInput,
+  success: ClankerWorkflowValidateResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2431,6 +2495,13 @@ const WsRpcGroupCore = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsClankerWorkflowsListRpc,
+  WsClankerWorkflowsSubscribeRpc,
+  WsClankerWorkflowsGetRpc,
+  WsClankerWorkflowsCreateRpc,
+  WsClankerWorkflowsUpdateRpc,
+  WsClankerWorkflowsDeleteRpc,
+  WsClankerWorkflowsValidateRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

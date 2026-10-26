@@ -118,6 +118,10 @@ export function ClankerPage() {
   };
   const openFile = (path: ClankerWorkflowPath) => go({ file: path });
   const openRun = (runId: ClankerRunId) => go({ tab: "runs", run: runId });
+  // A run can start on a project other than the one on screen, so follow it.
+  const openStartedRun = (project: ClankerProjectOption, runId: ClankerRunId) => {
+    void navigate({ search: { project: project.key, tab: "runs", run: runId } });
+  };
   const selectTab = (next: ClankerTab) => go(next === "workflows" ? {} : { tab: next });
 
   const runId = search.run !== undefined ? ClankerRunId.make(search.run) : null;
@@ -155,10 +159,11 @@ export function ClankerPage() {
         <StartClankerRunDialog
           open={runTarget !== null}
           onOpenChange={(open) => setRunTarget(open ? runTarget : null)}
-          environmentId={selectedOption.ref.environmentId}
-          projectId={selectedOption.ref.projectId}
+          projects={options}
+          project={selectedOption}
+          environmentLabel={environmentLabel}
           workflowPath={runTarget?.path ?? null}
-          onStarted={openRun}
+          onStarted={openStartedRun}
         />
       </SidebarInset>
     );
@@ -247,7 +252,18 @@ export function ClankerPage() {
               <ClankerRunList
                 key={selectedOption.key}
                 project={selectedOption.ref}
+                projectLabel={selectedOption.label}
                 canStart={canRun}
+                projectSelect={
+                  options.length > 1 ? (
+                    <ClankerProjectSelect
+                      options={options}
+                      selected={selectedOption}
+                      environmentLabel={environmentLabel}
+                      onSelectProject={selectProject}
+                    />
+                  ) : null
+                }
                 onOpenRun={openRun}
                 onStartRun={() => setRunTarget({ path: null })}
               />
@@ -278,10 +294,11 @@ export function ClankerPage() {
           <StartClankerRunDialog
             open={runTarget !== null}
             onOpenChange={(open) => setRunTarget(open ? runTarget : null)}
-            environmentId={selectedOption.ref.environmentId}
-            projectId={selectedOption.ref.projectId}
+            projects={options}
+            project={selectedOption}
+            environmentLabel={environmentLabel}
             workflowPath={runTarget?.path ?? null}
-            onStarted={openRun}
+            onStarted={openStartedRun}
           />
         </>
       ) : null}

@@ -1,37 +1,8 @@
 /**
- * Drives Clanker workflow runs on top of the pure engine in
- * `@t3tools/clanker/runner`. A run is a state machine: `start`/`resume` parse
- * the workflow file, call `startClankerRun`, and fork a fiber per emitted
- * action (`dispatchPrompt` turns, `runCmd` hooks/checks). Each settlement
- * feeds back into the engine under a per-run mutex, so the engine's
- * optimistic guards (`attempt`, pair/check ordinals) drop stale settles.
- *
- * Run artifacts mirror the Clanker CLI under the project root:
- * `.clanker/runs/<runId>/state.json` is rewritten atomically after every
- * engine transition, `result.json` lands on the terminal transition, rendered
- * prompts go to `.clanker/prompts/<step>-<attempt>-<promptIndex>-<modelIndex>-<epochMs>.md`,
- * and a server-only
- * `t3-threads.json` sidecar in the run dir records the per-step thread ids
- * (state.json stays byte-compatible with the CLI schema).
- *
- * Seam choices:
- * - One thread per step, launched through `ThreadLaunchService.launch` with
- *   the rendered prompt as `initialMessage` (ThreadMessageIntake.ts:183 —
- *   `launchThread` only adds attachment claiming, which runs never use).
- * - Follow-up prompt x model pairs in the same step are queued turns via
- *   `ThreadManagementService.sendToThread` mode "queue" — the same seam
- *   `OrchestratorMcpService.sendToThread` uses
- *   (OrchestratorMcpService.ts:2838).
- * - Turn completion is `ThreadManagementService.waitForThread`, the
- *   event-driven `run.updated` subscription (ThreadManagementService.ts:836)
- *   — never polling.
- * - Timeout/cancel interrupts the in-flight turn through
- *   `ThreadManagementService.interruptThread`, the `run.interrupt` dispatch
- *   the UI stop button and the MCP interrupt tool share
- *   (ThreadManagementService.ts:962).
- * - `runCmd` actions run through `ProcessRunner.run` behind the platform
- *   shell (`/bin/sh -c`, `cmd.exe /c`), cwd pinned to the workspace root —
- *   the Clanker equivalent of the invocation directory.
+ * Drives Clanker workflow runs on the pure `@t3tools/clanker/runner` engine:
+ * one thread per step via `ThreadLaunchService`, follow-up turns queued
+ * through `ThreadManagementService`, cmd hooks via `ProcessRunner`, and
+ * `.clanker/runs/<runId>/state.json` persisted atomically per transition.
  */
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -167,11 +138,9 @@ export class ClankerRunExecutor extends Context.Service<
   ClankerRunExecutor,
   {
     /**
-     * Runs one provider turn for a clanker step: launches the step's thread
-     * when `threadId` is absent, otherwise queues a follow-up turn on it,
-     * then waits for the run to reach a terminal status and reads back the
-     * final assistant text. Interrupting this effect interrupts the
-     * in-flight turn.
+     * Runs one provider turn for a step: launches the step thread when
+     * `threadId` is absent, else queues a follow-up, then waits for a
+     * terminal run status and reads back the final assistant text.
      */
     readonly runPromptTurn: (
       input: ClankerPromptTurnInput,

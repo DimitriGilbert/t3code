@@ -243,6 +243,7 @@ export function ClankerRunDetail({
   const summaryUpdatedAt = summary?.updatedAt ?? null;
   const detailUpdatedAt = detail?.updatedAt ?? null;
   const refreshDetail = detailQuery.refresh;
+  // oxlint-disable-next-line t3code/react-effect-budget -- Sync the detail query with the live run subscription; no user handler drives this refetch.
   useEffect(() => {
     if (summaryUpdatedAt === null || detailUpdatedAt === null) return;
     if (Date.parse(summaryUpdatedAt) <= Date.parse(detailUpdatedAt)) return;

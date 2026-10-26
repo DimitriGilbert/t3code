@@ -82,6 +82,7 @@ const COMPLETED_RESULT = `{
 }`;
 
 const decodeState = Schema.decodeUnknownSync(ClankerPersistedRunState);
+const encodeState = Schema.encodeSync(ClankerPersistedRunState);
 const decodeResult = Schema.decodeUnknownSync(ClankerRunResult);
 
 describe("ClankerPersistedRunState", () => {
@@ -101,7 +102,7 @@ describe("ClankerPersistedRunState", () => {
 
   it("encodes back to the persisted shape", () => {
     const decoded = decodeState(JSON.parse(COMPLETED_STATE));
-    const encoded = Schema.encodeSync(ClankerPersistedRunState)(decoded);
+    const encoded = encodeState(decoded);
     expect(encoded).toEqual(JSON.parse(COMPLETED_STATE));
   });
 

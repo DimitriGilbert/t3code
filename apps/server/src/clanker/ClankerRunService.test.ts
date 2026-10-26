@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -39,17 +40,30 @@ const workflowPath = ClankerWorkflowPath.make(".clanker/workflows/flow.yaml");
 let workspaceRoot: string | null = null;
 let workflowContent = "";
 
-const turnCalls = Effect.runSync(
-  Queue.unbounded<{
-    input: ClankerPromptTurnInput;
-    gate: Deferred.Deferred<ClankerPromptTurnOutcome>;
-  }>(),
-);
-const commandCalls = Effect.runSync(
-  Queue.unbounded<{
-    input: ClankerRunCommandInput;
-    gate: Deferred.Deferred<ClankerRunCommandOutcome>;
-  }>(),
+interface TurnCall {
+  readonly input: ClankerPromptTurnInput;
+  readonly gate: Deferred.Deferred<ClankerPromptTurnOutcome>;
+}
+interface CommandCall {
+  readonly input: ClankerRunCommandInput;
+  readonly gate: Deferred.Deferred<ClankerRunCommandOutcome>;
+}
+
+/** Call queues shared between the executor mock and the test body. */
+class RunCallGates extends Context.Service<
+  RunCallGates,
+  {
+    readonly turnCalls: Queue.Queue<TurnCall>;
+    readonly commandCalls: Queue.Queue<CommandCall>;
+  }
+>()("t3/clanker/ClankerRunService.test/RunCallGates") {}
+
+const layerRunCallGates = Layer.effect(
+  RunCallGates,
+  Effect.all({
+    turnCalls: Queue.unbounded<TurnCall>(),
+    commandCalls: Queue.unbounded<CommandCall>(),
+  }),
 );
 
 /** Suspend the call until the test answers it; interruptible for cancel tests. */
@@ -60,8 +74,8 @@ const gatedCall = <A, I>(queue: Queue.Queue<{ input: I; gate: Deferred.Deferred<
     return yield* Deferred.await(gate);
   });
 
-const nextTurn = Queue.take(turnCalls);
-const nextCommand = Queue.take(commandCalls);
+const nextTurn = Effect.flatMap(RunCallGates, (gates) => Queue.take(gates.turnCalls));
+const nextCommand = Effect.flatMap(RunCallGates, (gates) => Queue.take(gates.commandCalls));
 
 const answerTurn = (
   call: { input: ClankerPromptTurnInput; gate: Deferred.Deferred<ClankerPromptTurnOutcome> },
@@ -115,11 +129,15 @@ const layerTest = Layer.empty.pipe(
     }),
   ),
   Layer.provideMerge(
-    Layer.mock(ClankerRunExecutor)({
-      runPromptTurn: (input) => gatedCall(turnCalls, input),
-      runCommand: (input) => gatedCall(commandCalls, input),
-    }),
+    Layer.effect(
+      ClankerRunExecutor,
+      Effect.map(RunCallGates, (gates) => ({
+        runPromptTurn: (input) => gatedCall(gates.turnCalls, input),
+        runCommand: (input) => gatedCall(gates.commandCalls, input),
+      })),
+    ),
   ),
+  Layer.provideMerge(layerRunCallGates),
   Layer.provideMerge(NodeServices.layer),
 );
 

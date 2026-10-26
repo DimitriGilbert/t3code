@@ -27,7 +27,7 @@ import {
   makeZcodeAdapterV2,
 } from "@t3tools/provider-zcode/testing";
 
-const DEFAULT_ZCODE_SETTINGS = Schema.decodeUnknownSync(ZcodeSettings)({});
+const DEFAULT_ZCODE_SETTINGS = Schema.decodeSync(ZcodeSettings)({});
 
 function layerZcodeProviderAdapterRegistryReplay(
   transcript: AcpReplayTranscript,

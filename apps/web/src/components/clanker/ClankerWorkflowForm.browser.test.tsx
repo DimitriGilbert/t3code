@@ -120,4 +120,83 @@ describe("ClankerWorkflowForm", () => {
     const steps = yamlOf(screen.container)["steps"] as ReadonlyArray<Record<string, unknown>>;
     expect(steps[0]?.["depends_on"]).toEqual(["test"]);
   });
+
+  it("edits a step's prompt context, conditions, and run block", async () => {
+    await using screen = await render(<Harness initial={draftOf(WORKFLOW)} />);
+
+    await userEvent.fill(screen.getByLabelText("Step 1 prompt 1 context"), '{"ticket": "T-1"}');
+    await userEvent.click(screen.getByRole("button", { name: "Add step 1 conditions entry" }));
+    await userEvent.fill(screen.getByLabelText("Step 1 conditions entry 1"), '{"when": "always"}');
+    await userEvent.fill(screen.getByLabelText("Step 1 conditions mode"), "any");
+    await userEvent.click(screen.getByRole("button", { name: "Add step 1 run" }));
+    await userEvent.fill(screen.getByLabelText("Step 1 run command"), "make build");
+
+    const steps = yamlOf(screen.container)["steps"] as ReadonlyArray<Record<string, unknown>>;
+    const prompts = steps[0]?.["prompts"] as ReadonlyArray<Record<string, unknown>>;
+    expect(prompts[0]?.["context"]).toEqual({ ticket: "T-1" });
+    expect(steps[0]?.["conditions"]).toEqual([{ when: "always" }]);
+    expect(steps[0]?.["conditions_mode"]).toBe("any");
+    expect(steps[0]?.["run"]).toEqual({ cmd: "make build" });
+  });
+
+  it("marks an unparsable JSON field invalid", async () => {
+    await using screen = await render(<Harness initial={draftOf(WORKFLOW)} />);
+
+    await userEvent.fill(screen.getByLabelText("Step 1 prompt 1 context"), "{oops");
+
+    await expect
+      .element(screen.getByLabelText("Step 1 prompt 1 context"))
+      .toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("inlines a sub-workflow, edits it, and switches back to a path", async () => {
+    await using screen = await render(<Harness initial={draftOf(WORKFLOW)} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Inline step 1 sub-workflow" }));
+    await userEvent.fill(screen.getByLabelText("Step 1 sub-workflow name"), "review");
+    await userEvent.fill(screen.getByLabelText("Step 1 sub-workflow step 1 name"), "inspect");
+    await userEvent.fill(
+      screen.getByLabelText("Step 1 sub-workflow step 1 prompt 1 text"),
+      "Look at it",
+    );
+
+    const inlined = yamlOf(screen.container)["steps"] as ReadonlyArray<Record<string, unknown>>;
+    expect(inlined[0]?.["workflow"]).toEqual({
+      name: "review",
+      version: "1",
+      steps: [{ name: "inspect", prompts: [{ text: "Look at it" }] }],
+    });
+
+    // The path input only takes over once the inline body is gone.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove step 1 inline sub-workflow" }),
+    );
+    await userEvent.fill(screen.getByLabelText("Step 1 sub-workflow"), "review.yaml");
+
+    const steps = yamlOf(screen.container)["steps"] as ReadonlyArray<Record<string, unknown>>;
+    expect(steps[0]?.["workflow"]).toBe("review.yaml");
+  });
+
+  it("edits an escalation handler that hands off to an inline step", async () => {
+    await using screen = await render(<Harness initial={draftOf(WORKFLOW)} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Add step 1 escalation handler" }));
+    await userEvent.fill(screen.getByLabelText("Step 1 escalation 1 prompt"), "Decide");
+    await userEvent.fill(screen.getByLabelText("Step 1 escalation 1 model id"), "gpt-5");
+    await userEvent.click(screen.getByLabelText("Step 1 escalation 1 handoff"));
+    await userEvent.click(screen.getByRole("option", { name: "Inline step" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Escalation step/ }));
+    await userEvent.fill(screen.getByLabelText("Step 1 escalation 1 step name"), "triage");
+
+    const steps = yamlOf(screen.container)["steps"] as ReadonlyArray<Record<string, unknown>>;
+    const qa = steps[0]?.["qa"] as Record<string, unknown>;
+    expect(qa["escalate"]).toEqual([
+      {
+        type: "AI",
+        prompt: "Decide",
+        model: { id: "gpt-5" },
+        ref: { name: "triage" },
+      },
+    ]);
+  });
 });

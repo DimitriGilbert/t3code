@@ -10,12 +10,12 @@ import {
   HooksField,
   OptionalSelect,
   PreservedKeysNote,
-  QaField,
   StringListField,
   SubSection,
   removeRow,
   replaceRow,
 } from "./ClankerWorkflowFormFields";
+import { QaField } from "./ClankerWorkflowQa";
 import { ClankerWorkflowStepCard } from "./ClankerWorkflowStepCard";
 import {
   CLANKER_OUTPUT_FORMAT_LABELS,
@@ -28,12 +28,19 @@ import {
   type ClankerWorkflowDraft,
 } from "./clankerWorkflowForm";
 
+/**
+ * The workflow editor, reused for the root document and for every inline
+ * sub-workflow. `labelPrefix` is set when nested, so the aria labels of a
+ * sub-workflow's fields stay distinct from the ones around it.
+ */
 export function ClankerWorkflowForm({
   draft,
+  labelPrefix,
   disabled,
   onChange,
 }: {
   readonly draft: ClankerWorkflowDraft;
+  readonly labelPrefix?: string;
   readonly disabled: boolean;
   readonly onChange: (next: ClankerWorkflowDraft) => void;
 }) {
@@ -47,11 +54,20 @@ export function ClankerWorkflowForm({
     setCollapsedSteps(next);
   };
 
+  const nested = labelPrefix !== undefined;
+  const fieldLabel = (suffix: string) =>
+    nested ? `${labelPrefix} ${suffix}` : `Workflow ${suffix}`;
+  const defaultLabel = (suffix: string) =>
+    nested ? `${labelPrefix} default ${suffix}` : `Default ${suffix}`;
+  const defaultsPrefix = nested ? `${labelPrefix} defaults` : "Defaults";
+  const stepLabel = (index: number) =>
+    nested ? `${labelPrefix} step ${index + 1}` : `Step ${index + 1}`;
+
   const defaults = draft.defaults;
   const defaultsSet = clankerDefaultsAreSet(defaults);
 
   return (
-    <div className="space-y-5 p-4">
+    <div className={nested ? "space-y-4" : "space-y-5 p-4"}>
       <section className="space-y-4 rounded-xl border border-border/60 p-3">
         <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
           <FormField label="Name">
@@ -60,7 +76,7 @@ export function ClankerWorkflowForm({
               value={draft.name}
               placeholder="release"
               disabled={disabled}
-              aria-label="Workflow name"
+              aria-label={fieldLabel("name")}
               onChange={(event) => onChange({ ...draft, name: event.currentTarget.value })}
             />
           </FormField>
@@ -71,7 +87,7 @@ export function ClankerWorkflowForm({
               value={draft.version}
               placeholder="1"
               disabled={disabled}
-              aria-label="Workflow version"
+              aria-label={fieldLabel("version")}
               onChange={(event) => onChange({ ...draft, version: event.currentTarget.value })}
             />
           </FormField>
@@ -82,7 +98,7 @@ export function ClankerWorkflowForm({
             value={draft.description}
             placeholder="What this workflow does."
             disabled={disabled}
-            aria-label="Workflow description"
+            aria-label={fieldLabel("description")}
             onChange={(event) => onChange({ ...draft, description: event.currentTarget.value })}
           />
         </FormField>
@@ -91,7 +107,7 @@ export function ClankerWorkflowForm({
           rows={draft.secrets}
           placeholder="OPENAI_API_KEY"
           addLabel="Add secret"
-          itemLabel="Secret"
+          itemLabel={nested ? `${labelPrefix} secret` : "Secret"}
           pathPrefix="secrets"
           disabled={disabled}
           mono
@@ -129,7 +145,7 @@ export function ClankerWorkflowForm({
                     value={defaults.model}
                     placeholder="gpt-5-codex"
                     disabled={disabled}
-                    aria-label="Default model"
+                    aria-label={defaultLabel("model")}
                     onChange={(event) =>
                       onChange({
                         ...draft,
@@ -145,7 +161,7 @@ export function ClankerWorkflowForm({
                     value={defaults.provider}
                     placeholder="codex"
                     disabled={disabled}
-                    aria-label="Default provider"
+                    aria-label={defaultLabel("provider")}
                     onChange={(event) =>
                       onChange({
                         ...draft,
@@ -163,7 +179,7 @@ export function ClankerWorkflowForm({
                       value={defaults.timeout}
                       placeholder="600"
                       disabled={disabled}
-                      aria-label="Default timeout"
+                      aria-label={defaultLabel("timeout")}
                       onChange={(event) =>
                         onChange({
                           ...draft,
@@ -183,7 +199,7 @@ export function ClankerWorkflowForm({
                       value={defaults.retry}
                       placeholder="0"
                       disabled={disabled}
-                      aria-label="Default retry"
+                      aria-label={defaultLabel("retry")}
                       onChange={(event) =>
                         onChange({
                           ...draft,
@@ -200,7 +216,7 @@ export function ClankerWorkflowForm({
                       value={defaults.concurrency}
                       placeholder="1"
                       disabled={disabled}
-                      aria-label="Default concurrency"
+                      aria-label={defaultLabel("concurrency")}
                       onChange={(event) =>
                         onChange({
                           ...draft,
@@ -219,7 +235,7 @@ export function ClankerWorkflowForm({
                       value={defaults.templateEngine}
                       labels={CLANKER_TEMPLATE_ENGINE_LABELS}
                       unsetLabel="Not set"
-                      ariaLabel="Default template engine"
+                      ariaLabel={defaultLabel("template engine")}
                       disabled={disabled}
                       onChange={(templateEngine) =>
                         onChange({
@@ -234,7 +250,7 @@ export function ClankerWorkflowForm({
                       value={defaults.outputFormat}
                       labels={CLANKER_OUTPUT_FORMAT_LABELS}
                       unsetLabel="Not set"
-                      ariaLabel="Default output format"
+                      ariaLabel={defaultLabel("output format")}
                       disabled={disabled}
                       onChange={(outputFormat) =>
                         onChange({ ...draft, defaults: { ...defaults, outputFormat } })
@@ -246,14 +262,14 @@ export function ClankerWorkflowForm({
               <HooksField
                 phases={defaults.hooks}
                 pathPrefix="defaults/hooks"
-                labelPrefix="Defaults"
+                labelPrefix={defaultsPrefix}
                 disabled={disabled}
                 onChange={(hooks) => onChange({ ...draft, defaults: { ...defaults, hooks } })}
               />
               <QaField
                 qa={defaults.qa}
                 pathPrefix="defaults/qa"
-                labelPrefix="Defaults"
+                labelPrefix={defaultsPrefix}
                 disabled={disabled}
                 onChange={(qa) => onChange({ ...draft, defaults: { ...defaults, qa } })}
               />
@@ -262,6 +278,7 @@ export function ClankerWorkflowForm({
                 <Button
                   size="xs"
                   variant="ghost"
+                  aria-label={`Clear ${defaultsPrefix.toLowerCase()}`}
                   disabled={disabled}
                   onClick={() => onChange({ ...draft, defaults: emptyClankerDefaultsDraft() })}
                 >
@@ -280,6 +297,7 @@ export function ClankerWorkflowForm({
           <Button
             size="xs"
             variant="outline"
+            aria-label={nested ? `Add ${labelPrefix} step` : undefined}
             disabled={disabled}
             onClick={() => onChange({ ...draft, steps: [...draft.steps, emptyClankerStepDraft()] })}
           >
@@ -298,11 +316,13 @@ export function ClankerWorkflowForm({
               <li key={step.rowId}>
                 <ClankerWorkflowStepCard
                   step={step}
-                  index={index}
-                  stepCount={draft.steps.length}
+                  labelPrefix={stepLabel(index)}
+                  fallbackTitle={stepLabel(index)}
                   dependsOnOptions={clankerDependsOnOptions(draft, index)}
                   expanded={!collapsedSteps.has(step.rowId)}
                   disabled={disabled}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < draft.steps.length - 1}
                   onExpandedChange={(expanded) => setStepExpanded(step.rowId, expanded)}
                   onChange={(next) =>
                     onChange({ ...draft, steps: replaceRow(draft.steps, index, next) })

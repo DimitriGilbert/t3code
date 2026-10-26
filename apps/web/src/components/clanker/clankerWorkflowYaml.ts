@@ -119,9 +119,71 @@ function mergeSeq(document: Document, seq: YAMLSeq<unknown>, values: ReadonlyArr
     }
     return;
   }
-  seq.items = values.map((value, index) =>
-    index < items.length ? mergeNode(document, items[index], value) : document.createNode(value),
-  );
+  hoistLeadingComment(seq);
+  const merged: Array<unknown> = [];
+  let oldStart = 0;
+  let newStart = 0;
+  // Anchors are items that survived verbatim; each keeps its own node's
+  // comments. The leftovers between two anchors pair by position, so an
+  // edited item still merges into its node while extra new items get fresh
+  // nodes instead of inheriting a displaced neighbour's comments.
+  const flushGap = (oldEnd: number, newEnd: number): void => {
+    const pairs = Math.min(oldEnd - oldStart, newEnd - newStart);
+    for (let at = 0; at < pairs; at += 1) {
+      merged.push(mergeNode(document, items[oldStart + at], values[newStart + at]));
+    }
+    for (let at = newStart + pairs; at < newEnd; at += 1) {
+      merged.push(document.createNode(values[at]));
+    }
+  };
+  for (const [oldIndex, newIndex] of seqAnchors(items, values)) {
+    flushGap(oldIndex, newIndex);
+    merged.push(items[oldIndex]);
+    oldStart = oldIndex + 1;
+    newStart = newIndex + 1;
+  }
+  flushGap(items.length, values.length);
+  seq.items = merged;
+}
+
+/**
+ * The longest ordered run of items that survived verbatim, as [old, new]
+ * index pairs. Insertions, deletions and edits fall into the gaps between.
+ */
+function seqAnchors(
+  items: ReadonlyArray<unknown>,
+  values: ReadonlyArray<unknown>,
+): Array<readonly [number, number]> {
+  const width = values.length + 1;
+  // lcs[old * width + next] is the longest common tail of items[old:] and
+  // values[next:], filled back to front.
+  const lcs = new Array<number>((items.length + 1) * width).fill(0);
+  const tail = (old: number, next: number): number => lcs[old * width + next] ?? 0;
+  for (let old = items.length - 1; old >= 0; old -= 1) {
+    for (let next = values.length - 1; next >= 0; next -= 1) {
+      lcs[old * width + next] = deepEqual(nodeValue(items[old]), values[next])
+        ? tail(old + 1, next + 1) + 1
+        : Math.max(tail(old + 1, next), tail(old, next + 1));
+    }
+  }
+  const anchors: Array<readonly [number, number]> = [];
+  let old = 0;
+  let next = 0;
+  while (old < items.length && next < values.length) {
+    if (
+      deepEqual(nodeValue(items[old]), values[next]) &&
+      tail(old, next) === tail(old + 1, next + 1) + 1
+    ) {
+      anchors.push([old, next]);
+      old += 1;
+      next += 1;
+    } else if (tail(old + 1, next) >= tail(old, next + 1)) {
+      old += 1;
+    } else {
+      next += 1;
+    }
+  }
+  return anchors;
 }
 
 /**

@@ -184,9 +184,11 @@ export function ClankerWorkflowStepCard({
               <FormField
                 label="Sub-workflow"
                 hint={
-                  subWorkflow === null
-                    ? "Path to another workflow file to run instead."
-                    : "Ignored while the sub-workflow below is inline."
+                  step.extra["workflow"] !== undefined
+                    ? "Kept from YAML below; this shape is not editable in the form."
+                    : subWorkflow === null
+                      ? "Path to another workflow file to run instead."
+                      : "Ignored while the sub-workflow below is inline."
                 }
               >
                 <Input
@@ -330,7 +332,10 @@ export function ClankerWorkflowStepCard({
                     ariaLabel={`Inline ${stepLabel.toLowerCase()} sub-workflow`}
                     disabled={disabled}
                     onClick={() => {
-                      onChange({ ...step, subWorkflow: emptyClankerSubWorkflowDraft() });
+                      // The inline body replaces a kept `workflow` key, so
+                      // drop it rather than have the note claim it survives.
+                      const { workflow: _dropped, ...extra } = step.extra;
+                      onChange({ ...step, extra, subWorkflow: emptyClankerSubWorkflowDraft() });
                       setSubWorkflowOpen(true);
                     }}
                   />

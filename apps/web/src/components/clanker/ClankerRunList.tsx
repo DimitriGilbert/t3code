@@ -3,6 +3,7 @@ import type { ClankerRunId, ClankerRunSummary, ScopedProjectRef } from "@t3tools
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { PlayIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { clankerEnvironment } from "~/state/clanker";
 
@@ -92,10 +93,15 @@ function RunRow({ run, onOpen }: { readonly run: ClankerRunSummary; readonly onO
 export function ClankerRunList({
   project,
   onOpenRun,
+  projectLabel,
+  projectSelect,
   onStartRun,
   canStart,
 }: {
   readonly project: ScopedProjectRef;
+  readonly projectLabel: string;
+  /** Project switcher for the empty state; `null` with a single project. */
+  readonly projectSelect: ReactNode;
   readonly onOpenRun: (runId: ClankerRunId) => void;
   readonly onStartRun: () => void;
   readonly canStart: boolean;
@@ -122,12 +128,18 @@ export function ClankerRunList({
           <EmptyMedia variant="icon">
             <PlayIcon aria-hidden />
           </EmptyMedia>
-          <EmptyTitle>No runs yet</EmptyTitle>
+          <EmptyTitle>No runs in {projectLabel}</EmptyTitle>
           <EmptyDescription>
             Run a workflow and every step shows up here with its own thread.
           </EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
+          {projectSelect !== null ? (
+            <div className="flex flex-col items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Or pick another project</span>
+              {projectSelect}
+            </div>
+          ) : null}
           <Button size="sm" disabled={!canStart} onClick={onStartRun}>
             <PlayIcon />
             Run a workflow

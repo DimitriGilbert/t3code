@@ -11,11 +11,13 @@ export function ClankerProjectSelect({
   options,
   selected,
   environmentLabel,
+  size = "compact",
   onSelectProject,
 }: {
   readonly options: ReadonlyArray<ClankerProjectOption>;
   readonly selected: ClankerProjectOption | null;
   readonly environmentLabel: (environmentId: EnvironmentId) => string | null;
+  readonly size?: "compact" | "default";
   readonly onSelectProject: (key: string) => void;
 }) {
   if (options.length <= 1) {
@@ -30,7 +32,7 @@ export function ClankerProjectSelect({
         if (key !== null) onSelectProject(key);
       }}
     >
-      <SelectTrigger size="compact" aria-label="Project">
+      <SelectTrigger size={size} aria-label="Project">
         <SelectValue>
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate">{selected?.label ?? "Project"}</span>

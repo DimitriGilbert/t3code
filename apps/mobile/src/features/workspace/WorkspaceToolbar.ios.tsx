@@ -59,8 +59,6 @@ export function WorkspaceToolbar(props: {
     (tab: typeof selectedTab) => (tab === "settings" ? tabActive : isListTabActive(tab)),
     [tabActive, isListTabActive],
   );
-  const navigation = useNavigation();
-  const watchEnvironmentId = useWatchEntryEnvironmentId();
   const foldedSearch = deviceType === "duo-folded";
   const primaryColumn = use(NativePrimaryColumnContext);
   // UIKit hosts integrated search outside the sidebar's sliding content.

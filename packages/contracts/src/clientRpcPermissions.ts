@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput, GitRunStackedActionInput } from "./git.ts";
 import {
+  AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -57,6 +58,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.scheduledTasksRunNow]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRotateWebhookToken]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
+  // A guest link hands thread access to someone outside, like a pairing link.
+  [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
   // Connector installs move executable pack code into T3 home, so the human
   // confirm steps sit behind the environment-admin grant. Neither is in
   // the MCP toolkit — an agent can open a pending request but never rule on it.

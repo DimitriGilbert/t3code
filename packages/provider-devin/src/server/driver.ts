@@ -120,146 +120,152 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
   },
   configSchema: DevinSettings,
   defaultConfig: (): DevinSettings => decodeDevinSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
-    Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const httpClient = yield* HttpClient.HttpClient;
-      const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const host = yield* ProviderHost.ProviderHost;
-      const { cwd } = host.paths;
-      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
-        driverKind: DRIVER_KIND,
-        instanceId,
-      });
-      const stampIdentity = withInstanceIdentity({
-        instanceId,
-        driverKind: DRIVER_KIND,
-        displayName,
-        accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
-      });
-      const effectiveConfig = { ...config, enabled } satisfies DevinSettings;
-      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-        resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-          binaryPath: effectiveConfig.binaryPath,
-          env: processEnv,
-        }).pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
-        ),
-      );
-      const auth = yield* makeDevinAuth({
-        instanceId,
-        settings: effectiveConfig,
-        cwd,
-        environment: processEnv,
-        onChanged: (authenticated) =>
-          snapshot.refresh.pipe(
-            Effect.flatMap((provider) =>
-              !authenticated || provider.auth.status === "authenticated"
-                ? Effect.void
-                : Effect.fail(
-                    new ProviderSetupError({
-                      instanceId,
-                      operation: "start",
-                      detail: provider.message ?? "Could not verify the Devin sign-in. Try again.",
-                    }),
-                  ),
-            ),
-          ),
+  create: Effect.fn("DevinDriver.create")(function* ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    enabled,
+    config,
+  }) {
+    const crypto = yield* Crypto.Crypto;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const httpClient = yield* HttpClient.HttpClient;
+    const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const host = yield* ProviderHost.ProviderHost;
+    const { cwd } = host.paths;
+    const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+    const continuationIdentity = defaultProviderContinuationIdentity({
+      driverKind: DRIVER_KIND,
+      instanceId,
+    });
+    const stampIdentity = withInstanceIdentity({
+      instanceId,
+      driverKind: DRIVER_KIND,
+      displayName,
+      accentColor,
+      continuationGroupKey: continuationIdentity.continuationKey,
+    });
+    const effectiveConfig = { ...config, enabled } satisfies DevinSettings;
+    const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
+      resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+        binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
       }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.provideService(Crypto.Crypto, crypto),
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.provideService(Path.Path, path),
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build the Devin auth controller.",
-              cause,
-            }),
-        ),
-      );
-
-      const orchestrationAdapter = yield* DevinAdapterV2Driver.create({
-        instanceId,
-        displayName,
-        accentColor,
-        environment,
-        enabled,
-        config,
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Devin orchestration adapter.",
-              cause,
-            }),
-        ),
-      );
-
-      const checkProvider = checkDevinProviderStatus(effectiveConfig, processEnv, cwd).pipe(
-        Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
-        Effect.provideService(Crypto.Crypto, crypto),
-      );
-
-      const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<DevinSettings>>({
-        resolveMaintenance,
-        getSettings: snapshotSettings.getSettings,
-        streamSettings: snapshotSettings.streamSettings,
-        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
-        initialSnapshot: (settings) =>
-          buildInitialDevinProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
-        checkProvider,
-        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-          resolveMaintenance().pipe(
-            Effect.flatMap((maintenanceCapabilities) =>
-              enrichDevinSnapshot({
-                snapshot: currentSnapshot,
-                maintenanceCapabilities,
-                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-                publishSnapshot,
-              }),
-            ),
-            Effect.provideService(HttpClient.HttpClient, httpClient),
-            Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+      ),
+    );
+    const auth = yield* makeDevinAuth({
+      instanceId,
+      settings: effectiveConfig,
+      cwd,
+      environment: processEnv,
+      onChanged: (authenticated) =>
+        snapshot.refresh.pipe(
+          Effect.flatMap((provider) =>
+            !authenticated || provider.auth.status === "authenticated"
+              ? Effect.void
+              : Effect.fail(
+                  new ProviderSetupError({
+                    instanceId,
+                    operation: "start",
+                    detail: provider.message ?? "Could not verify the Devin sign-in. Try again.",
+                  }),
+                ),
           ),
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Devin snapshot.",
-              cause,
-            }),
         ),
-      );
+    }).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to build the Devin auth controller.",
+            cause,
+          }),
+      ),
+    );
 
-      return {
-        instanceId,
-        driverKind: DRIVER_KIND,
-        continuationIdentity,
-        displayName,
-        accentColor,
-        enabled,
-        auth,
-        snapshot,
-        orchestrationAdapter,
-        textGeneration: makeUnsupportedTextGeneration(),
-      } satisfies ProviderInstance;
-    }),
+    const orchestrationAdapter = yield* DevinAdapterV2Driver.create({
+      instanceId,
+      displayName,
+      accentColor,
+      environment,
+      enabled,
+      config,
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to build Devin orchestration adapter.",
+            cause,
+          }),
+      ),
+    );
+
+    const checkProvider = checkDevinProviderStatus(effectiveConfig, processEnv, cwd).pipe(
+      Effect.map(stampIdentity),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.provideService(Crypto.Crypto, crypto),
+    );
+
+    const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
+    const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<DevinSettings>>({
+      resolveMaintenance,
+      getSettings: snapshotSettings.getSettings,
+      streamSettings: snapshotSettings.streamSettings,
+      haveSettingsChanged: haveProviderSnapshotSettingsChanged,
+      initialSnapshot: (settings) =>
+        buildInitialDevinProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+      checkProvider,
+      enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
+        resolveMaintenance().pipe(
+          Effect.flatMap((maintenanceCapabilities) =>
+            enrichDevinSnapshot({
+              snapshot: currentSnapshot,
+              maintenanceCapabilities,
+              enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              publishSnapshot,
+            }),
+          ),
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+        ),
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to build Devin snapshot.",
+            cause,
+          }),
+      ),
+    );
+
+    return {
+      instanceId,
+      driverKind: DRIVER_KIND,
+      continuationIdentity,
+      displayName,
+      accentColor,
+      enabled,
+      auth,
+      snapshot,
+      orchestrationAdapter,
+      textGeneration: makeUnsupportedTextGeneration(),
+    } satisfies ProviderInstance;
+  }),
 };

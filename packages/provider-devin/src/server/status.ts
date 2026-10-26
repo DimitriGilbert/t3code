@@ -274,22 +274,21 @@ const devinEnvCredentialsPresent = (environment: NodeJS.ProcessEnv): boolean =>
   (nonEmptyTrimmed(environment["ACP_BACKEND"]) !== undefined &&
     nonEmptyTrimmed(environment["OPENAI_API_KEY"]) !== undefined);
 
-const runDevinCliCommand = (
+const runDevinCliCommand = Effect.fn("runDevinCliCommand")(function* (
   devinSettings: Pick<DevinSettings, "binaryPath">,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv,
-) =>
-  Effect.gen(function* () {
-    const command = nonEmptyTrimmed(devinSettings.binaryPath) ?? DEVIN_CLI_BIN;
-    const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: environment,
-        shell: spawnCommand.shell,
-      }),
-    );
-  });
+) {
+  const command = nonEmptyTrimmed(devinSettings.binaryPath) ?? DEVIN_CLI_BIN;
+  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: environment,
+      shell: spawnCommand.shell,
+    }),
+  );
+});
 
 interface DevinAcpProbeResult {
   readonly authMethods: ReadonlyArray<EffectAcpSchema.AuthMethod>;
@@ -327,34 +326,31 @@ export interface DevinStatusProbeOptions {
  * never triggered and `session/new` succeeding says nothing about sign-in —
  * Devin creates sessions without credentials (verified live).
  */
-const discoverDevinMetadataViaAcp = (
+const discoverDevinMetadataViaAcp = Effect.fn("discoverDevinMetadataViaAcp")(function* (
   devinSettings: DevinSettings,
   environment: NodeJS.ProcessEnv,
   cwd: string,
   makeRuntime: NonNullable<DevinStatusProbeOptions["makeRuntime"]>,
-) =>
-  Effect.gen(function* () {
-    const acp = yield* makeRuntime({ settings: devinSettings, environment, cwd });
-    const commandsRef = yield* Ref.make<ReadonlyArray<ServerProviderSlashCommand>>([]);
-    const commandsAdvertised = yield* Deferred.make<void>();
-    yield* acp.handleSessionUpdate((notification) =>
-      notification.update.sessionUpdate === "available_commands_update"
-        ? Ref.set(
-            commandsRef,
-            devinSlashCommandsFromCommands(notification.update.availableCommands),
-          ).pipe(Effect.andThen(Deferred.succeed(commandsAdvertised, undefined)), Effect.asVoid)
-        : Effect.void,
-    );
-    const started = yield* acp.start();
-    yield* Deferred.await(commandsAdvertised).pipe(
-      Effect.timeoutOption(COMMAND_ADVERTISEMENT_GRACE),
-    );
-    return {
-      authMethods: started.initializeResult.authMethods ?? [],
-      models: devinModelsFromConfigOptions(started.sessionSetupResult.configOptions ?? []),
-      slashCommands: yield* Ref.get(commandsRef),
-    } satisfies DevinAcpProbeResult;
-  }).pipe(Effect.scoped);
+) {
+  const acp = yield* makeRuntime({ settings: devinSettings, environment, cwd });
+  const commandsRef = yield* Ref.make<ReadonlyArray<ServerProviderSlashCommand>>([]);
+  const commandsAdvertised = yield* Deferred.make<void>();
+  yield* acp.handleSessionUpdate((notification) =>
+    notification.update.sessionUpdate === "available_commands_update"
+      ? Ref.set(
+          commandsRef,
+          devinSlashCommandsFromCommands(notification.update.availableCommands),
+        ).pipe(Effect.andThen(Deferred.succeed(commandsAdvertised, undefined)), Effect.asVoid)
+      : Effect.void,
+  );
+  const started = yield* acp.start();
+  yield* Deferred.await(commandsAdvertised).pipe(Effect.timeoutOption(COMMAND_ADVERTISEMENT_GRACE));
+  return {
+    authMethods: started.initializeResult.authMethods ?? [],
+    models: devinModelsFromConfigOptions(started.sessionSetupResult.configOptions ?? []),
+    slashCommands: yield* Ref.get(commandsRef),
+  } satisfies DevinAcpProbeResult;
+}, Effect.scoped);
 
 const isAcpAuthRequired = (error: unknown): boolean =>
   typeof error === "object" &&

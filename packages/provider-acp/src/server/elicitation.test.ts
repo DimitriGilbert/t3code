@@ -33,6 +33,7 @@ describe("acpElicitationFormQuestions", () => {
   it("maps devin's oneOf const+title ask-user form with the sentinel value preserved", () => {
     // Devin's ask-user form is the verified live shape: titled `oneOf`
     // entries where the wire value is the `const` behind a readable title.
+    // ZCode uses the same encoding with a `__skip__` sentinel.
     const questions = acpElicitationFormQuestions({
       message: "Should you pick option A or option B?",
       requestedSchema: {
@@ -63,7 +64,7 @@ describe("acpElicitationFormQuestions", () => {
     expect(questions[1]?.options).toEqual([]);
   });
 
-  it("maps oneOf/anyOf const+title variants with the sentinel value preserved", () => {
+  it("maps zcode's oneOf const+title ask-user form with the sentinel value preserved", () => {
     // ZCode's AskUserQuestion form: titled options where the wire value is the
     // `const` (e.g. the `__skip__` sentinel behind a readable title).
     const questions = acpElicitationFormQuestions({

@@ -1,34 +1,51 @@
-import { useLocation, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useNavigate, type AnyRouter } from "@tanstack/react-router";
 
-// Settings, Usage, Watch, and Pull Requests replace the sidebar utility row with a
-// Back button. Everything else is the main app. Legacy `/projects/<key>` links
-// redirect into settings, so they count too and are never remembered.
+import { GUEST_PAGE_PATH } from "../../guestPage";
+
+/** Settings and Usage open as modals over the last main-app view. */
+export function isAppModalPage(pathname: string) {
+  return pathname === "/settings" || pathname.startsWith("/settings/") || pathname === "/usage";
+}
+
+// Watch, Clanker, and Pull Requests replace the sidebar utility row with a Back
+// button, so they are never remembered as the main-app page. Legacy
+// `/projects/<key>` links redirect into settings, so they count too.
 export function isSidebarUtilityPage(pathname: string) {
   return (
-    pathname === "/settings" ||
-    pathname.startsWith("/settings/") ||
     pathname.startsWith("/projects/") ||
-    pathname === "/usage" ||
     pathname === "/watch" ||
     pathname === "/pull-requests" ||
     pathname === "/clanker"
   );
 }
 
-let mainAppHref: string | null = null;
+// Pages the root route always renders without the app shell, so they are never
+// a page to return to. Other paths seen before auth or on a prompt-link landing
+// are still recorded; they are real app URLs, so returning to one is harmless.
+const SHELL_LESS_PATHS = new Set(["/pair", "/connect", "/connect-agent", GUEST_PAGE_PATH]);
 
-export function MainAppLocationTracker() {
-  const href = useLocation({
-    select: (location) => (isSidebarUtilityPage(location.pathname) ? null : location.href),
-  });
-  useEffect(() => {
-    if (href !== null) mainAppHref = href;
-  }, [href]);
-  return null;
+let mainAppHref: string | null = null;
+let appModalReturnHref: string | null = null;
+
+/** Remembers where Settings, Usage, and the utility pages lead back to. */
+export function startMainAppLocationTracking(router: AnyRouter): () => void {
+  const record = () => {
+    const { pathname, href } = router.state.location;
+    if (isAppModalPage(pathname) || SHELL_LESS_PATHS.has(pathname)) return;
+    appModalReturnHref = href;
+    if (!isSidebarUtilityPage(pathname)) mainAppHref = href;
+  };
+  record();
+  return router.subscribe("onResolved", record);
 }
 
 export function useNavigateToMainApp() {
   const navigate = useNavigate();
   return () => navigate({ href: mainAppHref ?? "/" });
+}
+
+/** Leaves Settings or Usage for the page that opened it. */
+export function useCloseAppModal() {
+  const navigate = useNavigate();
+  return () => navigate({ href: appModalReturnHref ?? mainAppHref ?? "/" });
 }

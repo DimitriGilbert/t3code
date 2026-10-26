@@ -16,10 +16,12 @@ import {
   ArrowLeftIcon,
   CircleAlertIcon,
   CircleXIcon,
+  CodeIcon,
   LayersIcon,
   ListChecksIcon,
   PlayIcon,
   SaveIcon,
+  SlidersHorizontalIcon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -41,9 +43,31 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { ClankerWorkflowForm } from "./ClankerWorkflowForm";
 import { CLANKER_SEVERITY_ICON_CLASS, clankerWorkflowFileName } from "./clankerView";
+import {
+  parseClankerWorkflowDraft,
+  serializeClankerWorkflowDraft,
+  type ClankerWorkflowDraft,
+} from "./clankerWorkflowForm";
 
 const VALIDATE_DEBOUNCE_MS = 500;
+
+type ClankerEditorMode = "form" | "yaml";
+
+/**
+ * The YAML text is what gets saved and validated; the form view carries the
+ * draft it was last derived from so form edits and YAML edits cannot drift.
+ */
+type ClankerEditorView =
+  | { readonly mode: "form"; readonly draft: ClankerWorkflowDraft; readonly text: string }
+  | { readonly mode: "yaml"; readonly text: string };
+
+function initialEditorView(text: string): ClankerEditorView {
+  const parsed = parseClankerWorkflowDraft(text);
+  return parsed.ok ? { mode: "form", draft: parsed.draft, text } : { mode: "yaml", text };
+}
 
 function severityIcon(severity: ClankerDiagnostic["severity"], className = "size-3.5") {
   const colorClass = CLANKER_SEVERITY_ICON_CLASS[severity];
@@ -149,11 +173,12 @@ export function ClankerWorkflowEditor({
   );
   const canWrite = useAtomValue(clankerEnvironment.updateWorkflow.permissionAtom(environmentId));
 
-  // `content` stays null until the user types, so the textarea mirrors the
-  // fetched document until then. `savedDocument` overrides the query after a
-  // save because the query cache is keyed only by path, not by mtime.
+  // `view` stays null until the user edits or switches mode, so the editor
+  // mirrors the fetched document until then. `savedDocument` overrides the
+  // query after a save because the query cache is keyed only by path.
   const [savedDocument, setSavedDocument] = useState<ClankerWorkflowDocument | null>(null);
-  const [content, setContent] = useState<string | null>(null);
+  const [view, setView] = useState<ClankerEditorView | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [validated, setValidated] = useState<{
     readonly text: string;
@@ -162,7 +187,9 @@ export function ClankerWorkflowEditor({
   const requestedValidationRef = useRef("");
 
   const loadedDocument = savedDocument ?? documentQuery.data;
-  const text = content ?? loadedDocument?.content ?? "";
+  const documentText = loadedDocument?.content ?? "";
+  const activeView = view ?? initialEditorView(documentText);
+  const text = activeView.text;
   const dirty = loadedDocument !== null && text !== loadedDocument.content;
   // Only a validation that still matches the editor text wins over the saved
   // document's diagnostics; a stale result falls back to the document's.
@@ -194,6 +221,27 @@ export function ClankerWorkflowEditor({
     const timer = window.setTimeout(() => void runValidation(text), VALIDATE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [dirty, text, runValidation]);
+
+  const selectMode = (mode: ClankerEditorMode) => {
+    if (mode === activeView.mode) return;
+    if (mode === "yaml") {
+      setFormError(null);
+      setView({ mode: "yaml", text });
+      return;
+    }
+    const parsed = parseClankerWorkflowDraft(text);
+    // Invalid YAML keeps the user in YAML mode rather than losing their edits.
+    if (!parsed.ok) {
+      setFormError(parsed.error);
+      return;
+    }
+    setFormError(null);
+    setView({ mode: "form", draft: parsed.draft, text });
+  };
+
+  const changeDraft = (draft: ClankerWorkflowDraft) => {
+    setView({ mode: "form", draft, text: serializeClankerWorkflowDraft(draft) });
+  };
 
   const save = async () => {
     if (saving || !dirty) return;
@@ -253,10 +301,27 @@ export function ClankerWorkflowEditor({
         ) : null}
         <div className="min-w-0 flex-1" />
         {summary?.description !== undefined ? (
-          <span className="hidden max-w-64 truncate text-xs text-muted-foreground lg:block">
+          <span className="hidden max-w-48 truncate text-xs text-muted-foreground xl:block">
             {summary.description}
           </span>
         ) : null}
+        <ToggleGroup
+          aria-label="Workflow editor mode"
+          value={[activeView.mode]}
+          onValueChange={(values) => {
+            const next = values[0];
+            if (next === "form" || next === "yaml") selectMode(next);
+          }}
+        >
+          <Toggle value="form">
+            <SlidersHorizontalIcon />
+            Form
+          </Toggle>
+          <Toggle value="yaml">
+            <CodeIcon />
+            YAML
+          </Toggle>
+        </ToggleGroup>
         <Button
           size="sm"
           variant="outline"
@@ -287,16 +352,38 @@ export function ClankerWorkflowEditor({
       ) : (
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <textarea
-              value={text}
-              onChange={(event) => setContent(event.currentTarget.value)}
-              disabled={!canWrite}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              aria-label={`Editing ${fileName}`}
-              className="min-h-0 flex-1 resize-none bg-transparent p-4 font-mono text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-64"
-            />
+            {formError !== null ? (
+              <div className="shrink-0 px-4 pt-4">
+                <Alert variant="error">
+                  <AlertDescription>
+                    This YAML cannot be shown as a form yet: {formError}
+                  </AlertDescription>
+                </Alert>
+              </div>
+            ) : null}
+            {activeView.mode === "form" ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ClankerWorkflowForm
+                  draft={activeView.draft}
+                  disabled={!canWrite}
+                  onChange={changeDraft}
+                />
+              </div>
+            ) : (
+              <textarea
+                value={text}
+                onChange={(event) => {
+                  setFormError(null);
+                  setView({ mode: "yaml", text: event.currentTarget.value });
+                }}
+                disabled={!canWrite}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                aria-label={`Editing ${fileName}`}
+                className="min-h-0 flex-1 resize-none bg-transparent p-4 font-mono text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-64"
+              />
+            )}
             <div className="flex shrink-0 items-center gap-2 border-t border-border/60 px-4 py-1.5 text-2xs text-muted-foreground">
               <span className="truncate font-mono">{path}</span>
               <span aria-hidden>·</span>

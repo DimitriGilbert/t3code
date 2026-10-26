@@ -1,28 +1,24 @@
-import { PlusIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, PlusIcon, XIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Checkbox } from "../ui/checkbox";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import {
-  CLANKER_CHECK_ON_FAIL_LABELS,
   CLANKER_HOOK_KIND_LABELS,
-  CLANKER_QA_CHECK_LABELS,
-  CLANKER_QA_ON_FAIL_LABELS,
+  clankerJsonRecordError,
   emptyClankerHookDraft,
-  emptyClankerQaCheckDraft,
+  emptyClankerJsonRow,
   nextClankerRowId,
   type ClankerHookDraft,
   type ClankerHookPhaseDraft,
+  type ClankerJsonRow,
   type ClankerKeyValueRow,
-  type ClankerQaCheckDraft,
-  type ClankerQaDraft,
   type ClankerTextRow,
 } from "./clankerWorkflowForm";
 
@@ -115,18 +111,177 @@ export function RowShell({
 
 export function AddRowButton({
   label,
+  ariaLabel,
   disabled,
   onClick,
 }: {
   readonly label: string;
+  /** Set when the same visible label appears inside a nested editor. */
+  readonly ariaLabel?: string;
   readonly disabled: boolean;
   readonly onClick: () => void;
 }) {
   return (
-    <Button size="xs" variant="ghost" disabled={disabled} onClick={onClick}>
+    <Button size="xs" variant="ghost" aria-label={ariaLabel} disabled={disabled} onClick={onClick}>
       <PlusIcon />
       {label}
     </Button>
+  );
+}
+
+/**
+ * Indented, collapsible container for a recursive editor (an inline
+ * sub-workflow or an escalation handoff). The panel unmounts while collapsed,
+ * so deep nesting never expands the whole tree into the DOM.
+ */
+export function NestedSection({
+  title,
+  summary,
+  open,
+  disabled,
+  action,
+  onOpenChange,
+  children,
+}: {
+  readonly title: string;
+  readonly summary: string;
+  readonly open: boolean;
+  readonly disabled: boolean;
+  readonly action?: ReactNode;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/24">
+      <Collapsible open={open} onOpenChange={onOpenChange}>
+        <div className="flex min-w-0 items-center gap-2 px-2 py-1.5">
+          <CollapsibleTrigger
+            render={
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              />
+            }
+          >
+            <ChevronDownIcon
+              aria-hidden
+              className={`size-3.5 shrink-0 text-icon-muted transition-transform ${open ? "" : "-rotate-90"}`}
+            />
+            <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
+            <span className="shrink-0 text-2xs text-muted-foreground">{summary}</span>
+          </CollapsibleTrigger>
+          {disabled ? null : action}
+        </div>
+        <CollapsiblePanel>
+          <div className="border-t border-border/60 p-2">
+            <div className="border-l-2 border-primary/32 pl-3">{children}</div>
+          </div>
+        </CollapsiblePanel>
+      </Collapsible>
+    </div>
+  );
+}
+
+/** Arbitrary-record field (`context`, `args`) edited as JSON text. */
+export function JsonRecordField({
+  label,
+  hint,
+  value,
+  ariaLabel,
+  placeholder,
+  disabled,
+  onChange,
+}: {
+  readonly label?: string;
+  readonly hint?: string;
+  readonly value: string;
+  readonly ariaLabel: string;
+  readonly placeholder: string;
+  readonly disabled: boolean;
+  readonly onChange: (next: string) => void;
+}) {
+  const error = clankerJsonRecordError(value);
+  const control = (
+    <>
+      <Textarea
+        size="sm"
+        font="mono"
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        spellCheck={false}
+        aria-label={ariaLabel}
+        aria-invalid={error !== null || undefined}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+      {error !== null ? <p className="text-2xs text-destructive-foreground">{error}</p> : null}
+    </>
+  );
+  if (label === undefined) return <div className="min-w-0 space-y-1.5">{control}</div>;
+  return (
+    <FormField label={label} {...(hint === undefined ? {} : { hint })}>
+      {control}
+    </FormField>
+  );
+}
+
+/** `conditions`: a list of arbitrary records, so each row is JSON text. */
+export function JsonRecordListField({
+  label,
+  labelPrefix,
+  hint,
+  rows,
+  addLabel,
+  pathPrefix,
+  disabled,
+  onChange,
+}: {
+  readonly label: string;
+  readonly labelPrefix: string;
+  readonly hint: string;
+  readonly rows: ReadonlyArray<ClankerJsonRow>;
+  readonly addLabel: string;
+  readonly pathPrefix: string;
+  readonly disabled: boolean;
+  readonly onChange: (next: ReadonlyArray<ClankerJsonRow>) => void;
+}) {
+  return (
+    <SubSection
+      title={label}
+      count={rows.length}
+      action={
+        <AddRowButton
+          label={addLabel}
+          ariaLabel={`Add ${labelPrefix.toLowerCase()} ${label.toLowerCase()} entry`}
+          disabled={disabled}
+          onClick={() => onChange([...rows, emptyClankerJsonRow(nextClankerRowId(pathPrefix))])}
+        />
+      }
+    >
+      {rows.length === 0 ? (
+        <p className="text-2xs text-muted-foreground/80">{hint}</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {rows.map((row, index) => (
+            <li key={row.rowId}>
+              <RowShell
+                removeLabel={`Remove ${labelPrefix.toLowerCase()} ${label.toLowerCase()} entry ${index + 1}`}
+                disabled={disabled}
+                onRemove={() => onChange(removeRow(rows, index))}
+              >
+                <JsonRecordField
+                  value={row.text}
+                  ariaLabel={`${labelPrefix} ${label.toLowerCase()} entry ${index + 1}`}
+                  placeholder='{"when": "outputs.build.status == ok"}'
+                  disabled={disabled}
+                  onChange={(text) => onChange(replaceRow(rows, index, { ...row, text }))}
+                />
+              </RowShell>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SubSection>
   );
 }
 
@@ -246,6 +401,7 @@ export function StringListField({
       action={
         <AddRowButton
           label={addLabel}
+          ariaLabel={`Add ${itemLabel.toLowerCase()}`}
           disabled={disabled}
           onClick={() => onChange([...rows, { rowId: nextClankerRowId(pathPrefix), value: "" }])}
         />
@@ -318,6 +474,7 @@ export function KeyValueField({
       action={
         <AddRowButton
           label={addLabel}
+          ariaLabel={`Add ${labelPrefix.toLowerCase()} ${label.toLowerCase()} entry`}
           disabled={disabled}
           onClick={() =>
             onChange([...rows, { rowId: nextClankerRowId(pathPrefix), key: "", value: "" }])
@@ -437,24 +594,20 @@ export function DependsOnField({
   );
 }
 
-function HookRow({
+/** The `{cmd, runtime}` / `{fn, args, runtime}` shape shared by hooks and `run`. */
+function HookObjectFields({
   hook,
-  index,
-  labelPrefix,
+  label,
   disabled,
   onChange,
-  onRemove,
 }: {
   readonly hook: ClankerHookDraft;
-  readonly index: number;
-  readonly labelPrefix: string;
+  readonly label: string;
   readonly disabled: boolean;
   readonly onChange: (next: ClankerHookDraft) => void;
-  readonly onRemove: () => void;
 }) {
-  const label = `${labelPrefix} hook ${index + 1}`;
   return (
-    <RowShell removeLabel={`Remove ${label.toLowerCase()}`} disabled={disabled} onRemove={onRemove}>
+    <>
       <div className="flex min-w-0 items-center gap-1.5">
         <div className="w-28 shrink-0">
           <EnumSelect
@@ -491,8 +644,97 @@ function HookRow({
           />
         </div>
       </div>
+      {hook.kind === "fn" ? (
+        <JsonRecordField
+          value={hook.args}
+          ariaLabel={`${label} args`}
+          placeholder='{"channel": "ops"}'
+          disabled={disabled}
+          onChange={(args) => onChange({ ...hook, args })}
+        />
+      ) : null}
       <PreservedKeysNote extra={hook.extra} />
+    </>
+  );
+}
+
+function HookRow({
+  hook,
+  index,
+  labelPrefix,
+  disabled,
+  onChange,
+  onRemove,
+}: {
+  readonly hook: ClankerHookDraft;
+  readonly index: number;
+  readonly labelPrefix: string;
+  readonly disabled: boolean;
+  readonly onChange: (next: ClankerHookDraft) => void;
+  readonly onRemove: () => void;
+}) {
+  const label = `${labelPrefix} hook ${index + 1}`;
+  return (
+    <RowShell removeLabel={`Remove ${label.toLowerCase()}`} disabled={disabled} onRemove={onRemove}>
+      <HookObjectFields hook={hook} label={label} disabled={disabled} onChange={onChange} />
     </RowShell>
+  );
+}
+
+/** `step.run`: one optional command or function instead of prompting an agent. */
+export function RunField({
+  run,
+  labelPrefix,
+  pathPrefix,
+  disabled,
+  onChange,
+}: {
+  readonly run: ClankerHookDraft | null;
+  readonly labelPrefix: string;
+  readonly pathPrefix: string;
+  readonly disabled: boolean;
+  readonly onChange: (next: ClankerHookDraft | null) => void;
+}) {
+  const label = `${labelPrefix} run`;
+  return (
+    <SubSection
+      title="Run"
+      action={
+        run === null ? (
+          <AddRowButton
+            label="Add run"
+            ariaLabel={`Add ${label.toLowerCase()}`}
+            disabled={disabled}
+            onClick={() => onChange(emptyClankerHookDraft(nextClankerRowId(pathPrefix)))}
+          />
+        ) : (
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            aria-label={`Remove ${label.toLowerCase()}`}
+            disabled={disabled}
+            onClick={() => onChange(null)}
+          >
+            <XIcon />
+          </Button>
+        )
+      }
+    >
+      {run === null ? (
+        <p className="text-2xs text-muted-foreground/80">
+          No run block. The T3 Code runner reports run steps as unsupported.
+        </p>
+      ) : (
+        <div className="space-y-2 rounded-lg border border-border/60 p-2">
+          <HookObjectFields
+            hook={run}
+            label={label}
+            disabled={disabled}
+            onChange={(next) => onChange(next)}
+          />
+        </div>
+      )}
+    </SubSection>
   );
 }
 
@@ -523,6 +765,7 @@ export function HooksField({
       action={
         <AddRowButton
           label="Add phase"
+          ariaLabel={`Add ${labelPrefix.toLowerCase()} hook phase`}
           disabled={disabled}
           onClick={() => {
             // A fresh phase gets a name no other phase uses, so adding two
@@ -570,6 +813,7 @@ export function HooksField({
                 <span aria-hidden className="h-px min-w-2 flex-1 bg-border/60" />
                 <AddRowButton
                   label="Add hook"
+                  ariaLabel={`Add ${labelPrefix.toLowerCase()} hook to phase ${phaseIndex + 1}`}
                   disabled={disabled}
                   onClick={() =>
                     onChange(
@@ -628,202 +872,6 @@ export function HooksField({
             </li>
           ))}
         </ul>
-      )}
-    </SubSection>
-  );
-}
-
-function QaCheckRow({
-  check,
-  index,
-  labelPrefix,
-  disabled,
-  onChange,
-  onRemove,
-}: {
-  readonly check: ClankerQaCheckDraft;
-  readonly index: number;
-  readonly labelPrefix: string;
-  readonly disabled: boolean;
-  readonly onChange: (next: ClankerQaCheckDraft) => void;
-  readonly onRemove: () => void;
-}) {
-  const label = `${labelPrefix} check ${index + 1}`;
-  return (
-    <RowShell removeLabel={`Remove ${label.toLowerCase()}`} disabled={disabled} onRemove={onRemove}>
-      <div className="flex min-w-0 items-center gap-1.5">
-        <div className="w-36 shrink-0">
-          <EnumSelect
-            value={check.kind}
-            labels={CLANKER_QA_CHECK_LABELS}
-            ariaLabel={`${label} type`}
-            disabled={disabled}
-            onChange={(kind) => onChange({ ...check, kind })}
-          />
-        </div>
-        {check.kind === "ref" ? (
-          <Input
-            size="compact"
-            font="mono"
-            value={check.target}
-            placeholder="shared/lint"
-            disabled={disabled}
-            aria-label={`${label} target`}
-            onChange={(event) => onChange({ ...check, target: event.currentTarget.value })}
-          />
-        ) : check.kind === "cmd" ? (
-          <>
-            <Input
-              size="compact"
-              font="mono"
-              value={check.cmd}
-              placeholder="npm test"
-              disabled={disabled}
-              aria-label={`${label} command`}
-              onChange={(event) => onChange({ ...check, cmd: event.currentTarget.value })}
-            />
-            <div className="w-28 shrink-0">
-              <Input
-                size="compact"
-                value={check.runtime}
-                placeholder="runtime"
-                disabled={disabled}
-                aria-label={`${label} runtime`}
-                onChange={(event) => onChange({ ...check, runtime: event.currentTarget.value })}
-              />
-            </div>
-          </>
-        ) : check.kind === "fn" ? (
-          <Input
-            size="compact"
-            font="mono"
-            value={check.fn}
-            placeholder="auditOutput"
-            disabled={disabled}
-            aria-label={`${label} function`}
-            onChange={(event) => onChange({ ...check, fn: event.currentTarget.value })}
-          />
-        ) : (
-          <Input
-            size="compact"
-            value={check.name}
-            placeholder="sanity"
-            disabled={disabled}
-            aria-label={`${label} name`}
-            onChange={(event) => onChange({ ...check, name: event.currentTarget.value })}
-          />
-        )}
-        <div className="w-40 shrink-0">
-          <OptionalSelect
-            value={check.onFail}
-            labels={CLANKER_CHECK_ON_FAIL_LABELS}
-            unsetLabel="Inherit on fail"
-            ariaLabel={`${label} on fail`}
-            disabled={disabled}
-            onChange={(next) => onChange({ ...check, onFail: next })}
-          />
-        </div>
-      </div>
-      {check.kind === "inline" ? (
-        <Textarea
-          size="sm"
-          value={check.prompt}
-          placeholder="Ask the model whether the step output is acceptable."
-          disabled={disabled}
-          aria-label={`${label} prompt`}
-          onChange={(event) => onChange({ ...check, prompt: event.currentTarget.value })}
-        />
-      ) : null}
-      <PreservedKeysNote extra={check.extra} />
-    </RowShell>
-  );
-}
-
-export function QaField({
-  qa,
-  pathPrefix,
-  labelPrefix,
-  disabled,
-  onChange,
-}: {
-  readonly qa: ClankerQaDraft;
-  readonly pathPrefix: string;
-  readonly labelPrefix: string;
-  readonly disabled: boolean;
-  readonly onChange: (next: ClankerQaDraft) => void;
-}) {
-  return (
-    <SubSection
-      title="QA"
-      action={
-        <Label>
-          <Checkbox
-            checked={qa.enabled}
-            disabled={disabled}
-            onCheckedChange={(checked) => onChange({ ...qa, enabled: checked })}
-          />
-          Enabled
-        </Label>
-      }
-    >
-      {!qa.enabled ? (
-        <p className="text-2xs text-muted-foreground/80">
-          No QA block. Enable it to gate the step on checks.
-        </p>
-      ) : (
-        <div className="space-y-2 rounded-lg border border-border/60 p-2">
-          <FormField label="On fail">
-            <OptionalSelect
-              value={qa.onFail}
-              labels={CLANKER_QA_ON_FAIL_LABELS}
-              unsetLabel="Default (abort)"
-              ariaLabel={`${labelPrefix} QA on fail`}
-              disabled={disabled}
-              onChange={(next) => onChange({ ...qa, onFail: next })}
-            />
-          </FormField>
-          <SubSection
-            title="Checks"
-            count={qa.checks.length}
-            action={
-              <AddRowButton
-                label="Add check"
-                disabled={disabled}
-                onClick={() =>
-                  onChange({
-                    ...qa,
-                    checks: [
-                      ...qa.checks,
-                      emptyClankerQaCheckDraft(nextClankerRowId(`${pathPrefix}/checks`)),
-                    ],
-                  })
-                }
-              />
-            }
-          >
-            {qa.checks.length === 0 ? (
-              <p className="text-2xs text-muted-foreground/80">No checks.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {qa.checks.map((check, index) => (
-                  <li key={check.rowId}>
-                    <QaCheckRow
-                      check={check}
-                      index={index}
-                      labelPrefix={labelPrefix}
-                      disabled={disabled}
-                      onChange={(next) =>
-                        onChange({ ...qa, checks: replaceRow(qa.checks, index, next) })
-                      }
-                      onRemove={() => onChange({ ...qa, checks: removeRow(qa.checks, index) })}
-                    />
-                  </li>
-                ))}
-              </ul>
-            )}
-          </SubSection>
-          <PreservedKeysNote extra={qa.extra} />
-        </div>
       )}
     </SubSection>
   );

@@ -47,8 +47,10 @@ import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { ClankerWorkflowForm } from "./ClankerWorkflowForm";
 import { CLANKER_SEVERITY_ICON_CLASS, clankerWorkflowFileName } from "./clankerView";
 import {
+  clankerDraftJsonIssues,
   parseClankerWorkflowDraft,
-  serializeClankerWorkflowDraft,
+  writeClankerWorkflowDraft,
+  type ClankerDraftIssue,
   type ClankerWorkflowDraft,
 } from "./clankerWorkflowForm";
 
@@ -240,8 +242,14 @@ export function ClankerWorkflowEditor({
     setView({ mode: "form", draft: parsed.draft, text });
   };
 
+  // An unparsable JSON field keeps the last good YAML, so the edit in progress
+  // is never written as something the file cannot represent.
+  const jsonIssues: ReadonlyArray<ClankerDraftIssue> =
+    activeView.mode === "form" ? clankerDraftJsonIssues(activeView.draft) : [];
+
   const changeDraft = (draft: ClankerWorkflowDraft) => {
-    setView({ mode: "form", draft, text: serializeClankerWorkflowDraft(draft) });
+    const blocked = clankerDraftJsonIssues(draft).length > 0;
+    setView({ mode: "form", draft, text: blocked ? text : writeClankerWorkflowDraft(draft, text) });
   };
 
   const save = async () => {
@@ -333,7 +341,12 @@ export function ClankerWorkflowEditor({
           <PlayIcon />
           Run
         </Button>
-        <Button size="sm" disabled={!dirty || saving || !canWrite} onClick={() => void save()}>
+        <Button
+          size="sm"
+          disabled={!dirty || saving || !canWrite || jsonIssues.length > 0}
+          title={jsonIssues.length > 0 ? "Fix the invalid JSON fields before saving" : undefined}
+          onClick={() => void save()}
+        >
           <SaveIcon />
           {saving ? "Saving…" : "Save"}
         </Button>
@@ -358,6 +371,22 @@ export function ClankerWorkflowEditor({
                 <Alert variant="error">
                   <AlertDescription>
                     This YAML cannot be shown as a form yet: {formError}
+                  </AlertDescription>
+                </Alert>
+              </div>
+            ) : null}
+            {jsonIssues.length > 0 ? (
+              <div className="shrink-0 px-4 pt-4">
+                <Alert variant="error">
+                  <AlertDescription>
+                    <span>These JSON fields are not valid yet, so the YAML is not updated:</span>
+                    <ul className="mt-1 space-y-0.5">
+                      {jsonIssues.map((issue) => (
+                        <li key={issue.path} className="text-xs">
+                          <span className="font-mono">{issue.path}</span>: {issue.message}
+                        </li>
+                      ))}
+                    </ul>
                   </AlertDescription>
                 </Alert>
               </div>

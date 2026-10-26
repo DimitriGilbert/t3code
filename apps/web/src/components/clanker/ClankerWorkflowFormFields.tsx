@@ -152,7 +152,11 @@ export function OptionalSelect<T extends string>({
       disabled={disabled}
       onValueChange={(next) => {
         if (next === null) return;
-        onChange(next === UNSET ? "" : (next as T));
+        if (next === UNSET) {
+          onChange("");
+        } else if (Object.hasOwn(labels, next)) {
+          onChange(next as T);
+        }
       }}
     >
       <SelectTrigger size="compact" aria-label={ariaLabel}>
@@ -302,6 +306,11 @@ export function KeyValueField({
   readonly disabled: boolean;
   readonly onChange: (next: ReadonlyArray<ClankerKeyValueRow>) => void;
 }) {
+  const keyCounts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.key.trim() !== "") keyCounts.set(row.key, (keyCounts.get(row.key) ?? 0) + 1);
+  }
+  const isDuplicate = (key: string) => key.trim() !== "" && (keyCounts.get(key) ?? 0) > 1;
   return (
     <SubSection
       title={label}
@@ -330,6 +339,12 @@ export function KeyValueField({
                   placeholder={keyPlaceholder}
                   disabled={disabled}
                   aria-label={`${labelPrefix} ${label.toLowerCase()} key ${index + 1}`}
+                  aria-invalid={isDuplicate(row.key) || undefined}
+                  title={
+                    isDuplicate(row.key)
+                      ? `Duplicate key "${row.key}": only the last entry is saved`
+                      : undefined
+                  }
                   onChange={(event) =>
                     onChange(replaceRow(rows, index, { ...row, key: event.currentTarget.value }))
                   }
@@ -494,6 +509,13 @@ export function HooksField({
   readonly disabled: boolean;
   readonly onChange: (next: ReadonlyArray<ClankerHookPhaseDraft>) => void;
 }) {
+  const phaseCounts = new Map<string, number>();
+  for (const phase of phases) {
+    if (phase.phase.trim() !== "") {
+      phaseCounts.set(phase.phase, (phaseCounts.get(phase.phase) ?? 0) + 1);
+    }
+  }
+  const isDuplicate = (name: string) => name.trim() !== "" && (phaseCounts.get(name) ?? 0) > 1;
   return (
     <SubSection
       title="Hooks"
@@ -502,12 +524,15 @@ export function HooksField({
         <AddRowButton
           label="Add phase"
           disabled={disabled}
-          onClick={() =>
-            onChange([
-              ...phases,
-              { rowId: nextClankerRowId(pathPrefix), phase: "before", hooks: [] },
-            ])
-          }
+          onClick={() => {
+            // A fresh phase gets a name no other phase uses, so adding two
+            // phases cannot collide on "before".
+            let phase = "before";
+            for (let suffix = 2; phaseCounts.has(phase); suffix += 1) {
+              phase = `before-${suffix}`;
+            }
+            onChange([...phases, { rowId: nextClankerRowId(pathPrefix), phase, hooks: [] }]);
+          }}
         />
       }
     >
@@ -526,6 +551,12 @@ export function HooksField({
                     placeholder="before"
                     disabled={disabled}
                     aria-label={`${labelPrefix} hook phase ${phaseIndex + 1}`}
+                    aria-invalid={isDuplicate(phase.phase) || undefined}
+                    title={
+                      isDuplicate(phase.phase)
+                        ? `Duplicate phase "${phase.phase}": hooks merge into one phase on save`
+                        : undefined
+                    }
                     onChange={(event) =>
                       onChange(
                         replaceRow(phases, phaseIndex, {

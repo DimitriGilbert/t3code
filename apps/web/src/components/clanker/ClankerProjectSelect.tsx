@@ -12,12 +12,14 @@ export function ClankerProjectSelect({
   selected,
   environmentLabel,
   size = "compact",
+  disabled = false,
   onSelectProject,
 }: {
   readonly options: ReadonlyArray<ClankerProjectOption>;
   readonly selected: ClankerProjectOption | null;
   readonly environmentLabel: (environmentId: EnvironmentId) => string | null;
   readonly size?: "compact" | "default";
+  readonly disabled?: boolean;
   readonly onSelectProject: (key: string) => void;
 }) {
   if (options.length <= 1) {
@@ -28,6 +30,7 @@ export function ClankerProjectSelect({
   return (
     <Select
       value={selected?.key ?? ""}
+      disabled={disabled}
       onValueChange={(key) => {
         if (key !== null) onSelectProject(key);
       }}

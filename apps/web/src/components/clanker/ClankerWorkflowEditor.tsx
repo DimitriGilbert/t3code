@@ -188,6 +188,7 @@ export function ClankerWorkflowEditor({
 
   const loadedDocument = savedDocument ?? documentQuery.data;
   const documentText = loadedDocument?.content ?? "";
+  // The React Compiler memoizes this, so it does not re-parse every render.
   const activeView = view ?? initialEditorView(documentText);
   const text = activeView.text;
   const dirty = loadedDocument !== null && text !== loadedDocument.content;

@@ -193,6 +193,7 @@ export function StartClankerRunDialog({
                 selected={project}
                 environmentLabel={environmentLabel}
                 size="default"
+                disabled={starting}
                 onSelectProject={setPickedProjectKey}
               />
             )}
@@ -220,6 +221,7 @@ export function StartClankerRunDialog({
             ) : (
               <Select
                 value={targetPath ?? ""}
+                disabled={starting}
                 onValueChange={(value) => {
                   if (value !== null) {
                     setPickedWorkflow({

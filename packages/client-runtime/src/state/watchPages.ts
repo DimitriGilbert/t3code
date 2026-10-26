@@ -25,8 +25,6 @@ import { watchAgentSourceId } from "./watchMounts.ts";
  * Pure watch-page and board-layout helpers shared by web and mobile. Nothing
  * here owns state: pages/widgets come from the `pagesLive` subscription and
  * every helper is a pure derivation the client can call per render. Mobile
- * reuses the canonical order, the placement math, and the project-resolution
- * rules; only the rendering differs.
  */
 
 // ── Grid geometry ─────────────────────────────────────────────────────
@@ -193,10 +191,6 @@ export type WatchMobileProjectionEdit =
  * The `setMobileProjection` payload for one reorder/hide/unhide edit,
  * guarded by the page's `mobileRevision` — the only fields a phone may
  * write. Moves swap the widget with the nearest *visible* neighbour so
- * hidden rows keep their slots; the whole page is renumbered 0..n-1 and
- * only changed widgets ship as patches. Returns `null` when the edit is a
- * no-op (edge move, already-hidden, unknown widget) so the caller skips
- * the write entirely.
  */
 export function buildWatchWidgetSetMobileProjectionInput(input: {
   readonly page: Pick<WatchPage, "id" | "mobileRevision">;
@@ -634,9 +628,6 @@ export function watchFirstPartyWidgetSpec(
  * Whether the in-place configure form would render at least one control: a
  * bindable `threads`/`connector` source or a declared settings field.
  * Widgets with neither (e.g. connector-status) suppress the Configure
- * affordance rather than swapping in an empty card. Non-first-party kinds
- * have no generated settings form but stay repointable when they bind a
- * connector instance.
  */
 export function watchWidgetIsConfigurable(widget: Pick<WatchWidget, "kind" | "config">): boolean {
   const spec = watchFirstPartyWidgetSpec(widget.kind);
@@ -674,8 +665,6 @@ export function watchWidgetProvenanceMarker(
  * The project a `threads`-source widget reads against. An explicit binding
  * wins; `"*"` binds to all projects; an absent binding falls back to the
  * page's ambient scope — which is what makes per-project pages reusable
- * templates. Non-`threads` sources bind no project (`connector` binds an
- * instance id instead, resolved by the connector stream).
  */
 export function resolveWatchThreadsProjectBinding(
   page: Pick<WatchPage, "scope" | "projectId">,
@@ -724,8 +713,6 @@ export function buildWatchWidgetAddInput(
  * The `addWidget` payload for a pack-bundled widget source: the `agent:` kind
  * names the published source, the `pack:<packId>` provenance marks where the
  * code shipped from, and the widget binds a connector source — to
- * `options.instanceId` when the caller resolved one, otherwise unbound for
- * the user to pick in Configure.
  */
 export function buildWatchWidgetAddPackInput(
   page: WatchPage,

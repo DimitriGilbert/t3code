@@ -2,12 +2,6 @@
 // emulating the Clanker watch shape for watch-screen tests (journey 5): the
 // poller hands it the collected contents under the instance's allowlisted
 // roots (never raw paths or reads of its own), and it folds every
-// `runs/<runId>/state.json` (plus `result.json` once a run exits) into a
-// serialized snapshot — the same output a real Clanker pack produces.
-//
-// Pack code runs in a worker thread's inner realm with no ambient Node
-// globals: the only capability is the `ctx` argument (`module.exports`
-// contract).
 
 const RUN_STATE_RE = /(^|\/)runs\/([^/]+)\/state\.json$/;
 const RUN_RESULT_RE = /(^|\/)runs\/([^/]+)\/result\.json$/;

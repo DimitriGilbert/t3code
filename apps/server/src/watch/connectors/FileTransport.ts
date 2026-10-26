@@ -16,29 +16,6 @@ import * as ServerConfig from "../../config.ts";
  * `file`-transport watches: instance config `watch` declares the allowlisted
  * roots and glob patterns; the runtime collects matching file contents,
  * confined to each root's real path — a symlink reaching outside is rejected
- * outright so a connector can never become an arbitrary-file-read primitive.
- *
- * Instance config convention:
- *
- *   { watch: { roots: ["/abs/dir", ...], globs?: ["**\/*.json"], maxDepth?: 4 } }
- *
- * Declared roots are additionally checked against a denylist — `/proc`,
- * `/sys`, `/dev`, the server's own state/secrets/connectors directories, and
- * `~/.ssh` — by resolved path and by real path, so a symlinked spelling of a
- * denied location still fails. File contents are read through a byte cap on
- * the stream itself rather than trusting `stat.size` (procfs-style files
- * report 0).
- *
- * Residual: `watch.roots` stays agent-writable through
- * `config_set`/`setInstanceConfig` — an agent can still point a file
- * connector at any non-denylisted directory the server user can read, and
- * collected contents flow into snapshots on every subscribed surface
- * (remote/tunnel clients included). A human-confirm gate for root changes is
- * deliberately deferred as a product decision; the boundary enforced here is
- * "reserved paths are never served", not "every root is human-approved".
- *
- * Raw file contents stay server-side; only the transform output crosses the
- * wire as a snapshot.
  */
 export const MAX_WATCH_ROOTS = 16;
 export const MAX_WATCH_FILES = 512;
@@ -106,8 +83,6 @@ export const parseFileWatchConfig = Effect.fn("ConnectorFileTransport.parseFileW
     // (procfs/sysfs/devfs lie about sizes and expose kernel and process
     // memory), the server's own state directory tree (sqlite, the file-backed
     // secret store, installed packs), and `~/.ssh`. Each entry is checked in
-    // resolved and — where it exists — real path form, so a symlinked or
-    // `..`-spelled root still matches.
     const deniedBases = new Set<string>();
     for (const entry of [
       "/proc",

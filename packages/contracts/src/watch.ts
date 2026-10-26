@@ -97,8 +97,6 @@ const watchWidgetSourceFields = {
    * What the widget reads against: a project id for `threads`, a connector
    * instance id for `connector`. Absent bindings resolve against the page's
    * ambient scope, which is what makes per-project pages reusable templates.
-   * There is deliberately no `url` kind — arbitrary egress only ever happens
-   * inside an egress-allowlisted connector pack.
    */
   binding: Schema.optionalKey(TrimmedNonEmptyString),
   /** Kind-specific filter/sort parameters interpreted by the widget. */
@@ -128,8 +126,6 @@ export type WatchWidgetStaticSource = typeof WatchWidgetStaticSource.Type;
  * What a widget's data reads bind to. For `agent:` widgets the bridge's data
  * subscriptions are connector-bound only in v1: a `threads` or `static` source
  * configures the widget but binds no connector instance, so its `T3.subscribe`
- * calls are refused — those source kinds feed first-party widget kinds
- * natively.
  */
 export const WatchWidgetSource = Schema.Union([
   WatchWidgetThreadsSource,
@@ -461,8 +457,6 @@ export const WatchConnectorOrigin = Schema.Union([
      * Records that the caller acknowledged this URL may resolve to a
      * loopback/private address. The flag is caller-asserted — the server
      * stores it only after the prepare step's `allowLocalUrl`
-     * acknowledgement, and the human review at confirm is what makes the
-     * assertion meaningful.
      */
     allowLocalUrl: Schema.optionalKey(Schema.Boolean),
   }),
@@ -596,8 +590,6 @@ export type WatchConnectorErrorReason = typeof WatchConnectorErrorReason.Type;
  * A widget-declared threshold checked server-side against each new connector
  * snapshot; a false→true crossing emits a `widget.threshold` notification.
  * Rules live in the widget row's stored `config.settings.thresholds` — they
- * are widget config, never subscription input, so no client or agent RPC can
- * raise an alert the widget's owner never configured.
  */
 export const WatchConnectorThresholdRule = Schema.Struct({
   /** Dotted path into the snapshot data (e.g. `"runs.0.status"`). */
@@ -730,8 +722,6 @@ export type WatchConnectorDeleteInstanceResult = typeof WatchConnectorDeleteInst
  * Requests a pack install: a local-path or public https origin is fetched now
  * and the pending request records the manifest and pinned content hash. An
  * https origin resolving to a loopback/private address is recorded unfetched
- * (`localUrl`) — only the human prepare step may ever fetch it. Nothing runs
- * until a human confirms.
  */
 export const WatchConnectorRequestInstallInput = Schema.Struct({
   origin: WatchConnectorOrigin,
@@ -756,11 +746,6 @@ export type WatchConnectorInstallRequestResult = typeof WatchConnectorInstallReq
  * Returns the request with a single-use `confirmationToken` bound to
  * (requestId, declared manifest hash). Minting needs only operate scope —
  * any operate-scope session can call it; the enforced boundary is
- * `environment:maintain` on the confirm calls plus this method's absence
- * from the MCP toolkit, so an agent can open a request but never rule on
- * it. For a `localUrl` request it also performs the deferred fetch, gated
- * on the `allowLocalUrl` acknowledgement — a caller-asserted flag: the
- * confirm step's human review is the gate that makes it honest.
  */
 export const WatchConnectorPrepareInstallConfirmInput = Schema.Struct({
   requestId: WatchConnectorInstallRequestId,
@@ -998,8 +983,6 @@ export class WatchNotificationError extends Schema.TaggedError<WatchNotification
  * One item on the notification subscription: the client's current prefs first
  * (and again after every `setPrefs`), then each notification the server
  * emits. Forward-compatible — an envelope kind a newer server adds decodes
- * as {@link UnknownUnionMember}, which consumers skip rather than letting
- * one item kill the subscription.
  */
 export const WatchNotificationStreamItem = ForwardCompatibleUnion(
   [
@@ -1197,114 +1180,3 @@ export const WatchConnectorStreamItem = ForwardCompatibleUnion(
   "type",
 );
 export type WatchConnectorStreamItem = typeof WatchConnectorStreamItem.Type;
-
-// ── Widget sharing ───────────────────────────────────────────────────────
-
-/** The `format` tag a widget export carries — guards against feeding random JSON into import. */
-export const WATCH_WIDGET_EXPORT_FORMAT = "t3.watch-widget";
-
-/** The only `formatVersion` this schema revision understands. */
-export const WATCH_WIDGET_EXPORT_FORMAT_VERSION = 1;
-
-/**
- * The authored source + bridge manifest of an `agent:` widget, embedded so the
- * document is self-contained across environments. This is the authored text,
- * never the compiled bundle, artifact hash, or script hash — those are
- * recomputed by the importing server's publish pipeline, never trusted.
- */
-export const WatchWidgetExportEmbeddedSource = Schema.Struct({
-  source: TrimmedNonEmptyString,
-  manifest: WatchWidgetBridgeManifest,
-});
-export type WatchWidgetExportEmbeddedSource = typeof WatchWidgetExportEmbeddedSource.Type;
-
-/**
- * One watch widget as a portable document. Everything environment-local is
- * deliberately absent: no ids, no revisions, no timestamps, and no placement
- * x/y — the target grid differs, so only a size hint crosses. `config`
- * (including `config.source.binding`) exports verbatim: bindings either still
- * resolve on the target or degrade into the typed `connectorMissing`/
- * `projectMissing` states the user repoints via Configure.
- */
-export const WatchWidgetExportDocument = Schema.Struct({
-  format: Schema.Literal(WATCH_WIDGET_EXPORT_FORMAT),
-  /**
-   * `PositiveInt`, not `Literal(1)`, so a document from a newer version fails
-   * at the service with a legible "unsupported version" rejection rather than
-   * a bare decode mismatch.
-   */
-  formatVersion: PositiveInt,
-  kind: WatchWidgetKind,
-  /** Only `pack:<packId>` is carried; `firstParty`/`agentPublished` derive from `kind`. */
-  provenance: Schema.optionalKey(WatchWidgetPackProvenance),
-  config: WatchWidgetConfig,
-  /** w/h/minCols only — the import's default placement appends below the page's widgets. */
-  sizeHint: Schema.optionalKey(
-    Schema.Struct({
-      w: PositiveInt,
-      h: PositiveInt,
-      minCols: Schema.optionalKey(PositiveInt),
-    }),
-  ),
-  /** Present for `agent:` kinds when the source record resolves; ignored for `pack:` provenance. */
-  source: Schema.optionalKey(WatchWidgetExportEmbeddedSource),
-});
-export type WatchWidgetExportDocument = typeof WatchWidgetExportDocument.Type;
-
-/** Why a widget export or import call itself was rejected. */
-export const WatchWidgetTransferErrorReason = Schema.Literals([
-  /** The document's `formatVersion` is not one this server understands. */
-  "unsupportedFormatVersion",
-  /** An `agent:` kind whose source record cannot be resolved on this server. */
-  "sourceUnavailable",
-  /** The embedded source republished to a different sourceId than the kind declares. */
-  "sourceIdMismatch",
-  "widgetNotFound",
-]);
-export type WatchWidgetTransferErrorReason = typeof WatchWidgetTransferErrorReason.Type;
-
-export class WatchWidgetTransferError extends Schema.TaggedError<WatchWidgetTransferError>()(
-  "WatchWidgetTransferError",
-  {
-    message: Schema.String,
-    reason: WatchWidgetTransferErrorReason,
-    widgetId: Schema.optionalKey(WatchWidgetId),
-    cause: Schema.optionalKey(Schema.Defect()),
-  },
-) {}
-
-export const WatchWidgetExportInput = Schema.Struct({
-  widgetId: WatchWidgetId,
-});
-export type WatchWidgetExportInput = typeof WatchWidgetExportInput.Type;
-
-export const WatchWidgetExportResult = Schema.Struct({
-  document: WatchWidgetExportDocument,
-});
-export type WatchWidgetExportResult = typeof WatchWidgetExportResult.Type;
-
-/**
- * Imports a widget export document onto a page. `expectedRevision` guards the
- * membership write like `watchWidgets.add`; an omitted `placement` appends
- * below the page's existing widgets.
- */
-export const WatchWidgetImportInput = Schema.Struct({
-  pageId: WatchPageId,
-  expectedRevision: NonNegativeInt,
-  document: WatchWidgetExportDocument,
-  placement: Schema.optionalKey(WatchWidgetPlacement),
-});
-export type WatchWidgetImportInput = typeof WatchWidgetImportInput.Type;
-
-export const WatchWidgetImportResult = Schema.Struct({
-  widget: WatchWidget,
-  /**
-   * The source record the import resolved — republished for `agent:` kinds
-   * carrying embedded source, looked up otherwise. Null for first-party kinds
-   * and when a `pack:` kind's record is not in the artifact cache. A `failed`
-   * record still imports: the widget renders the typed `transpileFailed`
-   * state, and the client uses the record to warn.
-   */
-  source: Schema.NullOr(WatchWidgetSourceRecord),
-});
-export type WatchWidgetImportResult = typeof WatchWidgetImportResult.Type;

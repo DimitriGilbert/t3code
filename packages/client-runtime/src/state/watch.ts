@@ -60,8 +60,6 @@ export function createWatchEnvironmentAtoms<R, E>(
    * Revision-checked mutation built on `createEnvironmentRpcCommand`: the
    * shared boundary keeps the grant check and the `RpcPermissionGuard`
    * install. The `run` wrapper only adds the conflict flag — a settled
-   * failure whose squashed cause is the revision conflict marks the page for
-   * reload, the same tagged-value check the caller's toast path applies.
    */
   const revisionCheckedCommand = <TTag extends EnvironmentUnaryRpcTag>(
     label: string,
@@ -183,19 +181,6 @@ export function createWatchEnvironmentAtoms<R, E>(
       "environment-command:watch:widget-move-to-page",
       WS_METHODS.watchWidgetsMoveToPage,
     ),
-    /** Serializes one widget (and its authored agent source) as a t3.watch-widget document. */
-    exportWidget: createEnvironmentRpcCommand(runtime, {
-      label: "environment-command:watch:widget-export",
-      tag: WS_METHODS.watchWidgetsExport,
-    }),
-    /**
-     * A membership write like `addWidget` — the conflict → needsReload flag
-     * path applies because import is revision-checked server-side.
-     */
-    importWidget: revisionCheckedCommand(
-      "environment-command:watch:widget-import",
-      WS_METHODS.watchWidgetsImport,
-    ),
     /**
      * Connector instance config write — also the connector-status widget's
      * "Reconnect": the service bumps `updatedAt`, which restarts the poller
@@ -209,8 +194,6 @@ export function createWatchEnvironmentAtoms<R, E>(
      * Mints the single-use token bound to the pending request's manifest
      * hash (and, for `localUrl` requests, performs the deferred fetch under
      * the caller-asserted `allowLocalUrl` acknowledgement). Only operate
-     * scope is needed to mint — the enforced boundary is
-     * `environment:maintain` on the confirm calls plus MCP absence.
      */
     prepareConnectorInstallConfirm: createEnvironmentRpcCommand(runtime, {
       label: "environment-command:watch:connector-prepare-install-confirm",

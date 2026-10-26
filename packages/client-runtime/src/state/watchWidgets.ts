@@ -133,8 +133,6 @@ export type KnownWatchWidgetErrorState = Exclude<WatchWidgetErrorState, UnknownU
  * The copy table for `WatchWidgetErrorState` — one line and one primary
  * recovery per cause, per the watch-screen design's severity table.
  * Returns `action` only when the cause has an in-widget fix; the caller
- * suppresses actions it cannot perform (e.g. no connector binding to
- * reconnect, or a read-only page where the configure form never opens).
  */
 export function watchWidgetErrorPresentation(
   error: WatchWidgetErrorState,
@@ -163,7 +161,7 @@ export function watchWidgetErrorPresentation(
         line:
           error.field === undefined
             ? "Config needs attention"
-            : `Config needs attention — ${error.field}`,
+            : `Config needs attention: ${error.field}`,
         variant: "warning",
         action: { id: "configure", label: "Fix configuration", button: "secondary" },
       };
@@ -388,8 +386,6 @@ function watchAttentionReasons(
  * The attention list: failed, blocked, unread, and stalled threads on the
  * bound projects, newest-returned first. Settled threads are out — settling
  * is the "I handled it" signal — except when the agent is blocked on the
- * user, which always outranks settle. Snoozed threads with no raised hand
- * collect under `snoozed` so the widget can show wake times without noise.
  */
 export function watchAttentionItems(
   threads: ReadonlyArray<EnvironmentThreadShell>,
@@ -516,9 +512,6 @@ function watchSubagentRunStatusOf(thread: EnvironmentThreadShell): WatchSubagent
  * Subagent runs on the bound projects, read entirely from the shell
  * projection: a subagent that owns a thread shows up under
  * `lineage.relationshipToParent === "subagent"`, and one still running
- * without a thread shows up in its parent's `pendingBackgroundTasks`
- * roster. Running/waiting rows lead, then recently settled, newest
- * activity first.
  */
 export function watchSubagentRunItems(
   threads: ReadonlyArray<EnvironmentThreadShell>,

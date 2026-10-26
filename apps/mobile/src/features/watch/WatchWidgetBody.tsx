@@ -479,7 +479,7 @@ function ConnectorStatusBody(props: {
                 tone="warning"
               />
               <Text className="text-2xs text-foreground-muted">
-                Awaits approval — review on desktop
+                Awaits approval. Review on desktop
               </Text>
             </>
           }

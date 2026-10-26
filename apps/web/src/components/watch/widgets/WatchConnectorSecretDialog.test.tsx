@@ -3,7 +3,7 @@ import {
   WatchConnectorPackId,
   type WatchConnectorInstance,
 } from "@t3tools/contracts";
-import { act, isValidElement, type ReactElement, type ReactNode } from "react";
+import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -34,6 +34,7 @@ vi.mock("~/components/ui/label", () => ({
 }));
 
 import { WatchConnectorSecretDialog } from "./WatchConnectorSecretDialog";
+import { act } from "../../../../test/act";
 
 const nowIso = "2026-06-20T12:00:00.000Z";
 
@@ -103,7 +104,6 @@ afterEach(async () => {
 
 describe("WatchConnectorSecretDialog", () => {
   it("marks a configured key for clearing and submits it via clearSecretKeys", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     await renderDialog();
 
     // Nothing to submit yet.
@@ -114,29 +114,28 @@ describe("WatchConnectorSecretDialog", () => {
     // Only configured keys get a clear affordance.
     expect(findButton("Clear stored secret OTHER_KEY")).toBeUndefined();
 
-    act(() => {
+    await act(async () => {
       clearButton?.props.onClick();
     });
     expect(findInput("API_KEY")?.props.disabled).toBe(true);
     expect(findButton("Save secrets")?.props.disabled).toBe(false);
 
-    act(() => {
+    await act(async () => {
       findButton("Save secrets")?.props.onClick();
     });
     expect(state.submit).toHaveBeenCalledWith({}, ["API_KEY"]);
   });
 
   it("sends a stored-value clear together with replacement values for other keys", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     await renderDialog();
 
-    act(() => {
+    await act(async () => {
       findButton("Clear stored secret API_KEY")?.props.onClick();
     });
-    act(() => {
+    await act(async () => {
       findInput("OTHER_KEY")?.props.onChange({ target: { value: "  new-secret  " } });
     });
-    act(() => {
+    await act(async () => {
       findButton("Save secrets")?.props.onClick();
     });
 
@@ -144,21 +143,20 @@ describe("WatchConnectorSecretDialog", () => {
   });
 
   it("undoing a clear restores the input and sends the replacement instead", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     await renderDialog();
 
-    act(() => {
+    await act(async () => {
       findButton("Clear stored secret API_KEY")?.props.onClick();
     });
-    act(() => {
+    await act(async () => {
       findButton("Keep stored secret API_KEY")?.props.onClick();
     });
     expect(findInput("API_KEY")?.props.disabled).toBe(false);
 
-    act(() => {
+    await act(async () => {
       findInput("API_KEY")?.props.onChange({ target: { value: "rotated" } });
     });
-    act(() => {
+    await act(() => {
       findButton("Save secrets")?.props.onClick();
     });
 

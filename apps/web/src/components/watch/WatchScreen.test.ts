@@ -37,7 +37,7 @@ const collisionResult = () =>
     ),
   );
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const flush = () => Promise.resolve();
 
 afterEach(() => {
   state.toast.mockReset();

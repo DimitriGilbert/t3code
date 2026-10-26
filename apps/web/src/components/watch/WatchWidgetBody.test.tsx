@@ -6,9 +6,8 @@ import {
   type WatchWidget,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 // The configure path under test never reaches the sandboxed app frame, but
 // WatchWidgetBody imports it — keep its atom dependency inert.
@@ -34,6 +33,7 @@ vi.mock("~/components/ui/switch", () => ({
 }));
 
 import { WatchWidgetBody } from "./WatchWidgetBody";
+import { act } from "../../../test/act";
 
 const environmentId = Schema.decodeSync(EnvironmentId)("env-1");
 
@@ -65,10 +65,6 @@ const makeWidget = (revision: number, maxItems: number): WatchWidget => ({
 });
 
 let renderer: ReactTestRenderer | undefined;
-
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-});
 
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -109,14 +105,14 @@ const maxItemsInput = () => {
 };
 
 describe("WatchWidgetBody configure form", () => {
-  it("re-bases the draft when a remote write bumps the widget revision", () => {
-    act(() => {
+  it("re-bases the draft when a remote write bumps the widget revision", async () => {
+    await act(async () => {
       renderer = create(body(makeWidget(0, 5)));
     });
     expect(maxItemsInput().props.value).toBe("5");
 
     // An in-progress local edit.
-    act(() => {
+    await act(async () => {
       maxItemsInput().props.onChange({ target: { value: "9" } });
     });
     expect(maxItemsInput().props.value).toBe("9");
@@ -124,7 +120,7 @@ describe("WatchWidgetBody configure form", () => {
     // Another client wrote a different config — the live subscription
     // delivers a bumped revision and the form must not keep submitting the
     // stale draft under the fresh revision.
-    act(() => {
+    await act(async () => {
       renderer!.update(body(makeWidget(1, 7)));
     });
     expect(maxItemsInput().props.value).toBe("7");
@@ -134,16 +130,16 @@ describe("WatchWidgetBody configure form", () => {
     expect(serialized).toContain("changed on another client");
   });
 
-  it("keeps the draft across updates that do not change the revision", () => {
-    act(() => {
+  it("keeps the draft across updates that do not change the revision", async () => {
+    await act(async () => {
       renderer = create(body(makeWidget(0, 5)));
     });
-    act(() => {
+    await act(async () => {
       maxItemsInput().props.onChange({ target: { value: "9" } });
     });
 
     // A non-config update (e.g. refreshed updatedAt) must not remount.
-    act(() => {
+    await act(() => {
       renderer!.update(body({ ...makeWidget(0, 5), updatedAt: "2025-01-02T00:00:00.000Z" }));
     });
     expect(maxItemsInput().props.value).toBe("9");

@@ -99,9 +99,6 @@ function isEmptyListDiff(diff: WatchConnectorListDiff): boolean {
  * What the upgrade confirm dialog diffs: schema version, transport, declared
  * egress hosts, declared secret keys, operation names and descriptions,
  * bundled widgets (names, plus per-widget bridge subscriptions/actions and
- * source-file moves on same-name matches), the auth schema, and a catch-all
- * flag for any remaining manifest surface. Unchanged fields come back empty
- * so the dialog lists only what moved.
  */
 export function diffWatchConnectorManifests(
   base: WatchConnectorPackManifest,
@@ -166,8 +163,6 @@ export function diffWatchConnectorManifests(
  * Whether the confirm dialog gates its primary action behind the "I reviewed
  * what this pack can reach" acknowledgement. Only network origins are risky —
  * a `localPath` install needs no ceremony (the user pointed at a directory on
- * their own disk), while any https fetch — including a `localUrl` request
- * whose deferred fetch this acknowledgement also unlocks — gets the gate.
  */
 export function watchInstallRequestNeedsReviewAck(
   request: Pick<WatchConnectorInstallRequest, "origin">,

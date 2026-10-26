@@ -92,7 +92,6 @@ it.effect("realm escapes via constructor chains land on a neutered worker realm"
     // values — `.constructor.constructor("return process")` used to compile
     // in the *host* realm and hand back the real process. Post-boundary the
     // same probe resolves in the worker realm, which has no `process`,
-    // `require`, or `fetch` left to find.
     const mod = yield* PackModule.evalConnectorModule(
       connector(`module.exports = {
         fetch: (ctx) => {

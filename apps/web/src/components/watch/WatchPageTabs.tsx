@@ -17,7 +17,7 @@ import {
 } from "@t3tools/client-runtime/state/watch-pages";
 import type { ProjectId, WatchPage, WatchPageId, WatchPageScope } from "@t3tools/contracts";
 import { CheckIcon, ChevronDownIcon, FolderIcon, PlusIcon } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -279,53 +279,43 @@ export function WatchPageTabs(props: {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const projectTitleById = new Map(props.projects.map((project) => [project.id, project.title]));
 
-  const handleContextMenuAction = useCallback(
-    (page: WatchPage, action: PageMenuAction) => {
-      if (action === "rename") props.onStartRename(page.id);
-      else if (action === "edit-layout") props.onToggleEdit(page.id);
-      else if (action === "duplicate") props.onDuplicatePage(page.id);
-      else if (action === "delete") props.onDeletePage(page.id);
-      else if (action === "open-gallery") props.onOpenGallery();
-      else if (action === "move-left" || action === "move-right") {
-        const beforePageId = watchPageReorderBefore(
-          props.pages,
-          page.id,
-          action === "move-left" ? "left" : "right",
-        );
-        if (beforePageId !== undefined) props.onReorderPage(page.id, beforePageId);
-      } else if (action.startsWith("move-to:")) {
-        const target = action.slice("move-to:".length);
-        if (target === "global") props.onUpdatePageScope(page.id, "global");
-        else if (target.length > 0)
-          props.onUpdatePageScope(page.id, "project", target as ProjectId);
-      } else if (action.startsWith("new-project:")) {
-        const projectId = action.slice("new-project:".length);
-        if (projectId.length > 0) props.onCreatePage(projectId as ProjectId);
-      }
-    },
-    [props],
-  );
-
-  const openTabMenu = useCallback(
-    async (page: WatchPage, position: { x: number; y: number }) => {
-      const action = await showPageContextMenu(page, props.pages, props.projects, position);
-      if (action !== null) handleContextMenuAction(page, action);
-    },
-    [handleContextMenuAction, props.pages, props.projects],
-  );
-
-  const handleDragEnd = useCallback(
-    ({ active, over }: DragEndEvent) => {
-      if (!over || active.id === over.id) return;
-      const beforePageId = watchPageReorderForDrop(
+  const handleContextMenuAction = (page: WatchPage, action: PageMenuAction) => {
+    if (action === "rename") props.onStartRename(page.id);
+    else if (action === "edit-layout") props.onToggleEdit(page.id);
+    else if (action === "duplicate") props.onDuplicatePage(page.id);
+    else if (action === "delete") props.onDeletePage(page.id);
+    else if (action === "open-gallery") props.onOpenGallery();
+    else if (action === "move-left" || action === "move-right") {
+      const beforePageId = watchPageReorderBefore(
         props.pages,
-        active.id as WatchPageId,
-        over.id as WatchPageId,
+        page.id,
+        action === "move-left" ? "left" : "right",
       );
-      if (beforePageId !== undefined) props.onReorderPage(active.id as WatchPageId, beforePageId);
-    },
-    [props],
-  );
+      if (beforePageId !== undefined) props.onReorderPage(page.id, beforePageId);
+    } else if (action.startsWith("move-to:")) {
+      const target = action.slice("move-to:".length);
+      if (target === "global") props.onUpdatePageScope(page.id, "global");
+      else if (target.length > 0) props.onUpdatePageScope(page.id, "project", target as ProjectId);
+    } else if (action.startsWith("new-project:")) {
+      const projectId = action.slice("new-project:".length);
+      if (projectId.length > 0) props.onCreatePage(projectId as ProjectId);
+    }
+  };
+
+  const openTabMenu = async (page: WatchPage, position: { x: number; y: number }) => {
+    const action = await showPageContextMenu(page, props.pages, props.projects, position);
+    if (action !== null) handleContextMenuAction(page, action);
+  };
+
+  const handleDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id) return;
+    const beforePageId = watchPageReorderForDrop(
+      props.pages,
+      active.id as WatchPageId,
+      over.id as WatchPageId,
+    );
+    if (beforePageId !== undefined) props.onReorderPage(active.id as WatchPageId, beforePageId);
+  };
 
   return (
     <div className="flex min-w-0 flex-1 items-center gap-1">

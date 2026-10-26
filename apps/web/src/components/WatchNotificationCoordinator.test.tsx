@@ -1,6 +1,5 @@
 import { WatchWidgetId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -87,6 +86,7 @@ vi.mock("./ui/toast", () => ({
 
 import { WatchNotificationCoordinator } from "./WatchNotificationCoordinator";
 import { useWatchNotificationSurfaceStore } from "./watch/watchNotificationStore";
+import { act } from "../../test/act";
 
 class TestNotification extends EventTarget {
   static permission = "granted";
@@ -161,7 +161,6 @@ beforeEach(() => {
   useWatchNotificationSurfaceStore.setState({ unread: {}, thresholdAlerts: {}, prefs: {} });
   TestNotification.permission = "granted";
   TestNotification.sent = [];
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("Notification", TestNotification);
   vi.stubGlobal("window", Object.assign(new EventTarget(), { focus: vi.fn() }));
   vi.stubGlobal(

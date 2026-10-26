@@ -23,14 +23,10 @@ export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   "@tsc-rs/linux-",
   "@tsc-rs/darwin-",
   "@tsc-rs/win32-",
-  // ws's optional accelerators. Nothing in this repo declares them, so they are
-  // not in the staged production install and the packaged app does not ship
-  // them either way -- ws wraps the require in try/catch and falls back to its
-  // JS paths. They are listed because they were being inlined from the dev
-  // store: both carry binding.gyp and prebuilds and load through
-  // node-gyp-build, and a native loader inlined into a bundle chunk searches
-  // for prebuilds that cannot be beside it. Listing them keeps that from
-  // becoming real if either is ever declared as a dependency.
+  // ws's optional accelerators. Nothing in this repo declares them and ws
+  // try/catches the require anyway. They are listed because they were being
+  // inlined from the dev store: both carry binding.gyp + prebuilds loaded via
+  // node-gyp-build, which cannot resolve beside a bundle chunk.
   "bufferutil",
   "utf-8-validate",
 ] as const;

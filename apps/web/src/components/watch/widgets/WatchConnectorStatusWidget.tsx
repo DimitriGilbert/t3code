@@ -19,7 +19,7 @@ import {
   RefreshCwIcon,
   RotateCcwIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -258,7 +258,7 @@ function ConnectorRow(props: {
             >
               <RefreshCwIcon />
             </TooltipTrigger>
-            <TooltipPopup>Reconnect — restart the poll</TooltipPopup>
+            <TooltipPopup>Reconnect. Restart the poll</TooltipPopup>
           </Tooltip>
         ) : null}
         <Menu>
@@ -286,8 +286,7 @@ function ConnectorRow(props: {
                     key={version.schemaVersion}
                     onClick={() => runRollback(version.schemaVersion)}
                   >
-                    v{version.schemaVersion} — approved{" "}
-                    {formatRelativeTimeLabel(version.approvedAt)}
+                    v{version.schemaVersion}, approved {formatRelativeTimeLabel(version.approvedAt)}
                   </MenuItem>
                 ))}
               </MenuSubPopup>
@@ -365,7 +364,7 @@ export function WatchConnectorStatusWidget(props: {
   readonly onReviewInstallRequest: (request: WatchConnectorInstallRequest) => void;
 }) {
   useNowMinute();
-  const versionsByPackId = useMemo(() => {
+  const versionsByPackId = (() => {
     const map = new Map<string, Array<WatchConnectorPack>>();
     for (const pack of props.packs) {
       if (pack.archivedAt !== null) continue;
@@ -374,7 +373,7 @@ export function WatchConnectorStatusWidget(props: {
       map.set(pack.packId, list);
     }
     return map;
-  }, [props.packs]);
+  })();
   const live = props.instances.filter((instance) => instance.archivedAt === null);
   const pending = props.installRequests.filter((request) => request.status === "pending");
 

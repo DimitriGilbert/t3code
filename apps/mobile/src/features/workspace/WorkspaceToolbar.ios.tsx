@@ -48,6 +48,7 @@ export function WorkspaceToolbar(props: {
   const focused = useIsFocused();
   const { panes, togglePrimarySidebar } = useAdaptiveWorkspaceLayout();
   const searchRef = useRef<SearchBarCommands>(null);
+  const navigation = useNavigation();
   // The Settings list takes the selected tab's place, so search follows it.
   const selectedTab = workspace.settingsOpen ? "settings" : workspace.state.selectedTab;
   const tab = workspace.state.tabs[selectedTab];
@@ -67,6 +68,7 @@ export function WorkspaceToolbar(props: {
   const searchVisible = foldedSearch
     ? tab.searchMode !== "resting"
     : deviceType !== "duo-unfolded" || primaryColumn?.presented !== false;
+  const watchEnvironmentId = useWatchEntryEnvironmentId();
   const enterSearch = useCallback(() => {
     workspace.dispatch({
       type: "scroll",

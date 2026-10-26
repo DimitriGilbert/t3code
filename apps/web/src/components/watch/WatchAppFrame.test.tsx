@@ -5,7 +5,6 @@ import {
   type WatchWidgetBridgeManifest,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -28,6 +27,7 @@ vi.mock("~/hooks/useHtmlRenderTheme", () => ({
 }));
 
 import { WatchAppFrame, type WatchAppFeedProps } from "./WatchAppFrame";
+import { act } from "../../../test/act";
 
 const environmentId = Schema.decodeSync(EnvironmentId)("env-1");
 const widgetId = Schema.decodeSync(WatchWidgetId)("widget-1");
@@ -53,7 +53,6 @@ const fakeWindow = {
 };
 
 beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   contentWindow = { postMessage: vi.fn() };
   messageListener = undefined;
   fakeWindow.addEventListener.mockClear();
@@ -103,8 +102,8 @@ const postedMessages = () => contentWindow.postMessage.mock.calls.map((call) => 
 const postedReplies = () =>
   postedMessages().filter((message) => !("method" in (message as Record<string, unknown>)));
 
-const postToHost = (data: unknown, source: unknown = contentWindow) =>
-  act(async () => {
+const postToHost = async (data: unknown, source: unknown = contentWindow) =>
+  await act(async () => {
     messageListener?.({ source, data });
   });
 
@@ -194,7 +193,7 @@ describe("WatchAppFrame bridge wiring", () => {
       method: "t3.watch/subscribe",
       params: { name: "status" },
     });
-    act(() => {
+    await act(() => {
       feeds.get("status")?.host.deliver("status", { up: true });
     });
     expect(postedMessages().at(-1)).toEqual({
@@ -231,9 +230,9 @@ describe("WatchAppFrame bridge wiring", () => {
 });
 
 describe("WatchAppFrame binding changes", () => {
-  const updateBinding = (binding: WatchConnectorInstanceId) => {
+  const updateBinding = async (binding: WatchConnectorInstanceId) => {
     const marker = () => <span data-feed-marker />;
-    return act(async () => {
+    return await act(async () => {
       renderer!.update(
         <WatchAppFrame
           environmentId={environmentId}
@@ -312,8 +311,8 @@ describe("WatchAppFrame navigation containment", () => {
 
     // The first load is the generated document; a second load on the same
     // document means the frame navigated itself.
-    const fireLoad = () =>
-      act(async () => {
+    const fireLoad = async () =>
+      await act(async () => {
         (renderer!.root.findByType("iframe").props as { onLoad: () => void }).onLoad();
       });
     await fireLoad();
@@ -328,7 +327,7 @@ describe("WatchAppFrame navigation containment", () => {
       renderer!.root.findAllByType("p").some((p) => p.children.join("").includes("stopped")),
     ).toBe(true);
     // Disposal closed the feed; the dead host can no longer post to the page.
-    act(() => {
+    await act(() => {
       feeds.get("status")?.host.deliver("status", { up: true });
     });
     expect(

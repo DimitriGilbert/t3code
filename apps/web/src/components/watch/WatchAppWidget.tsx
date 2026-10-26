@@ -19,7 +19,7 @@ import { WatchConnectorInstanceId as WatchConnectorInstanceIdSchema } from "@t3t
 import * as Schema from "effect/Schema";
 import { useAtomValue } from "@effect/atom-react";
 import { TriangleAlertIcon, UnplugIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   Empty,
@@ -41,14 +41,6 @@ import { WatchAppTapToLoad } from "./WatchAppTapToLoad";
  * The body of one `agent:<sourceId>` widget, embedded inside `WatchWidgetShell`.
  * The shell owns the chrome — title, provenance badge, context menu — so this
  * component renders only the governed content region: an
- * `IntersectionObserver` reports card visibility to the page's mount registry
- * (≤6 mounted agent frames), `mountState` switches between nothing
- * (offscreen), `WatchAppTapToLoad` (over the cap), and the sandboxed
- * `WatchAppFrame`. The artifact resolves through the source stream plus one
- * bundle fetch per `artifactHash`; the frame mounts only for a `ready`
- * artifact. Bridge violations surface as a host-rendered corner chip, and the
- * resolved source record is reported up so the shell menu can offer
- * "View source" — both stay outside the sandbox.
  */
 
 const isConnectorInstanceId = Schema.is(WatchConnectorInstanceIdSchema);
@@ -133,6 +125,7 @@ export function WatchAppWidget(props: {
       observer.disconnect();
       onVisibilityChangeRef.current(false);
     };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- one mount per widget.id; the registry call is keyed on identity only
   }, [widget.id]);
 
   const body = (() => {
@@ -193,8 +186,6 @@ export function WatchAppWidget(props: {
  * The artifact path once mounted: the record stream drives readiness, one
  * bundle fetch follows each `artifactHash`, and the frame mounts only for a
  * `ready` artifact. The resolved record is reported up so the host chrome can
- * offer "View source" — including for `failed` builds, where its diagnostics
- * matter most.
  */
 function WatchAppArtifactBody(props: {
   readonly environmentId: EnvironmentId;
@@ -262,20 +253,16 @@ function WatchAppArtifactBody(props: {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [artifactHash, props.sourceId]);
 
-  const state = useMemo(
-    () =>
-      resolveWatchAppArtifact(
-        record,
-        artifact !== null && artifact.artifactHash === artifactHash ? artifact.bundle : undefined,
-      ),
-    [record, artifact, artifactHash],
+  const state = resolveWatchAppArtifact(
+    record,
+    artifact !== null && artifact.artifactHash === artifactHash ? artifact.bundle : undefined,
   );
 
-  const failureDetail = useMemo(() => {
+  const failureDetail = (() => {
     if (recordResult._tag !== "Failure") return null;
     const error = squashAtomCommandFailure(recordResult);
     return error instanceof Error && error.message.trim() !== "" ? error.message : null;
-  }, [recordResult]);
+  })();
 
   const onViolation = (violation: WatchAppBridgeViolation) => props.onViolation(violation.message);
 

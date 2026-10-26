@@ -57,21 +57,6 @@ window isn't already focused on the relevant thread. Open the bell on the
 Watch screen for notification history, per-type and per-page mutes, and
 snoozing — every one of them reversible.
 
-## Sharing widgets
-
-Any widget can travel between pages, environments, and people as a
-`t3.watch-widget` JSON document. Right-click a widget and choose
-**Export → Copy JSON** or **Export → Download file**; to bring one in, open
-**Add a widget** and choose **Import a widget** at the bottom — drop the file,
-pick it, or paste the JSON, check the preview, and it lands below the page's
-existing widgets.
-
-Agent-authored widgets carry their source inside the document and are
-recompiled on import; pack widgets need the same connector pack installed on
-the target first. Widgets bound to a connector instance or project that
-doesn't exist on the target import fine and show their missing-binding state
-— repoint them from Configure.
-
 ## On mobile
 
 The mobile app follows the same pages as a single-column stack in canonical

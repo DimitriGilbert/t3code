@@ -18,7 +18,7 @@ import {
 import { useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { randomUUID } from "../lib/utils";
@@ -82,12 +82,6 @@ function sessionChannelFor(environmentId: EnvironmentId): SessionChannel {
  * The watch notification router: subscribes each environment's notification
  * stream, runs the shared client-runtime delivery predicates, and renders the
  * surfaces — in-app toast + unread badge while attended, one device-native
- * `Notification` while unattended. Delivery is keyed `(notificationId,
- * channel)`; the in-app channel is this client session, the native channel is
- * the device singleton so several windows never double-fire.
- *
- * The atom registry subscription (not a React render) consumes the stream:
- * notifications are discrete events, and render batching must never drop one.
  */
 export function WatchNotificationCoordinator() {
   const environmentIds = useEnvironmentIds();
@@ -96,23 +90,20 @@ export function WatchNotificationCoordinator() {
   const pending = useRef(
     new Map<string, { environmentId: EnvironmentId; notification: Notification }>(),
   );
-  const onNativeNotification = useCallback(
-    (environmentId: EnvironmentId, notification: Notification) => {
-      pending.current.get(notification.tag)?.notification.close();
-      pending.current.set(notification.tag, { environmentId, notification });
+  const onNativeNotification = (environmentId: EnvironmentId, notification: Notification) => {
+    pending.current.get(notification.tag)?.notification.close();
+    pending.current.set(notification.tag, { environmentId, notification });
+    setNotificationBadgeForSource(NATIVE_BADGE_SOURCE, pending.current.size);
+    // The OS can dismiss a notification without a click and without the
+    // window regaining focus; it must stop counting toward the badge. The
+    // identity check keeps a replaced tag's stale close event from evicting
+    // its successor.
+    notification.addEventListener("close", () => {
+      if (pending.current.get(notification.tag)?.notification !== notification) return;
+      pending.current.delete(notification.tag);
       setNotificationBadgeForSource(NATIVE_BADGE_SOURCE, pending.current.size);
-      // The OS can dismiss a notification without a click and without the
-      // window regaining focus; it must stop counting toward the badge. The
-      // identity check keeps a replaced tag's stale close event from evicting
-      // its successor.
-      notification.addEventListener("close", () => {
-        if (pending.current.get(notification.tag)?.notification !== notification) return;
-        pending.current.delete(notification.tag);
-        setNotificationBadgeForSource(NATIVE_BADGE_SOURCE, pending.current.size);
-      });
-    },
-    [],
-  );
+    });
+  };
 
   useEffect(() => {
     const activeIds = new Set<string>(environmentIds);
@@ -232,10 +223,7 @@ function WatchEnvironmentNotifications(props: {
     };
   });
 
-  const streamAtom = useMemo(
-    () => watchEnvironment.notifications.live({ environmentId, input: {} }),
-    [environmentId],
-  );
+  const streamAtom = watchEnvironment.notifications.live({ environmentId, input: {} });
 
   useEffect(
     () =>

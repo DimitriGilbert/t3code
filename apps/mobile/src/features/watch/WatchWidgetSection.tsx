@@ -95,8 +95,6 @@ export function WatchWidgetSection(props: {
  * The typed source/config error a widget degrades to — the same copy table as
  * web (`watchWidgetErrorPresentation`). Mobile only keeps the actions that
  * work without the configure form: `reconnect` re-sends the bound instance's
- * config; the configure-family actions stay hidden because mobile has no
- * authoring surface.
  */
 export function WatchWidgetErrorBody(props: {
   readonly error: WatchWidgetErrorState;

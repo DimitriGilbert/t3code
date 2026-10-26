@@ -10,51 +10,11 @@ import * as Schema from "effect/Schema";
 /**
  * The pack code contract. A pack ships `connector.js`, evaluated server-side
  * as a CommonJS-style module inside a dedicated worker thread:
- *
  *   module.exports = {
- *     // http packs: fetch through ctx.fetch (egress-allowlisted, host-RPC)
- *     async fetch(ctx) { ... return rawData; },
- *     // optional; defaults to the raw fetch result / collected files
- *     async transform(raw, ctx) { ... return snapshot; },
- *     // optional; runs server-side when an upgrade/rollback re-pins an
- *     // instance: migrateConfig(fromVersion, toVersion, ctx) with
- *     // ctx.config = the instance's current config. Returns the new config.
- *     async migrateConfig(from, to, ctx) { ... return newConfig; },
- *   };
- *
- * The worker thread is the security boundary, in layers:
- *
- * - Only structured-clone DATA crosses. `ctx.config`/`ctx.files`/resolved
- *   secret values are serialized in; results serialize out. No host function
- *   or object is ever reachable from pack code, so there is nothing for a
- *   `.constructor` escape to climb back to.
- * - Pack code evaluates in an inner `node:vm` realm inside the worker —
- *   the only capabilities it sees are the ones injected into the sandbox
- *   (`module`, `exports`, `console`) plus the `ctx` argument, matching the
- *   pre-worker contract.
- * - The worker realm itself is neutered before pack source runs: module
- *   loading is sealed (`require`/`import()` of every specifier rejects) and
- *   ambient handles (`process`, `require`, `fetch`, `WebSocket`, …) are
- *   deleted, so even an escape out of the inner realm lands on a global
- *   object with no Node power.
- * - The worker spawns with `env: {}` (empty `process.env`), `execArgv:
- *   ["--permission"]` (filesystem, child processes, nested workers, addons
- *   and inspector denied outright), and a bounded heap.
- * - `ctx.fetch` is a MessagePort RPC answered host-side by the egress-gated
- *   implementation; `ctx.secrets.get` is served from a host-resolved record
- *   of declared-and-configured keys; `ctx.failAuthExpired` produces a marker
- *   error the host maps back to `ConnectorAuthExpiredError`.
- * - `worker.terminate()` on timeout makes the bound real: a `while(1){}` or
- *   a promise that never settles cannot outlive its deadline, and nothing
- *   the pack does can block the host event loop.
- *
- * The module is re-evaluated inside each invocation's worker, so
- * module-level state never persists between calls — even within one poll
- * run. Results must be structured-cloneable to cross back.
  */
 
 /** File inside a pack bundle that carries the fetch/transform entry point. */
-export const CONNECTOR_ENTRY_FILE = "connector.js";
+const CONNECTOR_ENTRY_FILE = "connector.js";
 /** Bounds module evaluation inside the worker (and the eval request round-trip). */
 const EVAL_TIMEOUT_MS = 5_000;
 /** Bounds one pack call — fetch, transform, or migrateConfig — end to end. */
@@ -133,8 +93,6 @@ export interface ConnectorModule {
    * Optional config migrator the versioned pack ships: invoked as
    * `migrateConfig(fromSchemaVersion, toSchemaVersion, ctx)` when a re-pin
    * (upgrade or rollback) lands. `ctx.config` is the instance's current
-   * config — no `secrets`, `fetch`, or `files`; the return value replaces
-   * config after a secret scrub and manifest re-validation.
    */
   readonly migrateConfig?: (
     from: number,
@@ -365,7 +323,7 @@ const serializeBody = (body) => {
     }
   }
   throw new Error(
-    "ctx.fetch bodies must be a string or ArrayBuffer — other body types do not cross the pack boundary.",
+    "ctx.fetch bodies must be a string or ArrayBuffer. Other body types do not cross the pack boundary.",
   );
 };
 
@@ -821,9 +779,6 @@ export const evalConnectorModule = Effect.fn("ConnectorPackModule.eval")(functio
  * Awaits a pack call. The thunk may return a plain value, a Promise, or an
  * Effect — the pack module's methods return the invocation Effect, so an
  * interruption (timeout, cancellation) terminates the underlying worker
- * rather than leaving it running detached. Pack rejections land as
- * `Cause.UnknownError` with the thrown value preserved on `cause` — the
- * poller unwraps it to classify auth-expired and secret-access markers.
  */
 export const invokePackFunction = <A, E = Cause.UnknownError>(
   thunk: () => A | Promise<A> | Effect.Effect<A, E>,

@@ -29,11 +29,6 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
  * The mobile twin of `WatchAppFrame`: the same generated document (prelude,
  * CSP meta, bundle — byte-identical because `buildWatchAppDocument` is shared)
  * in a react-native WebView instead of a srcdoc iframe. The prelude detects
- * `ReactNativeWebView` and posts JSON-RPC over it, so the bridge needs no
- * relay page. Web-enforcement parity: `setSupportMultipleWindows={false}`
- * stands in for the frame sandbox's popup ban, `domStorageEnabled={false}`
- * for its opaque origin, and the load gates + navigation watcher stand in for
- * the sandbox's navigation ban — a widget that leaves its page is stopped.
  */
 
 export interface WatchAppFeedSubscription {
@@ -211,9 +206,6 @@ export function WatchAppWebView(props: {
   // about:blank. `loads` counts main-frame load starts so a second one — a
   // navigation the JS gate failed to stop, `location.reload()`, an Android
   // callback timeout that failed open — stops the session instead of letting
-  // a page T3 never generated pose as the widget. Web parity: the iframe's
-  // `onLoad` counter in `WatchAppFrame`; the count, not the URL, is the check
-  // so a same-URL reload counts too.
   const loads = useRef({ document: html, count: 0 });
 
   // One terminal teardown for every way the session dies: disposing the host
@@ -290,12 +282,6 @@ export function WatchAppWebView(props: {
           // platforms — the same contract as web: the generated page loads
           // exactly once, as about:blank, and every other request is denied —
           // including a second about:blank once the first load has started,
-          // so even `location.reload()` is refused. A request that still gets
-          // through (Android fails open if the callback never answers within
-          // the native timeout — that platform limitation is covered by the
-          // `watchAgentWidgetsMobile` kill switch) is caught by the load
-          // counter below. Its CSP already denies subframes
-          // (`default-src 'none'`).
           onShouldStartLoadWithRequest={(request) =>
             request.url === "about:blank" &&
             (loads.current.document !== html || loads.current.count === 0)

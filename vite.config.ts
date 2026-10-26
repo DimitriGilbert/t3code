@@ -4,7 +4,11 @@ import * as NodeURL from "node:url";
 import { remoteCacheUrl } from "./infra/task-cache/src/remoteCache.ts";
 import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
 
-const DOM_TEST_ENVIRONMENT_ALLOWLIST: Array<string> = [];
+const DOM_TEST_ENVIRONMENT_ALLOWLIST: Array<string> = [
+  // The watch-app prelude test evaluates the sandboxed frame's DOM render path;
+  // it needs jsdom and is not a React component test, so it stays a unit test.
+  "apps/web/src/components/watch/watchAppPrelude.test.ts",
+];
 
 const TEST_EXCLUDE = [
   "**/.repos/**",

@@ -7,7 +7,7 @@ import {
   type WatchConnectorPackManifest,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { act, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
+import { cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -87,6 +87,7 @@ vi.mock("~/hooks/useCopyToClipboard", () => ({
 
 import { Checkbox } from "~/components/ui/checkbox";
 import { WatchConnectorInstallConfirmDialog } from "./WatchConnectorInstallConfirmDialog";
+import { act } from "../../../test/act";
 
 const environmentId = EnvironmentId.make("env-1");
 const packId = WatchConnectorPackId.make("pack:acme");
@@ -182,7 +183,6 @@ afterEach(async () => {
 
 describe("WatchConnectorInstallConfirmDialog", () => {
   it("lists declared operations and bundled widgets on the install leg", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.prepare.mockResolvedValue(
       AsyncResult.success({ request: installRequest, diffBase: null, confirmationToken: "t-1" }),
     );
@@ -200,7 +200,6 @@ describe("WatchConnectorInstallConfirmDialog", () => {
   });
 
   it("renders widget, bridge, authSchema, and description rows on the upgrade leg", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const nextManifest: WatchConnectorPackManifest = {
       ...manifest,
       schemaVersion: 2,
@@ -251,7 +250,6 @@ describe("WatchConnectorInstallConfirmDialog", () => {
   });
 
   it("requires a fresh review ack after the deferred localUrl fetch lands", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.prepare.mockResolvedValue(
       AsyncResult.success({ request: fetchedRequest, diffBase: null, confirmationToken: "t-3" }),
     );
@@ -263,7 +261,7 @@ describe("WatchConnectorInstallConfirmDialog", () => {
     expect(findButton("Confirm install")).toBeUndefined();
     expect(findButton("Fetch and review")?.props.disabled).toBe(true);
 
-    act(() => {
+    await act(async () => {
       checkbox()?.props.onCheckedChange(true);
     });
     expect(findButton("Fetch and review")?.props.disabled).toBe(false);
@@ -284,7 +282,7 @@ describe("WatchConnectorInstallConfirmDialog", () => {
     expect(findButton("Confirm install")?.props.disabled).toBe(true);
     expect(state.prepare).toHaveBeenCalledTimes(1);
 
-    act(() => {
+    await act(() => {
       checkbox()?.props.onCheckedChange(true);
     });
     expect(findButton("Confirm install")?.props.disabled).toBe(false);

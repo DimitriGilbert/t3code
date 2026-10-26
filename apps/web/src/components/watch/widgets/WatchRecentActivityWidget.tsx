@@ -9,7 +9,6 @@ import {
 import type { EnvironmentId, ProjectId, ScopedThreadRef, WatchWidget } from "@t3tools/contracts";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import { FileDiffIcon } from "lucide-react";
-import { useMemo } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -53,12 +52,12 @@ function RecentActivityRow(props: {
   const detail = useThreadProjection(props.withDetail ? threadRef : null);
   // Checkpoint summaries give the last completed turn's diff totals and let
   // the row's diff action land on a real turn, not just the thread.
-  const latestCheckpoint = useMemo(() => {
+  const latestCheckpoint = (() => {
     if (detail === null) return null;
     return deriveThreadCheckpointSummaries(detail.projection).at(-1) ?? null;
-  }, [detail]);
+  })();
 
-  const diffTotals = useMemo(() => {
+  const diffTotals = (() => {
     if (latestCheckpoint === null || latestCheckpoint.files.length === 0) return null;
     let additions = 0;
     let deletions = 0;
@@ -67,7 +66,7 @@ function RecentActivityRow(props: {
       deletions += file.deletions;
     }
     return { additions, deletions, files: latestCheckpoint.files.length };
-  }, [latestCheckpoint]);
+  })();
 
   const runStatus = props.thread.latestRun?.status ?? "completed";
   const status = RUN_STATUS_BADGE[runStatus] ?? DEFAULT_RUN_STATUS_BADGE;

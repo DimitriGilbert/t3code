@@ -5,9 +5,14 @@ import {
   clankerDefaultsAreSet,
   clankerDependsOnOptions,
   clankerWorkflowDraftToObject,
+  emptyClankerHookDraft,
+  emptyClankerModelDraft,
+  emptyClankerPromptDraft,
+  emptyClankerQaCheckDraft,
   moveClankerStep,
   parseClankerWorkflowDraft,
   serializeClankerWorkflowDraft,
+  type ClankerHookDraft,
   type ClankerWorkflowDraft,
 } from "./clankerWorkflowForm";
 
@@ -235,6 +240,39 @@ steps:
       ok: false,
       error: "Every entry in `steps` must be an object.",
     });
+    expect(parseClankerWorkflowDraft("steps:\n  - null")).toMatchObject({
+      ok: false,
+      error: "Every entry in `steps` must be an object.",
+    });
+  });
+
+  it("keeps owned keys whose values have unexpected shapes", () => {
+    const content = `
+name: odd
+version: "1"
+secrets:
+  oops: true
+defaults:
+  timeout: [600]
+steps:
+  - name: one
+    env: [1]
+    depends_on: build
+    qa: nope
+    hooks: [x]
+    models: [null]
+    output_format: bogus
+    prompts:
+      - text: hi
+`;
+    const draft = draftOf(content);
+
+    // Malformed owned values land in `extra`, surfaced via PreservedKeysNote.
+    expect(draft.extra["secrets"]).toEqual({ oops: true });
+    expect(draft.defaults.extra["timeout"]).toEqual([600]);
+    expect(draft.steps[0]?.extra["env"]).toEqual([1]);
+    expect(draft.steps[0]?.extra["qa"]).toBe("nope");
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
   });
 
   it("reads an empty document as an empty draft", () => {
@@ -286,6 +324,89 @@ steps:
 
     expect(steps[0]?.["timeout"]).toBe(30);
     expect(steps[0]?.["retry"]).toBe("soon");
+  });
+
+  it("merges same-named hook phases instead of dropping their hooks", () => {
+    const draft = draftOf(
+      'name: n\nversion: "1"\nsteps:\n  - name: one\n    prompts:\n      - text: hi\n',
+    );
+    const cmdHook = (rowId: string, cmd: string): ClankerHookDraft => ({
+      ...emptyClankerHookDraft(rowId),
+      cmd,
+    });
+    const edited: ClankerWorkflowDraft = {
+      ...draft,
+      steps: draft.steps.map((step) => ({
+        ...step,
+        hooks: [
+          { rowId: "steps/0/hooks/0", phase: "before", hooks: [cmdHook("h/0", "one")] },
+          { rowId: "steps/0/hooks/1", phase: "before", hooks: [cmdHook("h/1", "two")] },
+        ],
+      })),
+    };
+
+    const steps = parseYaml(serializeClankerWorkflowDraft(edited))["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    expect(steps[0]?.["hooks"]).toEqual({ before: [{ cmd: "one" }, { cmd: "two" }] });
+  });
+
+  it("drops blank models, prompts, hooks, and checks instead of emitting empty objects", () => {
+    const draft = draftOf(
+      'name: n\nversion: "1"\nsteps:\n  - name: one\n    prompts:\n      - text: hi\n',
+    );
+    const edited: ClankerWorkflowDraft = {
+      ...draft,
+      steps: draft.steps.map((step) => ({
+        ...step,
+        models: [emptyClankerModelDraft("steps/0/models/0")],
+        prompts: [...step.prompts, emptyClankerPromptDraft("steps/0/prompts/1")],
+        hooks: [
+          {
+            rowId: "steps/0/hooks/0",
+            phase: "before",
+            hooks: [emptyClankerHookDraft("steps/0/hooks/0/0")],
+          },
+        ],
+        qa: {
+          ...step.qa,
+          enabled: true,
+          checks: [
+            { ...emptyClankerQaCheckDraft("steps/0/qa/checks/0"), cmd: "npm test" },
+            emptyClankerQaCheckDraft("steps/0/qa/checks/1"),
+          ],
+        },
+      })),
+    };
+
+    const steps = parseYaml(serializeClankerWorkflowDraft(edited))["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    expect(steps[0]).toEqual({
+      name: "one",
+      prompts: [{ text: "hi" }],
+      qa: { checks: [{ type: "cmd", cmd: "npm test" }] },
+    });
+  });
+
+  it("omits an enabled-but-empty qa block and hook phases with no hooks", () => {
+    const draft = draftOf(
+      'name: n\nversion: "1"\nsteps:\n  - name: one\n    prompts:\n      - text: hi\n',
+    );
+    const edited: ClankerWorkflowDraft = {
+      ...draft,
+      steps: draft.steps.map((step) => ({
+        ...step,
+        hooks: [{ rowId: "steps/0/hooks/0", phase: "before", hooks: [] }],
+        qa: { ...step.qa, enabled: true },
+      })),
+    };
+
+    const steps = parseYaml(serializeClankerWorkflowDraft(edited))["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    expect(steps[0]?.["hooks"]).toBeUndefined();
+    expect(steps[0]?.["qa"]).toBeUndefined();
   });
 
   it("writes multiline prompt text as a literal block", () => {

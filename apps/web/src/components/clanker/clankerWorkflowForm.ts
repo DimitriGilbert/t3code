@@ -318,7 +318,7 @@ export function nextClankerRowId(prefix: string): string {
   return `${prefix}/new-${rowIdCounter}`;
 }
 
-export function emptyClankerQaDraft(): ClankerQaDraft {
+function emptyClankerQaDraft(): ClankerQaDraft {
   return { enabled: false, onFail: "", checks: [], extra: {} };
 }
 
@@ -603,7 +603,7 @@ export function serializeClankerWorkflowDraft(draft: ClankerWorkflowDraft): stri
   return stringifyYaml(clankerWorkflowDraftToObject(draft), { lineWidth: 0 });
 }
 
-export function emptyClankerWorkflowDraft(): ClankerWorkflowDraft {
+function emptyClankerWorkflowDraft(): ClankerWorkflowDraft {
   return {
     name: "",
     version: "",

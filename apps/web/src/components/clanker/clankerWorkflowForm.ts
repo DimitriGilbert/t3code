@@ -247,16 +247,20 @@ function isScalar(value: unknown): boolean {
 }
 
 const scalarOrAbsent: ClankerShapeCheck = (value) => value === undefined || isScalar(value);
+const stringOrAbsent: ClankerShapeCheck = (value) =>
+  value === undefined || typeof value === "string";
 const recordOrAbsent: ClankerShapeCheck = (value) => value === undefined || isRecord(value);
-const scalarListOrAbsent: ClankerShapeCheck = (value) =>
-  value === undefined || (Array.isArray(value) && value.every(isScalar));
+const stringListOrAbsent: ClankerShapeCheck = (value) =>
+  value === undefined ||
+  (Array.isArray(value) && value.every((entry) => typeof entry === "string"));
 const recordListOrAbsent: ClankerShapeCheck = (value) =>
   value === undefined || (Array.isArray(value) && value.every(isRecord));
 const draftableListOrAbsent: ClankerShapeCheck = (value) =>
   value === undefined ||
   (Array.isArray(value) && value.every((entry) => isRecord(entry) || isScalar(entry)));
 const keyValueOrAbsent: ClankerShapeCheck = (value) =>
-  value === undefined || (isRecord(value) && Object.values(value).every(isScalar));
+  value === undefined ||
+  (isRecord(value) && Object.values(value).every((entry) => typeof entry === "string"));
 
 function draftableHooks(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -315,7 +319,13 @@ function ownedKeys(
     .map(([key]) => key);
 }
 
+/** String-typed fields only; other scalars stay in `extra`, not stringified. */
 function asText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** Number-typed fields show a scalar's text form for the numeric input. */
+function asScalarText(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return "";
@@ -363,18 +373,18 @@ function jsonRows(value: unknown, path: string): ReadonlyArray<ClankerJsonRow> {
 }
 
 const ROOT_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
-  name: scalarOrAbsent,
-  version: scalarOrAbsent,
-  description: scalarOrAbsent,
-  secrets: scalarListOrAbsent,
+  name: stringOrAbsent,
+  version: stringOrAbsent,
+  description: stringOrAbsent,
+  secrets: stringListOrAbsent,
   defaults: recordOrAbsent,
 };
 
 const DEFAULTS_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
   timeout: scalarOrAbsent,
   retry: scalarOrAbsent,
-  model: scalarOrAbsent,
-  provider: scalarOrAbsent,
+  model: stringOrAbsent,
+  provider: stringOrAbsent,
   concurrency: scalarOrAbsent,
   template_engine: literalShape(CLANKER_TEMPLATE_ENGINE_LABELS),
   output_format: literalShape(CLANKER_OUTPUT_FORMAT_LABELS),
@@ -383,17 +393,17 @@ const DEFAULTS_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
 };
 
 const STEP_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
-  name: scalarOrAbsent,
-  description: scalarOrAbsent,
-  condition: scalarOrAbsent,
+  name: stringOrAbsent,
+  description: stringOrAbsent,
+  condition: stringOrAbsent,
   conditions: recordListOrAbsent,
-  conditions_mode: scalarOrAbsent,
+  conditions_mode: stringOrAbsent,
   timeout: scalarOrAbsent,
   retry: scalarOrAbsent,
   concurrency: scalarOrAbsent,
-  depends_on: scalarListOrAbsent,
-  skills: scalarListOrAbsent,
-  agent: scalarOrAbsent,
+  depends_on: stringListOrAbsent,
+  skills: stringListOrAbsent,
+  agent: stringOrAbsent,
   run: recordOrAbsent,
   env: keyValueOrAbsent,
   inputs: keyValueOrAbsent,
@@ -416,61 +426,60 @@ const QA_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
 
 const ESCALATE_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
   type: literalShape(CLANKER_ESCALATE_TYPE_LABELS),
-  prompt: scalarOrAbsent,
+  prompt: stringOrAbsent,
   model: recordOrAbsent,
   ref: draftableEscalateRef,
 };
 
 const ESCALATE_MODEL_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
-  id: scalarOrAbsent,
-  provider: scalarOrAbsent,
+  id: stringOrAbsent,
+  provider: stringOrAbsent,
 };
 
 const MODEL_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
-  id: scalarOrAbsent,
-  provider: scalarOrAbsent,
-  harness: scalarOrAbsent,
+  id: stringOrAbsent,
+  provider: stringOrAbsent,
+  harness: stringOrAbsent,
 };
 
 const PROMPT_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
-  text: scalarOrAbsent,
-  file: scalarOrAbsent,
+  text: stringOrAbsent,
+  file: stringOrAbsent,
   context: recordOrAbsent,
 };
 
-const HOOK_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
-  cmd: scalarOrAbsent,
-  fn: scalarOrAbsent,
-  runtime: scalarOrAbsent,
+// Keys only one kind writes back are owned only for that kind, so a `cmd`
+// hook's stray `fn` round-trips through `extra` instead of dropping.
+const HOOK_KEY_SHAPES: Record<ClankerHookKind, Record<string, ClankerShapeCheck>> = {
+  cmd: { cmd: stringOrAbsent, runtime: stringOrAbsent },
+  fn: { fn: stringOrAbsent, args: recordOrAbsent, runtime: stringOrAbsent },
 };
 
-const QA_CHECK_KEY_SHAPES: Record<string, ClankerShapeCheck> = {
+const QA_CHECK_BASE_SHAPES: Record<string, ClankerShapeCheck> = {
   type: literalShape(CLANKER_QA_CHECK_LABELS),
-  target: scalarOrAbsent,
-  name: scalarOrAbsent,
-  prompt: scalarOrAbsent,
-  cmd: scalarOrAbsent,
-  fn: scalarOrAbsent,
   on_fail: literalShape(CLANKER_CHECK_ON_FAIL_LABELS),
 };
 
-// Keys only one kind writes back are owned only for that kind, so a `cmd`
-// hook's stray `args` round-trips through `extra` instead of dropping.
+const QA_CHECK_KEY_SHAPES: Record<ClankerQaCheckKind, Record<string, ClankerShapeCheck>> = {
+  ref: { ...QA_CHECK_BASE_SHAPES, target: stringOrAbsent },
+  inline: { ...QA_CHECK_BASE_SHAPES, name: stringOrAbsent, prompt: stringOrAbsent },
+  cmd: { ...QA_CHECK_BASE_SHAPES, cmd: stringOrAbsent, runtime: stringOrAbsent },
+  fn: { ...QA_CHECK_BASE_SHAPES, fn: stringOrAbsent, args: recordOrAbsent },
+};
+
 function hookShapes(kind: ClankerHookKind): Record<string, ClankerShapeCheck> {
-  return kind === "fn" ? { ...HOOK_KEY_SHAPES, args: recordOrAbsent } : HOOK_KEY_SHAPES;
+  return HOOK_KEY_SHAPES[kind];
 }
 
 function qaCheckShapes(kind: ClankerQaCheckKind): Record<string, ClankerShapeCheck> {
-  if (kind === "fn") return { ...QA_CHECK_KEY_SHAPES, args: recordOrAbsent };
-  if (kind === "cmd") return { ...QA_CHECK_KEY_SHAPES, runtime: scalarOrAbsent };
-  return QA_CHECK_KEY_SHAPES;
+  return QA_CHECK_KEY_SHAPES[kind];
 }
 
 function modelDrafts(value: unknown, path: string): ReadonlyArray<ClankerModelDraft> {
   if (!Array.isArray(value)) return [];
   return value.map((entry, index) => {
     // A bare scalar reads as the model id, like a bare-string prompt.
-    const source = isRecord(entry) ? entry : { id: asText(entry) };
+    const source = isRecord(entry) ? entry : { id: asScalarText(entry) };
     return {
       rowId: `${path}/${index}`,
       id: asText(source["id"]),
@@ -485,28 +494,28 @@ function promptDrafts(value: unknown, path: string): ReadonlyArray<ClankerPrompt
   if (!Array.isArray(value)) return [];
   return value.map((entry, index) => {
     // A bare string is not in the schema, but reads as the obvious inline prompt.
-    const source = isRecord(entry) ? entry : { text: asText(entry) };
+    const source = isRecord(entry) ? entry : { text: asScalarText(entry) };
     const kind: ClankerPromptKind = "file" in source && !("text" in source) ? "file" : "text";
     return {
       rowId: `${path}/${index}`,
       kind,
       text: asText(source["text"]),
       file: asText(source["file"]),
-      context: jsonTextOf(source["context"]),
+      context: isRecord(source["context"]) ? jsonTextOf(source["context"]) : "",
       extra: omit(source, ownedKeys(source, PROMPT_KEY_SHAPES)),
     };
   });
 }
 
 function hookDraft(value: unknown, rowId: string): ClankerHookDraft {
-  const source = isRecord(value) ? value : { cmd: asText(value) };
+  const source = isRecord(value) ? value : { cmd: asScalarText(value) };
   const kind: ClankerHookKind = "fn" in source && !("cmd" in source) ? "fn" : "cmd";
   return {
     rowId,
     kind,
     cmd: asText(source["cmd"]),
     fn: asText(source["fn"]),
-    args: kind === "fn" ? jsonTextOf(source["args"]) : "",
+    args: kind === "fn" && isRecord(source["args"]) ? jsonTextOf(source["args"]) : "",
     runtime: asText(source["runtime"]),
     extra: omit(source, ownedKeys(source, hookShapes(kind))),
   };
@@ -542,7 +551,7 @@ function qaCheckDrafts(value: unknown, path: string): ReadonlyArray<ClankerQaChe
       prompt: asText(source["prompt"]),
       cmd: asText(source["cmd"]),
       fn: asText(source["fn"]),
-      args: kind === "fn" ? jsonTextOf(source["args"]) : "",
+      args: kind === "fn" && isRecord(source["args"]) ? jsonTextOf(source["args"]) : "",
       runtime: kind === "cmd" ? asText(source["runtime"]) : "",
       onFail: literalOf(source["on_fail"], CLANKER_CHECK_ON_FAIL_LABELS),
       extra: omit(source, ownedKeys(source, qaCheckShapes(kind))),
@@ -618,11 +627,11 @@ function defaultsDraft(value: unknown, path: string): ClankerDefaultsDraft {
   const source = isRecord(value) ? value : {};
   const owned = ownedKeys(source, DEFAULTS_KEY_SHAPES);
   return {
-    timeout: asText(source["timeout"]),
-    retry: asText(source["retry"]),
+    timeout: asScalarText(source["timeout"]),
+    retry: asScalarText(source["retry"]),
     model: asText(source["model"]),
     provider: asText(source["provider"]),
-    concurrency: asText(source["concurrency"]),
+    concurrency: asScalarText(source["concurrency"]),
     templateEngine: literalOf(source["template_engine"], CLANKER_TEMPLATE_ENGINE_LABELS),
     outputFormat: literalOf(source["output_format"], CLANKER_OUTPUT_FORMAT_LABELS),
     hooks: owned.includes("hooks") ? hookPhaseDrafts(source["hooks"], `${path}/hooks`) : [],
@@ -647,9 +656,9 @@ function stepDraft(source: UnknownRecord, path: string): ClankerStepDraft {
     conditions: drafted("conditions", () => jsonRows(source["conditions"], `${path}/conditions`)),
     conditionsMode: asText(source["conditions_mode"]),
     agent: asText(source["agent"]),
-    timeout: asText(source["timeout"]),
-    retry: asText(source["retry"]),
-    concurrency: asText(source["concurrency"]),
+    timeout: asScalarText(source["timeout"]),
+    retry: asScalarText(source["retry"]),
+    concurrency: asScalarText(source["concurrency"]),
     dependsOn: drafted("depends_on", () => asTextList(source["depends_on"])),
     skills: drafted("skills", () => textRows(source["skills"], `${path}/skills`)),
     run: isRecord(run) ? hookDraft(run, `${path}/run`) : null,
@@ -1225,7 +1234,7 @@ export function emptyClankerEscalateDraft(rowId: string): ClankerEscalateDraft {
 }
 
 export function emptyClankerJsonRow(rowId: string): ClankerJsonRow {
-  return { rowId, text: "{}" };
+  return { rowId, text: "" };
 }
 
 /** Step names a step may depend on: its named siblings, in file order. */

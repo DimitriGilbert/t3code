@@ -47,6 +47,102 @@ describe("writeClankerWorkflowYaml", () => {
     expect(written).toContain("timeout: 900 # five minutes");
   });
 
+  it("keeps each survivor's comment when a middle step is deleted", () => {
+    const base = `name: pipe
+version: "1"
+steps:
+  # First step.
+  - name: one
+  # Second step.
+  - name: two
+  # Third step.
+  - name: three
+`;
+    const object = objectOf(base);
+    const steps = object["steps"] as Array<Record<string, unknown>>;
+    object["steps"] = [steps[0], steps[2]];
+
+    expect(writeClankerWorkflowYaml(object, base)).toBe(`name: pipe
+version: "1"
+steps:
+  # First step.
+  - name: one
+  # Third step.
+  - name: three
+`);
+  });
+
+  it("keeps comments on their items when a step is inserted mid-list", () => {
+    const base = `name: pipe
+version: "1"
+steps:
+  # First step.
+  - name: one
+  # Second step.
+  - name: two
+`;
+    const object = objectOf(base);
+    const steps = object["steps"] as Array<Record<string, unknown>>;
+    object["steps"] = [steps[0], { name: "inserted" }, steps[1]];
+
+    expect(writeClankerWorkflowYaml(object, base)).toBe(`name: pipe
+version: "1"
+steps:
+  # First step.
+  - name: one
+  - name: inserted
+  # Second step.
+  - name: two
+`);
+  });
+
+  it("does not scramble comments when a step moves and is edited", () => {
+    const base = `name: pipe
+version: "1"
+steps:
+  # First step.
+  - name: one
+  # Second step.
+  - name: two
+  # Third step.
+  - name: three
+`;
+    const object = objectOf(base);
+    const steps = object["steps"] as Array<Record<string, unknown>>;
+    object["steps"] = [{ ...steps[2], timeout: 5 }, steps[0], steps[1]];
+
+    expect(writeClankerWorkflowYaml(object, base)).toBe(`name: pipe
+version: "1"
+steps:
+  - name: three
+    timeout: 5
+  # First step.
+  - name: one
+  # Second step.
+  - name: two
+`);
+  });
+
+  it("keeps comments on surviving scalar items too", () => {
+    const base = `name: n
+version: "1"
+secrets:
+  # First secret.
+  - KEY_A
+  # Second secret.
+  - KEY_B
+`;
+    const object = objectOf(base);
+    object["secrets"] = ["KEY_B"];
+
+    expect(writeClankerWorkflowYaml(object, base)).toBe(`name: n
+version: "1"
+secrets:
+  # Second secret.
+  - KEY_B
+`);
+  });
+
   it("carries a step's comment with it when the step moves", () => {
     const object = objectOf(COMMENTED);
     const steps = object["steps"] as Array<Record<string, unknown>>;

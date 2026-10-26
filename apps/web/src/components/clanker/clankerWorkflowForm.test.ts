@@ -280,6 +280,67 @@ steps:
     expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
   });
 
+  it("keeps keys that belong to a different hook or check kind", () => {
+    const content = `
+name: n
+version: "1"
+steps:
+  - name: one
+    run:
+      cmd: make
+      fn: legacy
+    hooks:
+      before:
+        - cmd: echo hi
+          fn: stray
+          args:
+            stray: true
+    qa:
+      checks:
+        - type: ref
+          target: shared/lint
+          name: stray
+          prompt: stray
+        - type: cmd
+          cmd: npm test
+          prompt: stray
+          fn: stray
+`;
+    const draft = draftOf(content);
+    const step = draft.steps[0];
+
+    expect(step?.run?.extra).toEqual({ fn: "legacy" });
+    expect(step?.hooks[0]?.hooks[0]?.extra).toEqual({
+      fn: "stray",
+      args: { stray: true },
+    });
+    expect(step?.qa.checks[0]?.extra).toEqual({ name: "stray", prompt: "stray" });
+    expect(step?.qa.checks[1]?.extra).toEqual({ prompt: "stray", fn: "stray" });
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
+  });
+
+  it("keeps non-string scalars on string-typed fields in extra", () => {
+    const content = `
+name: n
+version: 1
+steps:
+  - name: one
+    description: 7
+    depends_on:
+      - 2
+    env:
+      PORT: 8080
+`;
+    const draft = draftOf(content);
+    const step = draft.steps[0];
+
+    expect(draft.version).toBe("");
+    expect(step?.description).toBe("");
+    expect(step?.dependsOn).toEqual([]);
+    expect(step?.env).toEqual([]);
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
+  });
+
   it("reads an empty document as an empty draft", () => {
     const parsed = parseClankerWorkflowDraft("");
     expect(parsed.ok).toBe(true);

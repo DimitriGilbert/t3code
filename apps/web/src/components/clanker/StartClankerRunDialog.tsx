@@ -75,12 +75,14 @@ export function StartClankerRunDialog({
   } | null>(null);
   const [starting, setStarting] = useState(false);
 
-  // A workflow was opened from one project, so its project cannot be switched.
-  const lockedProject = workflowPath !== null;
+  // The workflow file belongs to the page project; switching projects unlocks
+  // the workflow field for the new project instead of locking the picker.
   const project =
-    (lockedProject || pickedProjectKey === null
+    (pickedProjectKey === null
       ? null
       : (projects.find((candidate) => candidate.key === pickedProjectKey) ?? null)) ?? pageProject;
+  const workflowLocked = workflowPath !== null && project.key === pageProject.key;
+  const effectiveWorkflowPath = workflowLocked ? workflowPath : null;
   const environmentId = project.ref.environmentId;
   const projectId = project.ref.projectId;
 
@@ -90,7 +92,7 @@ export function StartClankerRunDialog({
   const loadedWorkflows = Option.getOrNull(AsyncResult.value(workflowsResult));
   const workflows = loadedWorkflows?.workflows ?? [];
   const pickedPath = pickedWorkflow?.projectKey === project.key ? pickedWorkflow.path : null;
-  const targetPath = workflowPath ?? pickedPath ?? workflows[0]?.path ?? null;
+  const targetPath = effectiveWorkflowPath ?? pickedPath ?? workflows[0]?.path ?? null;
   const target = workflows.find((workflow) => workflow.path === targetPath) ?? null;
 
   const settings = useEnvironmentSettings(environmentId);
@@ -178,7 +180,7 @@ export function StartClankerRunDialog({
         <DialogPanel>
           <div className="space-y-1.5">
             <Label>Project</Label>
-            {lockedProject || projects.length <= 1 ? (
+            {projects.length <= 1 ? (
               <p className="flex min-w-0 items-baseline gap-2 text-sm">
                 <span className="truncate font-medium">{project.label}</span>
                 {environmentLabel(environmentId) !== null ? (
@@ -204,11 +206,13 @@ export function StartClankerRunDialog({
 
           <div className="space-y-1.5">
             <Label>Workflow</Label>
-            {workflowPath !== null ? (
+            {effectiveWorkflowPath !== null ? (
               <p className="flex min-w-0 items-baseline gap-2 text-sm">
-                <span className="truncate font-medium">{target?.name ?? workflowPath}</span>
+                <span className="truncate font-medium">
+                  {target?.name ?? effectiveWorkflowPath}
+                </span>
                 <span className="truncate font-mono text-xs text-muted-foreground">
-                  {workflowPath}
+                  {effectiveWorkflowPath}
                 </span>
               </p>
             ) : loadedWorkflows === null ? (

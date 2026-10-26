@@ -4,15 +4,20 @@ import { parse as parseYaml } from "yaml";
 import {
   clankerDefaultsAreSet,
   clankerDependsOnOptions,
+  clankerDraftJsonIssues,
+  clankerJsonRecordError,
   clankerWorkflowDraftToObject,
   emptyClankerHookDraft,
   emptyClankerModelDraft,
   emptyClankerPromptDraft,
   emptyClankerQaCheckDraft,
+  emptyClankerSubWorkflowDraft,
   moveClankerStep,
   parseClankerWorkflowDraft,
   serializeClankerWorkflowDraft,
+  writeClankerWorkflowDraft,
   type ClankerHookDraft,
+  type ClankerStepDraft,
   type ClankerWorkflowDraft,
 } from "./clankerWorkflowForm";
 
@@ -275,6 +280,67 @@ steps:
     expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
   });
 
+  it("keeps keys that belong to a different hook or check kind", () => {
+    const content = `
+name: n
+version: "1"
+steps:
+  - name: one
+    run:
+      cmd: make
+      fn: legacy
+    hooks:
+      before:
+        - cmd: echo hi
+          fn: stray
+          args:
+            stray: true
+    qa:
+      checks:
+        - type: ref
+          target: shared/lint
+          name: stray
+          prompt: stray
+        - type: cmd
+          cmd: npm test
+          prompt: stray
+          fn: stray
+`;
+    const draft = draftOf(content);
+    const step = draft.steps[0];
+
+    expect(step?.run?.extra).toEqual({ fn: "legacy" });
+    expect(step?.hooks[0]?.hooks[0]?.extra).toEqual({
+      fn: "stray",
+      args: { stray: true },
+    });
+    expect(step?.qa.checks[0]?.extra).toEqual({ name: "stray", prompt: "stray" });
+    expect(step?.qa.checks[1]?.extra).toEqual({ prompt: "stray", fn: "stray" });
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
+  });
+
+  it("keeps non-string scalars on string-typed fields in extra", () => {
+    const content = `
+name: n
+version: 1
+steps:
+  - name: one
+    description: 7
+    depends_on:
+      - 2
+    env:
+      PORT: 8080
+`;
+    const draft = draftOf(content);
+    const step = draft.steps[0];
+
+    expect(draft.version).toBe("");
+    expect(step?.description).toBe("");
+    expect(step?.dependsOn).toEqual([]);
+    expect(step?.env).toEqual([]);
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
+  });
+
   it("reads an empty document as an empty draft", () => {
     const parsed = parseClankerWorkflowDraft("");
     expect(parsed.ok).toBe(true);
@@ -424,6 +490,387 @@ steps:
     expect(draftOf(serializeClankerWorkflowDraft(edited)).steps[0]?.prompts[0]?.text).toBe(
       "line one\nline two\n",
     );
+  });
+});
+
+const RECURSIVE_WORKFLOW = `
+name: outer
+version: "1"
+steps:
+  - name: fanout
+    conditions:
+      - when: always
+      - any:
+          - a
+          - b
+    conditions_mode: all
+    run:
+      fn: build
+      args:
+        target: web
+      runtime: node
+    workflow:
+      name: inner
+      version: "2"
+      description: Nested
+      defaults:
+        model: gpt-5
+      steps:
+        - name: middle
+          workflow:
+            name: deepest
+            version: "3"
+            steps:
+              - name: leaf
+                prompts:
+                  - text: hi
+                    context:
+                      ticket: T-1
+    qa:
+      escalate:
+        - type: HIL
+          prompt: Please review
+          model:
+            id: gpt-5
+            provider: codex
+        - type: AI
+          ref: shared/triage
+        - type: AI
+          ref:
+            name: fallback
+            version: "1"
+            steps:
+              - name: retry
+                prompts:
+                  - text: again
+        - type: AI
+          ref:
+            name: inline-step
+            prompts:
+              - text: one
+`;
+
+function editStep(
+  draft: ClankerWorkflowDraft,
+  index: number,
+  edit: (step: ClankerStepDraft) => ClankerStepDraft,
+): ClankerWorkflowDraft {
+  return { ...draft, steps: draft.steps.map((step, at) => (at === index ? edit(step) : step)) };
+}
+
+describe("recursive sub-workflows", () => {
+  it("reads an inline sub-workflow and the sub-workflow inside it", () => {
+    const draft = draftOf(RECURSIVE_WORKFLOW);
+    const inner = draft.steps[0]?.subWorkflow;
+    const deepest = inner?.steps[0]?.subWorkflow;
+
+    expect(draft.steps[0]?.workflowRef).toBe("");
+    expect(inner).toMatchObject({ name: "inner", version: "2", description: "Nested" });
+    expect(inner?.defaults.model).toBe("gpt-5");
+    expect(deepest?.name).toBe("deepest");
+    expect(deepest?.steps[0]?.prompts[0]?.context).toBe('{"ticket":"T-1"}');
+  });
+
+  it("round-trips the whole recursive document", () => {
+    const draft = draftOf(RECURSIVE_WORKFLOW);
+    const serialized = serializeClankerWorkflowDraft(draft);
+
+    expect(parseYaml(serialized)).toEqual(parseYaml(RECURSIVE_WORKFLOW));
+    expect(draftOf(serialized)).toEqual(draft);
+  });
+
+  it("writes an edit made two levels deep", () => {
+    const draft = draftOf(RECURSIVE_WORKFLOW);
+    const edited = editStep(draft, 0, (step) => {
+      const inner = step.subWorkflow;
+      if (inner === null) throw new Error("expected an inline sub-workflow");
+      return {
+        ...step,
+        subWorkflow: editStep(inner, 0, (middle) => {
+          const deepest = middle.subWorkflow;
+          if (deepest === null) throw new Error("expected a nested sub-workflow");
+          return {
+            ...middle,
+            subWorkflow: editStep(deepest, 0, (leaf) => ({ ...leaf, name: "renamed" })),
+          };
+        }),
+      };
+    });
+
+    const object = clankerWorkflowDraftToObject(edited);
+    const steps = object["steps"] as ReadonlyArray<Record<string, unknown>>;
+    const inner = steps[0]?.["workflow"] as Record<string, unknown>;
+    const innerSteps = inner["steps"] as ReadonlyArray<Record<string, unknown>>;
+    const deepest = innerSteps[0]?.["workflow"] as Record<string, unknown>;
+    const leafSteps = deepest["steps"] as ReadonlyArray<Record<string, unknown>>;
+    expect(leafSteps[0]?.["name"]).toBe("renamed");
+  });
+
+  it("switches between a path and an inline sub-workflow", () => {
+    const draft = draftOf(
+      'name: n\nversion: "1"\nsteps:\n  - name: one\n    workflow: review.yaml\n',
+    );
+    expect(draft.steps[0]?.workflowRef).toBe("review.yaml");
+    expect(draft.steps[0]?.subWorkflow).toBeNull();
+
+    const inlined = editStep(draft, 0, (step) => ({
+      ...step,
+      subWorkflow: { ...emptyClankerSubWorkflowDraft(), name: "inline" },
+    }));
+    const steps = clankerWorkflowDraftToObject(inlined)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    // The inline body wins; the path stays in the draft for the way back.
+    expect(steps[0]?.["workflow"]).toEqual({ name: "inline", version: "1" });
+
+    const backToPath = editStep(inlined, 0, (step) => ({ ...step, subWorkflow: null }));
+    const pathSteps = clankerWorkflowDraftToObject(backToPath)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    expect(pathSteps[0]?.["workflow"]).toBe("review.yaml");
+  });
+
+  it("keeps a sub-workflow the form cannot represent in extra", () => {
+    const content =
+      'name: n\nversion: "1"\nsteps:\n  - name: one\n    workflow:\n      steps: nope\n';
+    const draft = draftOf(content);
+
+    expect(draft.steps[0]?.subWorkflow).toBeNull();
+    expect(draft.steps[0]?.extra["workflow"]).toEqual({ steps: "nope" });
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
+  });
+});
+
+describe("step run, conditions and escalate handlers", () => {
+  it("reads run, conditions and conditions_mode", () => {
+    const step = draftOf(RECURSIVE_WORKFLOW).steps[0];
+
+    expect(step?.run).toMatchObject({
+      kind: "fn",
+      fn: "build",
+      args: '{"target":"web"}',
+      runtime: "node",
+    });
+    expect(step?.conditions.map((row) => row.text)).toEqual([
+      '{"when":"always"}',
+      '{"any":["a","b"]}',
+    ]);
+    expect(step?.conditionsMode).toBe("all");
+  });
+
+  it("drops a removed run block and blank condition rows", () => {
+    const draft = draftOf(RECURSIVE_WORKFLOW);
+    const edited = editStep(draft, 0, (step) => ({
+      ...step,
+      run: null,
+      conditions: [{ rowId: "c/0", text: "  " }],
+      conditionsMode: "",
+    }));
+    const steps = clankerWorkflowDraftToObject(edited)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+
+    expect(steps[0]?.["run"]).toBeUndefined();
+    expect(steps[0]?.["conditions"]).toBeUndefined();
+    expect(steps[0]?.["conditions_mode"]).toBeUndefined();
+  });
+
+  it("reads every escalate ref shape", () => {
+    const escalate = draftOf(RECURSIVE_WORKFLOW).steps[0]?.qa.escalate ?? [];
+
+    expect(escalate.map((handler) => [handler.type, handler.refKind])).toEqual([
+      ["HIL", "none"],
+      ["AI", "path"],
+      ["AI", "workflow"],
+      ["AI", "step"],
+    ]);
+    expect(escalate[0]).toMatchObject({ prompt: "Please review" });
+    expect(escalate[0]?.model).toMatchObject({ id: "gpt-5", provider: "codex" });
+    expect(escalate[1]?.refPath).toBe("shared/triage");
+    expect(escalate[2]?.refWorkflow?.steps[0]?.name).toBe("retry");
+    expect(escalate[3]?.refStep?.prompts[0]?.text).toBe("one");
+  });
+
+  it("writes an escalate handler with no ref as just its type", () => {
+    const draft = draftOf(RECURSIVE_WORKFLOW);
+    const edited = editStep(draft, 0, (step) => ({
+      ...step,
+      qa: { ...step.qa, escalate: step.qa.escalate.slice(0, 1) },
+    }));
+    const steps = clankerWorkflowDraftToObject(edited)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+
+    expect(steps[0]?.["qa"]).toEqual({
+      escalate: [
+        { type: "HIL", prompt: "Please review", model: { id: "gpt-5", provider: "codex" } },
+      ],
+    });
+  });
+
+  it("keeps escalate handlers the form cannot represent in extra", () => {
+    const content =
+      'name: n\nversion: "1"\nsteps:\n  - name: one\n    qa:\n      escalate:\n        - type: ROBOT\n';
+    const draft = draftOf(content);
+
+    expect(draft.steps[0]?.qa.escalate).toEqual([]);
+    expect(draft.steps[0]?.qa.extra["escalate"]).toEqual([{ type: "ROBOT" }]);
+    expect(clankerWorkflowDraftToObject(draft)).toEqual(parseYaml(content));
+  });
+});
+
+describe("JSON object fields", () => {
+  const WITH_ARGS = `
+name: n
+version: "1"
+steps:
+  - name: one
+    prompts:
+      - text: hi
+        context:
+          ticket: T-1
+    hooks:
+      before:
+        - fn: notify
+          args:
+            channel: ops
+        - cmd: echo hi
+          args:
+            stray: true
+    qa:
+      checks:
+        - type: fn
+          fn: audit
+          args:
+            depth: 2
+        - type: ref
+          target: shared/lint
+          runtime: bash
+`;
+
+  it("reads context and fn args as JSON text, and keeps args a kind cannot write", () => {
+    const step = draftOf(WITH_ARGS).steps[0];
+
+    expect(step?.prompts[0]?.context).toBe('{"ticket":"T-1"}');
+    expect(step?.hooks[0]?.hooks[0]).toMatchObject({ kind: "fn", args: '{"channel":"ops"}' });
+    // A `cmd` hook has no `args` in the schema, so it round-trips through extra.
+    expect(step?.hooks[0]?.hooks[1]?.args).toBe("");
+    expect(step?.hooks[0]?.hooks[1]?.extra).toEqual({ args: { stray: true } });
+    expect(step?.qa.checks[0]?.args).toBe('{"depth":2}');
+    expect(step?.qa.checks[1]?.extra).toEqual({ runtime: "bash" });
+    expect(clankerWorkflowDraftToObject(draftOf(WITH_ARGS))).toEqual(parseYaml(WITH_ARGS));
+  });
+
+  it("drops a cleared context and keeps an edited one", () => {
+    const draft = draftOf(WITH_ARGS);
+    const cleared = editStep(draft, 0, (step) => ({
+      ...step,
+      prompts: step.prompts.map((prompt) => ({ ...prompt, context: "" })),
+    }));
+    const edited = editStep(draft, 0, (step) => ({
+      ...step,
+      prompts: step.prompts.map((prompt) => ({ ...prompt, context: '{"ticket": "T-2"}' })),
+    }));
+
+    const clearedSteps = clankerWorkflowDraftToObject(cleared)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    const editedSteps = clankerWorkflowDraftToObject(edited)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    expect(clearedSteps[0]?.["prompts"]).toEqual([{ text: "hi" }]);
+    expect(editedSteps[0]?.["prompts"]).toEqual([{ text: "hi", context: { ticket: "T-2" } }]);
+  });
+
+  it("reports invalid JSON per field without dropping what was typed", () => {
+    const draft = draftOf(RECURSIVE_WORKFLOW);
+    const edited = editStep(draft, 0, (step) => {
+      const inner = step.subWorkflow;
+      if (inner === null) throw new Error("expected an inline sub-workflow");
+      return {
+        ...step,
+        conditions: [{ rowId: "c/0", text: "{oops" }],
+        run: step.run === null ? null : { ...step.run, args: "[1]" },
+        subWorkflow: editStep(inner, 0, (middle) => {
+          const deepest = middle.subWorkflow;
+          if (deepest === null) throw new Error("expected a nested sub-workflow");
+          return {
+            ...middle,
+            subWorkflow: editStep(deepest, 0, (leaf) => ({
+              ...leaf,
+              prompts: leaf.prompts.map((prompt) => ({ ...prompt, context: "nope" })),
+            })),
+          };
+        }),
+      };
+    });
+
+    expect(clankerDraftJsonIssues(edited).map((issue) => issue.path)).toEqual([
+      "steps[0].conditions[0]",
+      "steps[0].run.args",
+      "steps[0].workflow.steps[0].workflow.steps[0].prompts[0].context",
+    ]);
+    // Nothing is dropped: the raw text survives as a string value.
+    const steps = clankerWorkflowDraftToObject(edited)["steps"] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    expect(steps[0]?.["conditions"]).toEqual(["{oops"]);
+    expect(steps[0]?.["run"]).toMatchObject({ args: "[1]" });
+    expect(clankerDraftJsonIssues(draft)).toEqual([]);
+  });
+
+  it("accepts only JSON objects", () => {
+    expect(clankerJsonRecordError("")).toBeNull();
+    expect(clankerJsonRecordError("   ")).toBeNull();
+    expect(clankerJsonRecordError('{"a": 1}')).toBeNull();
+    expect(clankerJsonRecordError("[1]")).toBe("Expected a JSON object.");
+    expect(clankerJsonRecordError("1")).toBe("Expected a JSON object.");
+    expect(clankerJsonRecordError("{oops")).not.toBeNull();
+  });
+});
+
+describe("writeClankerWorkflowDraft", () => {
+  const COMMENTED = `# The pipeline.
+name: release
+version: "1"
+steps:
+  # Builds it.
+  - name: build
+    prompts:
+      - text: Build it
+  # Tests it.
+  - name: test
+    prompts:
+      - text: Test it
+`;
+
+  it("keeps comments on steps a form edit did not touch", () => {
+    const draft = draftOf(COMMENTED);
+    const edited = editStep(draft, 1, (step) => ({ ...step, description: "Runs the tests" }));
+
+    const written = writeClankerWorkflowDraft(edited, COMMENTED);
+
+    expect(written).toContain("# The pipeline.");
+    expect(written).toContain("# Builds it.");
+    expect(written).toContain("# Tests it.");
+    expect(written).toContain("description: Runs the tests");
+    expect(draftOf(written)).toEqual(edited);
+  });
+
+  it("keeps the comments of a step it edits", () => {
+    const draft = draftOf(COMMENTED);
+    const edited = editStep(draft, 0, (step) => ({ ...step, agent: "builder" }));
+
+    const written = writeClankerWorkflowDraft(edited, COMMENTED);
+
+    expect(written).toContain("# Builds it.");
+    expect(written).toContain("agent: builder");
+  });
+
+  it("falls back to a fresh document when there is no base text", () => {
+    const draft = draftOf(COMMENTED);
+
+    expect(writeClankerWorkflowDraft(draft, "")).toBe(serializeClankerWorkflowDraft(draft));
   });
 });
 

@@ -12,11 +12,9 @@ import { watchAgentSourceId } from "./watchMounts.ts";
 import { watchFirstPartyWidgetSpec } from "./watchPages.ts";
 
 /**
- * Client-side plumbing for `t3.watch-widget` export documents: the byte cap
- * and friendly failures for the import dialog, the download filename, and the
- * non-blocking preview warnings. The server re-validates everything — this
- * layer exists so a bad file fails before any RPC and the preview can flag
- * what the target environment is missing.
+ * Client-side plumbing for `t3.watch-widget` export documents: byte cap,
+ * friendly failures, download filename, and preview warnings. The server
+ * re-validates everything; this only fails bad files before any RPC.
  */
 
 /**
@@ -117,7 +115,7 @@ export function watchWidgetImportWarnings(
   const sourceId = watchAgentSourceId(document.kind);
   if (watchFirstPartyWidgetSpec(document.kind) === undefined && sourceId === undefined) {
     warnings.push(
-      `"${document.kind}" isn't a widget kind this version's catalog knows — it will render as a placeholder.`,
+      `"${document.kind}" isn't a widget kind this version's catalog knows. It will render as a placeholder.`,
     );
   }
   const provenance = document.provenance;
@@ -134,7 +132,7 @@ export function watchWidgetImportWarnings(
       );
     if (pack === undefined || !registered) {
       warnings.push(
-        `This widget's code ships with connector pack "${packId}", which isn't installed here — install the pack first or the import will fail.`,
+        `This widget's code ships with connector pack "${packId}", which isn't installed here. Install the pack first or the import will fail.`,
       );
     }
   }
@@ -145,7 +143,7 @@ export function watchWidgetImportWarnings(
     !context.instances.some((instance) => instance.id === binding && instance.archivedAt === null)
   ) {
     warnings.push(
-      "The connector this widget was bound to doesn't exist here — repoint it in Configure after importing.",
+      "The connector this widget was bound to doesn't exist here. Repoint it in Configure after importing.",
     );
   }
   return warnings;

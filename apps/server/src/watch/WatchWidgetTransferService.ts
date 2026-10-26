@@ -27,14 +27,10 @@ import * as WatchPageService from "./WatchPageService.ts";
 import * as WidgetTranspileService from "./WidgetTranspileService.ts";
 
 /**
- * Moves one widget between pages, environments, and users as a
- * `t3.watch-widget` JSON document. Export serializes the widget row and — for
- * `agent:` kinds — embeds the authored source + bridge manifest (never the
- * compiled artifact or its hashes; integrity is by recompute). Import
- * republishes embedded source through the rate-limited agent-facing `publish`
- * path — imported code is unreviewed, exactly what the cap exists for — and
- * lands the widget through the existing revision- and collision-checked
- * `addWidget`, so `pack:` provenance and archived pages keep their guards.
+ * Moves one widget between pages and environments as a `t3.watch-widget` JSON
+ * document. `agent:` kinds embed authored source + bridge manifest, never the
+ * compiled artifact; import republishes through the rate-limited `publish`
+ * path and lands via the revision- and collision-checked `addWidget`.
  */
 const AGENT_KIND_PREFIX = "agent:";
 const GRID_COLUMNS = 12;
@@ -111,46 +107,45 @@ export const layer = Layer.effect(
     const pages = yield* WatchPageService.WatchPageService;
     const sources = yield* WidgetTranspileService.WidgetTranspileService;
 
-    const exportWidget: (typeof WatchWidgetTransferService.Service)["exportWidget"] = (input) =>
-      Effect.gen(function* () {
-        const widget = yield* pages.getWidget(input.widgetId);
-        if (widget === null) {
-          return yield* transferError("widgetNotFound", "Watch widget not found.", {
-            widgetId: input.widgetId,
-          });
+    const exportWidget: (typeof WatchWidgetTransferService.Service)["exportWidget"] = Effect.fn(
+      "WatchWidgetTransferService.exportWidget",
+    )(function* (input) {
+      const widget = yield* pages.getWidget(input.widgetId);
+      if (widget === null) {
+        return yield* transferError("widgetNotFound", "Watch widget not found.", {
+          widgetId: input.widgetId,
+        });
+      }
+      let source: WatchWidgetExportDocument["source"];
+      if (widget.kind.startsWith(AGENT_KIND_PREFIX)) {
+        const sourceId = agentSourceIdOf(widget.kind);
+        const record = sourceId === null ? null : (yield* sources.get({ sourceId })).source;
+        // A document with a dangling `agent:` kind is dead weight — the
+        // widget would render its source-missing placeholder forever.
+        if (record === null) {
+          return yield* transferError(
+            "sourceUnavailable",
+            "The widget's source is not available on this server.",
+            { widgetId: input.widgetId },
+          );
         }
-        let source: WatchWidgetExportDocument["source"];
-        if (widget.kind.startsWith(AGENT_KIND_PREFIX)) {
-          const sourceId = agentSourceIdOf(widget.kind);
-          const record = sourceId === null ? null : (yield* sources.get({ sourceId })).source;
-          // A document with a dangling `agent:` kind is dead weight — the
-          // widget would render its source-missing placeholder forever.
-          if (record === null) {
-            return yield* transferError(
-              "sourceUnavailable",
-              "The widget's source is not available on this server.",
-              { widgetId: input.widgetId },
-            );
-          }
-          source = { source: record.source, manifest: record.manifest };
-        }
-        const document: WatchWidgetExportDocument = {
-          format: WATCH_WIDGET_EXPORT_FORMAT,
-          formatVersion: WATCH_WIDGET_EXPORT_FORMAT_VERSION,
-          kind: widget.kind,
-          ...(isPackProvenance(widget.provenance) ? { provenance: widget.provenance } : {}),
-          config: widget.config,
-          sizeHint: {
-            w: widget.placement.w,
-            h: widget.placement.h,
-            ...(widget.placement.minCols === undefined
-              ? {}
-              : { minCols: widget.placement.minCols }),
-          },
-          ...(source === undefined ? {} : { source }),
-        };
-        return { document };
-      });
+        source = { source: record.source, manifest: record.manifest };
+      }
+      const document: WatchWidgetExportDocument = {
+        format: WATCH_WIDGET_EXPORT_FORMAT,
+        formatVersion: WATCH_WIDGET_EXPORT_FORMAT_VERSION,
+        kind: widget.kind,
+        ...(isPackProvenance(widget.provenance) ? { provenance: widget.provenance } : {}),
+        config: widget.config,
+        sizeHint: {
+          w: widget.placement.w,
+          h: widget.placement.h,
+          ...(widget.placement.minCols === undefined ? {} : { minCols: widget.placement.minCols }),
+        },
+        ...(source === undefined ? {} : { source }),
+      };
+      return { document };
+    });
 
     /**
      * Resolves the document's `agent:` kind to a source record, or fails the
@@ -158,13 +153,13 @@ export const layer = Layer.effect(
      * the human-confirmed install — so its record is looked up for the result
      * only, and `addWidget`'s provenance check stays the gate.
      */
-    const resolveImportSource = (
-      document: WatchWidgetExportDocument,
-    ): Effect.Effect<
-      WatchWidgetSourceRecord | null,
-      WatchWidgetTransferError | WatchWidgetSourceError
-    > =>
-      Effect.gen(function* () {
+    const resolveImportSource = Effect.fn("WatchWidgetTransferService.resolveImportSource")(
+      function* (
+        document: WatchWidgetExportDocument,
+      ): Effect.fn.Return<
+        WatchWidgetSourceRecord | null,
+        WatchWidgetTransferError | WatchWidgetSourceError
+      > {
         if (!document.kind.startsWith(AGENT_KIND_PREFIX)) return null;
         const kindSourceId = agentSourceIdOf(document.kind);
         if (document.provenance !== undefined) {
@@ -217,10 +212,13 @@ export const layer = Layer.effect(
           );
         }
         return record;
-      });
+      },
+    );
 
-    const importWidget: (typeof WatchWidgetTransferService.Service)["importWidget"] = (input) =>
-      Effect.gen(function* () {
+    const importWidget: (typeof WatchWidgetTransferService.Service)["importWidget"] = Effect.fn(
+      "WatchWidgetTransferService.importWidget",
+    )(
+      function* (input) {
         const document = input.document;
         if (document.formatVersion !== WATCH_WIDGET_EXPORT_FORMAT_VERSION) {
           return yield* transferError(
@@ -228,12 +226,10 @@ export const layer = Layer.effect(
             `This widget export uses format version ${document.formatVersion}; this server understands ${WATCH_WIDGET_EXPORT_FORMAT_VERSION}.`,
           );
         }
-        // Fail fast before any publish: a missing/archived page or a stale
-        // revision rejects the addWidget anyway, and checking first keeps a
-        // doomed import from spending publish budget or leaving an orphan
-        // source record. `addWidget` still re-checks inside its own
-        // transaction — this is only the early-out, and the listed widgets
-        // double as the append-placement input.
+        // Fail fast before any publish: a missing/archived page or stale
+        // revision rejects addWidget anyway, so checking first spares the
+        // publish budget. addWidget re-checks in its own transaction; the
+        // listed widgets double as the append-placement input.
         const { pages: listedPages, widgets: listedWidgets } = yield* pages.list({
           includeArchived: true,
         });
@@ -293,17 +289,20 @@ export const layer = Layer.effect(
           ...(document.provenance === undefined ? {} : { provenance: document.provenance }),
         });
         return { widget, source };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTypedTransferError(cause)
-            ? cause
-            : new WatchPageError({
-                message: "Could not import the watch widget.",
-                pageId: input.pageId,
-                cause,
-              }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTypedTransferError(cause)
+              ? cause
+              : new WatchPageError({
+                  message: "Could not import the watch widget.",
+                  pageId: input.pageId,
+                  cause,
+                }),
+          ),
         ),
-      );
+    );
 
     return WatchWidgetTransferService.of({ exportWidget, importWidget });
   }),

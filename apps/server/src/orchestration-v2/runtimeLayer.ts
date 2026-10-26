@@ -437,6 +437,7 @@ export const layerProduction = Layer.mergeAll(
   ),
   WatchPageService.layer,
   layerWidgetTranspileProvided,
+  layerWatchWidgetTransferProvided,
   layerConnectorsProvided,
   layerConnectorPollerProvided,
   layerUserNotificationsProvided,

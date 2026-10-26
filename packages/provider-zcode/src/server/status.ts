@@ -323,25 +323,24 @@ const resolveZcodeBackend = (
     return { kind: "missing" };
   });
 
-const runZcodeBridgeCommand = (
+const runZcodeBridgeCommand = Effect.fn("runZcodeBridgeCommand")(function* (
   zcodeSettings: ZcodeSettings,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv,
-) =>
-  Effect.gen(function* () {
-    const command = zcodeSettings.binaryPath || ZCODE_ACP_SERVER_BIN;
-    const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
-    // Same env the real session spawn gets: the bridge needs the headless
-    // provider-config files resolved or it boots the backend with no registry.
-    const childEnv = { ...zcodeProviderConfigEnv(environment), ...environment };
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: childEnv,
-        shell: spawnCommand.shell,
-      }),
-    );
-  });
+) {
+  const command = zcodeSettings.binaryPath || ZCODE_ACP_SERVER_BIN;
+  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+  // Same env the real session spawn gets: the bridge needs the headless
+  // provider-config files resolved or it boots the backend with no registry.
+  const childEnv = { ...zcodeProviderConfigEnv(environment), ...environment };
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: childEnv,
+      shell: spawnCommand.shell,
+    }),
+  );
+});
 
 interface ZcodeAcpProbeResult {
   readonly authMethods: ReadonlyArray<EffectAcpSchema.AuthMethod>;
@@ -378,34 +377,31 @@ export interface ZcodeStatusProbeOptions {
  * never triggered — an auth-required answer is the probe's signal, not an
  * invitation to log in.
  */
-const discoverZcodeMetadataViaAcp = (
+const discoverZcodeMetadataViaAcp = Effect.fn("discoverZcodeMetadataViaAcp")(function* (
   zcodeSettings: ZcodeSettings,
   environment: NodeJS.ProcessEnv,
   cwd: string,
   makeRuntime: NonNullable<ZcodeStatusProbeOptions["makeRuntime"]>,
-) =>
-  Effect.gen(function* () {
-    const acp = yield* makeRuntime({ settings: zcodeSettings, environment, cwd });
-    const commandsRef = yield* Ref.make<ReadonlyArray<ServerProviderSlashCommand>>([]);
-    const commandsAdvertised = yield* Deferred.make<void>();
-    yield* acp.handleSessionUpdate((notification) =>
-      notification.update.sessionUpdate === "available_commands_update"
-        ? Ref.set(
-            commandsRef,
-            zcodeSlashCommandsFromCommands(notification.update.availableCommands),
-          ).pipe(Effect.andThen(Deferred.succeed(commandsAdvertised, undefined)), Effect.asVoid)
-        : Effect.void,
-    );
-    const started = yield* acp.start();
-    yield* Deferred.await(commandsAdvertised).pipe(
-      Effect.timeoutOption(COMMAND_ADVERTISEMENT_GRACE),
-    );
-    return {
-      authMethods: started.initializeResult.authMethods ?? [],
-      models: zcodeModelsFromConfigOptions(started.sessionSetupResult.configOptions ?? []),
-      slashCommands: yield* Ref.get(commandsRef),
-    } satisfies ZcodeAcpProbeResult;
-  }).pipe(Effect.scoped);
+) {
+  const acp = yield* makeRuntime({ settings: zcodeSettings, environment, cwd });
+  const commandsRef = yield* Ref.make<ReadonlyArray<ServerProviderSlashCommand>>([]);
+  const commandsAdvertised = yield* Deferred.make<void>();
+  yield* acp.handleSessionUpdate((notification) =>
+    notification.update.sessionUpdate === "available_commands_update"
+      ? Ref.set(
+          commandsRef,
+          zcodeSlashCommandsFromCommands(notification.update.availableCommands),
+        ).pipe(Effect.andThen(Deferred.succeed(commandsAdvertised, undefined)), Effect.asVoid)
+      : Effect.void,
+  );
+  const started = yield* acp.start();
+  yield* Deferred.await(commandsAdvertised).pipe(Effect.timeoutOption(COMMAND_ADVERTISEMENT_GRACE));
+  return {
+    authMethods: started.initializeResult.authMethods ?? [],
+    models: zcodeModelsFromConfigOptions(started.sessionSetupResult.configOptions ?? []),
+    slashCommands: yield* Ref.get(commandsRef),
+  } satisfies ZcodeAcpProbeResult;
+}, Effect.scoped);
 
 const isAcpAuthRequired = (error: unknown): boolean =>
   typeof error === "object" &&

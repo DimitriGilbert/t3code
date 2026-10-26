@@ -305,7 +305,7 @@ function normalizeEntries(input: {
   });
 }
 
-const DEFAULT_ZCODE_SETTINGS = Schema.decodeUnknownSync(ZcodeSettings)({});
+const DEFAULT_ZCODE_SETTINGS = Schema.decodeSync(ZcodeSettings)({});
 
 const recordScenario = Effect.fn("recordZcodeScenario")(function* (fixtureName: string) {
   const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find((candidate) => candidate.name === fixtureName);

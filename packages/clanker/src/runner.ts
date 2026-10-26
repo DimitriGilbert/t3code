@@ -1,41 +1,8 @@
 /**
- * Pure run engine for Clanker workflows. No I/O and no Effect: the engine is a
- * deterministic state machine that takes settlement events from the server
- * (prompt turn finished, cmd exited, step failed) and returns the next engine
- * state plus the actions the server should execute. All policy lives here so
- * it is trivially testable; all execution lives in the driving service.
- *
- * Semantics mirror `apps/cli/src/runner` in the Clanker repo:
- *
- * - `step-runner.ts`: per step, evaluate conditions -> run `before` hooks ->
- *   retry loop of attempts (prompt x model pairs, then every QA check) ->
- *   `after` hooks -> `on_error` hooks when the final attempt failed. A failed
- *   attempt is coerced to success when `qa.on_fail === "continue"`, retried
- *   while `retryCount < (step.retry ?? defaults.retry ?? 0)`, and the retry
- *   loop runs QA checks even when the prompts themselves failed.
- * - `wave-executor.ts`/`workflow-runner.ts`: steps in a wave dispatch in
- *   batches of `defaults.concurrency`; a batch's replacement only starts once
- *   every dispatched step is terminal. Any step that ends `failed` (after
- *   retry/`continue` handling) fails the whole run: later waves never start
- *   and their steps stay `pending`. Nothing after a failed wave is marked
- *   `skipped` — Clanker simply never reaches it.
- * - `wave-executor.ts` catch path: a hard step failure (thrown rather than a
- *   settled bad result) fails the step immediately with no retry, matching
- *   the engine's `stepFailed` event.
- *
- * Per-check `qa.checks[].on_fail` is richer than upstream (the Clanker parser
- * accepts `rerun`/`abort`/`continue`/`escalate` per check but its runner only
- * applies the step-level `qa.on_fail`). Here a check-level policy wins over
- * the step-level default: `continue` tolerates that check and moves on,
- * `rerun` forces an attempt retry, `abort` fails the step without retrying,
- * and `escalate` — like `qa.escalate` handlers generally — fails the step as
- * v1-unsupported. With no check-level policy the step falls back to the
- * Clanker behavior described above.
- *
- * Constructs the T3 Code runner cannot execute (`conditions`,
- * `conditions_mode`, `run`, `workflow`, `agent`, jinja2 templates, fn hooks,
- * non-cmd QA checks, escalation handlers) fail the step fast with a clear
- * reason, consistent with the `unsupported` diagnostics `parse.ts` reports.
+ * Pure run engine for Clanker workflows: a deterministic, I/O-free state
+ * machine mirroring `apps/cli/src/runner` in the Clanker repo. All policy
+ * lives here; all execution lives in the driving service. Constructs the
+ * runner cannot execute fail the step fast, like parse.ts `unsupported`.
  */
 import { buildClankerWaves } from "./dag.ts";
 import { applyClankerWorkflowDefaults } from "./defaults.ts";
@@ -291,7 +258,7 @@ const stepOutputsRecord = (
 
 const localEnv = (state: ClankerEngineState, step: ClankerStep): Record<string, string> => ({
   ...state.env,
-  ...(step.env ?? {}),
+  ...step.env,
 });
 
 const refContext = (state: ClankerEngineState, step: ClankerStep): ClankerRefContext => ({
@@ -455,8 +422,8 @@ const enterWave = (w: ClankerEngineWork): void => {
       status: restored.status,
       attempt: restored.retryCount ?? 0,
       responses: [...(restored.responses ?? [])],
-      declaredOutputs: { ...(restored.declaredOutputs ?? restored.outputs ?? {}) },
-      outputs: { ...(restored.outputs ?? {}) },
+      declaredOutputs: { ...(restored.declaredOutputs ?? restored.outputs) },
+      outputs: { ...restored.outputs },
       error: restored.error,
     });
     if (restored.status === "passed") {
@@ -475,15 +442,10 @@ const enterWave = (w: ClankerEngineWork): void => {
 };
 
 /**
- * Dispatch the next group in a hook phase that has cmd hooks. Leaves
- * `pendingHooks` non-empty while waiting on settlements. A group
- * containing an `fn` hook fails the step fast — fn hooks are
- * v1-unsupported (the `unsupported` diagnostics in parse.ts) and running
- * the group's cmd hooks without it would misreport the workflow. When the
- * step is already failing (after/on_error hooks on a failed attempt) the
- * original error wins and the hook is reported as a diagnostic instead —
- * matching Clanker, where the step always reports its own error
- * (step-runner.ts:203-213).
+ * Dispatch the next cmd-hook group, leaving `pendingHooks` non-empty while
+ * waiting on settlements. `fn` hooks are v1-unsupported and fail the step
+ * fast; on an already-failing step the original error wins and the hook is
+ * only a diagnostic (Clanker step-runner.ts:203-213).
  */
 const dispatchHookPhase = (
   w: ClankerEngineWork,
@@ -632,7 +594,7 @@ const renderStepPrompts = (
     }
     const result = renderClankerTemplate(text, {
       ...refContext(w.state, step),
-      values: { ...stepState.resolvedInputs, ...(prompt.context ?? {}) },
+      values: { ...stepState.resolvedInputs, ...prompt.context },
     });
     w.diagnostics.push(...result.diagnostics);
     rendered.push(result.text);
@@ -756,11 +718,9 @@ const enterQaPhase = (w: ClankerEngineWork, stepName: string, step: ClankerStep)
 };
 
 /**
- * Attempt outcome, mirroring the retry loop in step-runner.ts: `continue`
- * coerces a failure to success without retrying, a retry re-runs the attempt
- * (escalation handlers would reshape it — v1-unsupported), and exhausting
- * `step.retry` fails the step. Both the passing and failing exits still run
- * `after` hooks; only the failing exit continues to `on_error` hooks.
+ * Attempt outcome, mirroring step-runner.ts: `continue` coerces to success,
+ * a retry re-runs the attempt, exhausting `step.retry` fails the step. Both
+ * exits run `after` hooks; only failure continues to `on_error`.
  */
 const settleAttempt = (
   w: ClankerEngineWork,
@@ -820,7 +780,7 @@ const settleAttempt = (
       toleratedErrors: [],
       responses: [],
       outputs: {},
-      declaredOutputs: { ...(step.outputs ?? {}) },
+      declaredOutputs: { ...step.outputs },
       error: undefined,
     });
     enterPromptPhase(w, stepName, step);
@@ -964,7 +924,7 @@ const beginStep = (w: ClankerEngineWork, stepName: string): void => {
   w.state = updateStep(w.state, stepName, {
     status: "running",
     resolvedInputs,
-    declaredOutputs: { ...(step.outputs ?? {}) },
+    declaredOutputs: { ...step.outputs },
   });
 
   dispatchHookPhase(w, stepName, step, "hook-before", 0);
@@ -1089,7 +1049,7 @@ export function clankerPromptSettled(
           { prompt_index: event.promptIndex, model_id: model.id, response: event.response ?? "" },
         ]
       : stepState.responses;
-  const outputs = { ...stepState.outputs, ...(event.outputs ?? {}) };
+  const outputs = { ...stepState.outputs, ...event.outputs };
 
   w.state = updateStep(w.state, event.stepName, {
     pendingPairs,

@@ -15,6 +15,8 @@ import {
   type ClankerEngineTransition,
 } from "./runner.ts";
 
+const decodePersistedRunState = Schema.decodeSync(ClankerPersistedRunState);
+
 const workflow = (steps: ClankerWorkflow["steps"], defaults?: ClankerWorkflow["defaults"]) =>
   ({
     name: "test-workflow",
@@ -924,7 +926,7 @@ describe("clankerRunToPersistedState", () => {
       startedAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:01.000Z",
     });
-    const decoded = Schema.decodeSync(ClankerPersistedRunState)(persisted);
+    const decoded = decodePersistedRunState(persisted);
     expect(decoded.status).toBe("completed");
     expect(decoded.steps["a"]?.status).toBe("passed");
     expect(decoded.steps["a"]?.responses[0]?.response).toBe("ok");
@@ -946,7 +948,7 @@ describe("clankerRunToPersistedState", () => {
     });
     expect(persisted.steps["a"]?.status).toBe("failed");
     expect(persisted.steps["b"]?.status).toBe("pending");
-    const decoded = Schema.decodeSync(ClankerPersistedRunState)(persisted);
+    const decoded = decodePersistedRunState(persisted);
     expect(decoded.status).toBe("failed");
   });
 });

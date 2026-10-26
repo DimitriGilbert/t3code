@@ -267,6 +267,11 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             onClick={handleClankerClick}
           />
           <SidebarUtilityItem
+            icon={<WorkflowIcon />}
+            label="Clanker"
+            onClick={handleClankerClick}
+          />
+          <SidebarUtilityItem
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"
             onClick={handleUsageClick}

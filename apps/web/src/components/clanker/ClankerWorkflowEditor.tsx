@@ -1,10 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import type {
+import {
   ClankerWorkflowPath,
-  ClankerDiagnostic,
-  ClankerWorkflowDocument,
-  EnvironmentId,
-  ProjectId,
+  type ClankerDiagnostic,
+  type ClankerWorkflowDocument,
+  type EnvironmentId,
+  type ProjectId,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -18,7 +18,6 @@ import {
   CircleXIcon,
   LayersIcon,
   ListChecksIcon,
-  PlayIcon,
   SaveIcon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -126,26 +125,23 @@ export function ClankerWorkflowEditor({
   projectId,
   path,
   projectLabel,
-  canRun,
   onBack,
-  onRun,
 }: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
-  readonly path: ClankerWorkflowPath;
+  readonly path: string;
   readonly projectLabel: string;
-  readonly canRun: boolean;
   readonly onBack: () => void;
-  readonly onRun: () => void;
 }) {
+  const workflowPath = ClankerWorkflowPath.make(path);
   const documentQuery = useEnvironmentQuery(
-    clankerEnvironment.workflow({ environmentId, input: { projectId, path } }),
+    clankerEnvironment.workflow({ environmentId, input: { projectId, path: workflowPath } }),
   );
   const listResult = useAtomValue(
     clankerEnvironment.workflowsLive({ environmentId, input: { projectId } }),
   );
   const summary = Option.getOrNull(AsyncResult.value(listResult))?.workflows.find(
-    (workflow) => workflow.path === path,
+    (workflow) => workflow.path === workflowPath,
   );
   const canWrite = useAtomValue(clankerEnvironment.updateWorkflow.permissionAtom(environmentId));
 
@@ -199,7 +195,7 @@ export function ClankerWorkflowEditor({
     setSaving(true);
     const result = await updateWorkflow({
       environmentId,
-      input: { projectId, path, content: text },
+      input: { projectId, path: workflowPath, content: text },
     });
     setSaving(false);
     if (result._tag === "Failure") {
@@ -217,7 +213,7 @@ export function ClankerWorkflowEditor({
     setSavedDocument(result.value);
   };
 
-  const fileName = clankerWorkflowFileName(path);
+  const fileName = clankerWorkflowFileName(workflowPath);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
       <WorkspacePageHeader electron={isElectron} className="relative bg-background">
@@ -256,16 +252,6 @@ export function ClankerWorkflowEditor({
             {summary.description}
           </span>
         ) : null}
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={!canRun || dirty}
-          title={dirty ? "Save the workflow before running it" : undefined}
-          onClick={onRun}
-        >
-          <PlayIcon />
-          Run
-        </Button>
         <Button size="sm" disabled={!dirty || saving || !canWrite} onClick={() => void save()}>
           <SaveIcon />
           {saving ? "Saving…" : "Save"}
@@ -297,7 +283,7 @@ export function ClankerWorkflowEditor({
               className="min-h-0 flex-1 resize-none bg-transparent p-4 font-mono text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-64"
             />
             <div className="flex shrink-0 items-center gap-2 border-t border-border/60 px-4 py-1.5 text-2xs text-muted-foreground">
-              <span className="truncate font-mono">{path}</span>
+              <span className="truncate font-mono">{workflowPath}</span>
               <span aria-hidden>·</span>
               <span>{projectLabel}</span>
               {dirty ? (

@@ -210,26 +210,11 @@ export const layer = Layer.effect(
         (fileName) =>
           Effect.gen(function* () {
             const absolutePath = path.join(workflowsDir, fileName);
-            const stat = yield* fileSystem.stat(absolutePath).pipe(
-              Effect.catchIf(isMissingEntry, () => Effect.succeed(null)),
-              Effect.mapError(
-                (cause) =>
-                  new ClankerWorkflowReadError({
-                    path: `${WORKFLOWS_DIR_RELATIVE}/${fileName}`,
-                    cause,
-                  }),
-              ),
-            );
+            const stat = yield* fileSystem
+              .stat(absolutePath)
+              .pipe(Effect.catchIf(isMissingEntry, () => Effect.succeed(null)));
             if (stat === null || stat.type !== "File") return null;
-            const content = yield* fileSystem.readFileString(absolutePath).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ClankerWorkflowReadError({
-                    path: `${WORKFLOWS_DIR_RELATIVE}/${fileName}`,
-                    cause,
-                  }),
-              ),
-            );
+            const content = yield* fileSystem.readFileString(absolutePath);
             return toSummary({
               fileName,
               content,
@@ -238,7 +223,15 @@ export const layer = Layer.effect(
                 onSome: (mtime) => mtime.toISOString(),
               }),
             });
-          }),
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ClankerWorkflowReadError({
+                  path: `${WORKFLOWS_DIR_RELATIVE}/${fileName}`,
+                  cause,
+                }),
+            ),
+          ),
         { concurrency: 8 },
       ).pipe(
         Effect.map((summaries) =>

@@ -5,8 +5,11 @@
  * @module provider-zcode/server/zcodeRows
  */
 import type {
+  ModelSelection,
   OrchestrationV2TurnItem,
   ProviderApprovalDecision,
+  ProviderInstanceId,
+  ProviderInteractionMode,
   ProviderRequestKind,
   RuntimeMode,
 } from "@t3tools/contracts";
@@ -232,6 +235,45 @@ export function zcodeSessionModeForRuntimeMode(
       return unreachable;
     }
   }
+}
+
+/**
+ * Full per-input execution state for a sendText/firstInput intent:
+ * T3's permission-shaped runtimeMode maps to zcode `mode`; plan mode is the
+ * orthogonal `planEnabled` flag (zcode `mode:"plan"` collapses to it).
+ */
+export function zcodeExecutionStateForRuntimePolicy(input: {
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+}): { readonly mode: ZCodeSchema.SubmissionMode; readonly planEnabled: boolean } {
+  return {
+    mode: zcodeSessionModeForRuntimeMode(input.runtimeMode),
+    planEnabled: input.interactionMode === "plan",
+  };
+}
+
+/**
+ * The session config projection (provider/model/thought or the pinned
+ * modelSelection) rendered as a T3 ModelSelection for
+ * providerThread.nativeMetadata — how zcode-side model switches surface.
+ */
+export function zcodeReportedModelSelection(input: {
+  readonly config: ZCodeSchema.SessionConfigState | null;
+  readonly instanceId: ProviderInstanceId;
+}): ModelSelection | undefined {
+  const config = input.config;
+  if (config === null) return undefined;
+  const providerId = config.modelSelection?.providerId ?? config.provider;
+  const modelId = config.modelSelection?.modelId ?? config.model;
+  if (providerId === "" || modelId === "") return undefined;
+  const thought =
+    config.modelSelection?.options?.reasoningLevel ??
+    (config.thought === "" ? undefined : config.thought);
+  return {
+    instanceId: input.instanceId,
+    model: `${providerId}/${modelId}`,
+    options: thought === undefined ? [] : [{ id: "reasoningEffort", value: thought }],
+  };
 }
 
 type PermissionOption = ZCodeSchema.PermissionRequestPayload["options"][number];

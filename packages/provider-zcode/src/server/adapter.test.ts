@@ -2,7 +2,10 @@ import { assert, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import type * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
-import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ProviderThread,
+  OrchestrationV2RuntimeRequest,
+} from "@t3tools/contracts";
 
 import { ZcodeSettings } from "../settings.ts";
 
@@ -244,7 +247,13 @@ const snapshotFrame = {
   rows: { window: [], totalCount: 0, firstRowId: null },
 };
 
-const wireFrame = (ordinal: number, payload: unknown, deliveryKind = "online") => ({
+const wireFrame = (
+  ordinal: number,
+  payload: unknown,
+  deliveryKind = "online",
+  topic = "conversation/s1",
+  subscriptionId = "sub1",
+) => ({
   method: "v4/conversation/frame",
   params: {
     wireVersion: 3,
@@ -252,11 +261,11 @@ const wireFrame = (ordinal: number, payload: unknown, deliveryKind = "online") =
     deliveryKind,
     logicalFrameId: `lf-${ordinal}`,
     logicalFrameOrdinal: ordinal,
-    topic: "conversation/s1",
-    subscriptionId: "sub1",
+    topic,
+    subscriptionId,
     frame: {
-      topic: "conversation/s1",
-      subscriptionId: "sub1",
+      topic,
+      subscriptionId,
       fromSeq: ordinal - 1,
       toSeq: ordinal,
       sentAt: 1735689600000,
@@ -1626,7 +1635,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
             } as never,
           });
           const requestEvents = yield* Queue.unbounded<{
-            readonly id: string;
+            readonly id: OrchestrationV2RuntimeRequest["id"];
             readonly status: string;
             readonly nativeId: string | null | undefined;
           }>();
@@ -1960,6 +1969,1161 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         assert.isNull(st.failure, JSON.stringify(st.failure));
         assert.equal(st.cursor, transcript.entries.length);
       }),
+    );
+
+    const rollbackRows = [
+      {
+        rowId: 1,
+        createdAt: 1735689600000,
+        createdAtSeq: 1,
+        turnId: "turn-1",
+        kind: "turnHeader",
+        origin: "userInput",
+        state: "completedSuccess",
+        startedAt: 1735689600000,
+        endedAt: 1735689601000,
+      },
+      {
+        rowId: 2,
+        createdAt: 1735689600100,
+        createdAtSeq: 2,
+        turnId: "turn-1",
+        kind: "userInput",
+        text: "first",
+        origin: "realUser",
+        entityId: "ent-u2",
+      },
+      {
+        rowId: 3,
+        createdAt: 1735689600200,
+        createdAtSeq: 3,
+        turnId: "turn-1",
+        kind: "assistantText",
+        text: "one",
+        state: "complete",
+        entityId: "ent-a3",
+        actions: { canFork: true },
+      },
+      {
+        rowId: 4,
+        createdAt: 1735689601000,
+        createdAtSeq: 4,
+        turnId: "turn-2",
+        kind: "turnHeader",
+        origin: "userInput",
+        state: "completedSuccess",
+        startedAt: 1735689601000,
+        endedAt: 1735689602000,
+      },
+      {
+        rowId: 5,
+        createdAt: 1735689601100,
+        createdAtSeq: 5,
+        turnId: "turn-2",
+        kind: "userInput",
+        text: "second",
+        origin: "realUser",
+        entityId: "ent-u5",
+      },
+      {
+        rowId: 6,
+        createdAt: 1735689601200,
+        createdAtSeq: 6,
+        turnId: "turn-2",
+        kind: "assistantText",
+        text: "two",
+        state: "complete",
+        entityId: "ent-a6",
+        actions: { canFork: true },
+      },
+    ];
+    const rollbackSnapshot = {
+      ...snapshotFrame,
+      revision: 7,
+      control: { ...snapshotFrame.control, phase: "completedSuccess", sessionEnded: true },
+      rows: { window: rollbackRows, totalCount: rollbackRows.length, firstRowId: null },
+    };
+    const seededSessionEntries = (clientTag: string) => [
+      {
+        type: "emit_inbound" as const,
+        frame: {
+          method: "startup/storageState",
+          params: {
+            schemaVersion: 1,
+            attemptId: "a1",
+            sequence: 1,
+            databaseId: "db",
+            databaseKind: "session",
+            phase: "ready",
+            elapsedMs: 1,
+          },
+        },
+      },
+      {
+        type: "expect_outbound" as const,
+        frame: {
+          id: 1,
+          method: "v4/command",
+          params: {
+            commandId: "<ignored>",
+            clientId: clientTag,
+            sessionId: null,
+            issuedAt: "<ignored>",
+            type: "createSession",
+            payload: {
+              workspaceId: "/tmp/ws",
+              config: {
+                mode: "build",
+                planEnabled: false,
+                provider: PROVIDER_ID,
+                model: MODEL_ID,
+                thought: "low",
+                modelSelection: {
+                  providerId: PROVIDER_ID,
+                  modelId: MODEL_ID,
+                  options: { reasoningLevel: "low" },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        type: "emit_inbound" as const,
+        frame: {
+          id: 1,
+          result: {
+            commandId: "c1",
+            status: "accepted",
+            revisionAtDecision: 0,
+            result: { type: "createSession", sessionId: "s1" },
+          },
+        },
+      },
+      {
+        type: "expect_outbound" as const,
+        frame: {
+          id: 2,
+          method: "v4/conversation/subscribe",
+          params: {
+            topic: "conversation/s1",
+            connectionId: clientTag,
+            clientMode: "desktop-continuous",
+          },
+        },
+      },
+      {
+        type: "emit_inbound" as const,
+        frame: {
+          id: 2,
+          result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+        },
+      },
+      {
+        type: "emit_inbound" as const,
+        frame: wireFrame(1, { kind: "snapshot", snapshot: rollbackSnapshot }, "initial"),
+      },
+    ];
+    const makeReplayOpenClient =
+      (driver: ZCodeReplay.ZCodeAppServerReplayDriver) => (_input: ZcodeAppServerSpawnInput) =>
+        Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+          Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+          Effect.mapError(
+            (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+          ),
+        );
+    const sessionOpenInput = {
+      threadId: "thread-1" as never,
+      modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+      runtimePolicy: {
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/tmp/ws",
+        reasoningEffort: "low",
+      } as never,
+    };
+
+    it.effect(
+      "rolls back to a provider turn by forking the session and re-pointing the thread",
+      () =>
+        Effect.gen(function* () {
+          const transcript = {
+            provider: "zcode",
+            protocol: "zcode.app-server-v4",
+            version: "1",
+            scenario: "p5 rollback provider_turn",
+            entries: [
+              ...seededSessionEntries("t3-ps5"),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps5",
+                    sessionId: "s1",
+                    baseRevision: 7,
+                    baseLogEpoch: "e1",
+                    issuedAt: "<ignored>",
+                    type: "forkAssistant",
+                    payload: { target: { rowId: 3, entityId: "ent-a3" } },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 3,
+                  result: {
+                    commandId: "c3",
+                    status: "accepted",
+                    revisionAtDecision: 8,
+                    result: { type: "forkAssistant", sessionId: "s2" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "v4/conversation/unsubscribe",
+                  params: {
+                    topic: "conversation/s1",
+                    subscriptionId: "sub1",
+                    connectionId: "t3-ps5",
+                  },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: {} } },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 5,
+                  method: "session/close",
+                  params: { sessionId: "s1" },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 5, result: { closed: true } } },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 6,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/s2",
+                    connectionId: "t3-ps5",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 6,
+                  result: { ack: { subscriptionId: "sub2", mode: "snapshot", logEpoch: "e2" } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  1,
+                  {
+                    kind: "snapshot",
+                    snapshot: {
+                      ...rollbackSnapshot,
+                      sessionId: "s2",
+                      logEpoch: "e2",
+                      rows: {
+                        window: rollbackRows.slice(0, 3),
+                        totalCount: 3,
+                        firstRowId: null,
+                      },
+                    },
+                  },
+                  "initial",
+                  "conversation/s2",
+                  "sub2",
+                ),
+              },
+            ],
+          } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+          const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+          const adapter = yield* makeZcodeAdapterV2({
+            instanceId: "zcode-test" as never,
+            settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+            environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+            openClient: makeReplayOpenClient(driver),
+          });
+          const runtime = yield* adapter
+            .openSession({ ...sessionOpenInput, providerSessionId: "ps5" as never })
+            .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+          const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+          const snapshot = yield* runtime.readThreadSnapshot({ providerThread });
+          const boundaryTurn = snapshot.providerTurns.find(
+            (turn) => turn.nativeTurnRef?.nativeId === "turn-1",
+          );
+          if (boundaryTurn === undefined) {
+            return yield* Effect.die("boundary provider turn missing from snapshot");
+          }
+          const rolledBack = yield* runtime.rollbackThread({
+            providerThread,
+            target: {
+              type: "provider_turn",
+              checkpointId: "cp-1" as never,
+              appRunOrdinal: 1,
+              providerTurn: boundaryTurn,
+            },
+            providerThreadTurns: snapshot.providerTurns,
+          });
+          assert.equal(rolledBack.providerThread.id, providerThread.id);
+          assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "s2");
+          assert.equal(rolledBack.providerThread.nativeConversationHeadRef?.nativeId, "turn-1");
+          assert.equal(rolledBack.providerThread.status, "idle");
+          const st = yield* Ref.get(driver.state);
+          assert.isNull(st.failure, JSON.stringify(st.failure));
+          assert.equal(st.cursor, transcript.entries.length);
+        }),
+    );
+
+    it.effect("rolls back to thread start by adopting a fresh empty session", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p5 rollback thread_start",
+          entries: [
+            ...seededSessionEntries("t3-ps6"),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-ps6",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      mode: "build",
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 8,
+                  result: { type: "createSession", sessionId: "s3" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/conversation/unsubscribe",
+                params: {
+                  topic: "conversation/s1",
+                  subscriptionId: "sub1",
+                  connectionId: "t3-ps6",
+                },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+            {
+              type: "expect_outbound",
+              frame: { id: 5, method: "session/close", params: { sessionId: "s1" } },
+            },
+            { type: "emit_inbound", frame: { id: 5, result: { closed: true } } },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 6,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s3",
+                  connectionId: "t3-ps6",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 6,
+                result: { ack: { subscriptionId: "sub3", mode: "snapshot", logEpoch: "e3" } },
+              },
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "ps6" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        yield* runtime.readThreadSnapshot({ providerThread });
+        const rolledBack = yield* runtime.rollbackThread({
+          providerThread,
+          target: { type: "thread_start", checkpointId: "cp-0" as never, appRunOrdinal: 0 },
+          providerThreadTurns: [],
+        });
+        assert.equal(rolledBack.providerThread.id, providerThread.id);
+        assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "s3");
+        assert.isNull(rolledBack.providerThread.nativeConversationHeadRef);
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("forks a thread at a provider turn boundary and subscribes the child", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p5 forkThread",
+          entries: [
+            ...seededSessionEntries("t3-ps7"),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-ps7",
+                  sessionId: "s1",
+                  baseRevision: 7,
+                  baseLogEpoch: "e1",
+                  issuedAt: "<ignored>",
+                  type: "forkAssistant",
+                  payload: { target: { rowId: 3, entityId: "ent-a3" } },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 8,
+                  result: { type: "forkAssistant", sessionId: "s2" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s2",
+                  connectionId: "t3-ps7",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: { ack: { subscriptionId: "sub2", mode: "snapshot", logEpoch: "e2" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                1,
+                {
+                  kind: "snapshot",
+                  snapshot: {
+                    ...rollbackSnapshot,
+                    sessionId: "s2",
+                    logEpoch: "e2",
+                    rows: { window: rollbackRows.slice(0, 3), totalCount: 3, firstRowId: null },
+                  },
+                },
+                "initial",
+                "conversation/s2",
+                "sub2",
+              ),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "ps7" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const snapshot = yield* runtime.readThreadSnapshot({ providerThread });
+        const boundaryTurn = snapshot.providerTurns.find(
+          (turn) => turn.nativeTurnRef?.nativeId === "turn-1",
+        );
+        if (boundaryTurn === undefined) {
+          return yield* Effect.die("boundary provider turn missing from snapshot");
+        }
+        const forked = yield* runtime.forkThread({
+          sourceProviderThread: providerThread,
+          sourceProviderTurns: snapshot.providerTurns,
+          providerTurnId: boundaryTurn.id,
+          targetThreadId: "thread-2" as never,
+        });
+        assert.equal(forked.appThreadId, "thread-2");
+        assert.equal(forked.nativeThreadRef?.nativeId, "s2");
+        assert.equal(forked.forkedFrom?.providerThreadId, providerThread.id);
+        assert.equal(forked.forkedFrom?.providerTurnId, boundaryTurn.id);
+        // Fork keeps the source subscribed; only the new session is added.
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect(
+      "projects a subagent child thread, subscribes a running child, and reports pending work",
+      () =>
+        Effect.gen(function* () {
+          const childSnapshot = {
+            ...snapshotFrame,
+            sessionId: "child-1",
+            logEpoch: "ec1",
+            control: { ...snapshotFrame.control, phase: "running", sessionEnded: false },
+          };
+          const transcript = {
+            provider: "zcode",
+            protocol: "zcode.app-server-v4",
+            version: "1",
+            scenario: "p5 subagent child",
+            entries: [
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "startup/storageState",
+                  params: {
+                    schemaVersion: 1,
+                    attemptId: "a1",
+                    sequence: 1,
+                    databaseId: "db",
+                    databaseKind: "session",
+                    phase: "ready",
+                    elapsedMs: 1,
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 1,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps8",
+                    sessionId: null,
+                    issuedAt: "<ignored>",
+                    type: "createSession",
+                    payload: {
+                      workspaceId: "/tmp/ws",
+                      config: {
+                        mode: "build",
+                        planEnabled: false,
+                        provider: PROVIDER_ID,
+                        model: MODEL_ID,
+                        thought: "low",
+                        modelSelection: {
+                          providerId: PROVIDER_ID,
+                          modelId: MODEL_ID,
+                          options: { reasoningLevel: "low" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 1,
+                  result: {
+                    commandId: "c1",
+                    status: "accepted",
+                    revisionAtDecision: 0,
+                    result: { type: "createSession", sessionId: "s1" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 2,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/s1",
+                    connectionId: "t3-ps8",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 2,
+                  result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  1,
+                  {
+                    kind: "snapshot",
+                    snapshot: {
+                      ...snapshotFrame,
+                      subagents: {
+                        revision: 1,
+                        childSessionIds: [],
+                        running: [],
+                        endedTotal: 0,
+                      },
+                    },
+                  },
+                  "initial",
+                ),
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps8",
+                    sessionId: "s1",
+                    issuedAt: "<ignored>",
+                    type: "sendText",
+                    payload: {
+                      text: "spawn",
+                      requestedDelivery: "startNow",
+                      heldQueueDisposition: "keepQueueAndSend",
+                      mode: "build",
+                      planEnabled: false,
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 3,
+                  result: {
+                    commandId: "c3",
+                    status: "accepted",
+                    revisionAtDecision: 1,
+                    result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(2, {
+                  kind: "deltas",
+                  deltas: [
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 1,
+                        createdAt: 1735689600000,
+                        createdAtSeq: 1,
+                        turnId: "turn-1",
+                        kind: "turnHeader",
+                        origin: "userInput",
+                        state: "running",
+                        startedAt: 1735689600000,
+                        sourceCommandId: "<sendText-commandId>",
+                      },
+                    },
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 2,
+                        createdAt: 1735689600100,
+                        createdAtSeq: 2,
+                        turnId: "turn-1",
+                        kind: "subagent",
+                        subagentType: "Explore",
+                        status: "running",
+                        summaryText: "",
+                        childSessionId: "child-1",
+                      },
+                    },
+                    {
+                      op: "state.updated",
+                      patch: {
+                        subagents: {
+                          revision: 2,
+                          childSessionIds: ["child-1"],
+                          running: [
+                            {
+                              childSessionId: "child-1",
+                              subagentType: "Explore",
+                              title: "Explore",
+                              status: "running",
+                            },
+                          ],
+                          endedTotal: 0,
+                        },
+                        control: { ...snapshotFrame.control },
+                      },
+                    },
+                  ],
+                }),
+              },
+              // Running children are subscribed eagerly for live status.
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/child-1",
+                    connectionId: "t3-ps8",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 4,
+                  result: { ack: { subscriptionId: "subc1", mode: "snapshot", logEpoch: "ec1" } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  1,
+                  { kind: "snapshot", snapshot: childSnapshot },
+                  "initial",
+                  "conversation/child-1",
+                  "subc1",
+                ),
+              },
+            ],
+          } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+          const sentCommandId = yield* Ref.make<string | undefined>(undefined);
+          const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+            onOutbound: (actual) => {
+              const frame = actual as {
+                method?: string;
+                params?: { type?: string; commandId?: string };
+              };
+              return frame.method === "v4/command" && frame.params?.type === "sendText"
+                ? Ref.set(sentCommandId, frame.params.commandId)
+                : Effect.void;
+            },
+            beforeEmitInbound: (entry) =>
+              Ref.get(sentCommandId).pipe(
+                Effect.andThen((commandId) =>
+                  Effect.sync(() => {
+                    const params = (
+                      entry.frame as {
+                        params?: {
+                          frame?: {
+                            payload?: { deltas?: Array<{ row?: Record<string, unknown> }> };
+                          };
+                        };
+                      }
+                    ).params?.frame?.payload;
+                    for (const delta of params?.deltas ?? []) {
+                      if (delta.row?.sourceCommandId === "<sendText-commandId>") {
+                        delta.row.sourceCommandId = commandId;
+                      }
+                    }
+                  }),
+                ),
+              ),
+          });
+          const adapter = yield* makeZcodeAdapterV2({
+            instanceId: "zcode-test" as never,
+            settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+            environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+            openClient: makeReplayOpenClient(driver),
+          });
+          const allocator = yield* IdAllocator.IdAllocatorV2;
+          const runtime = yield* adapter
+            .openSession({ ...sessionOpenInput, providerSessionId: "ps8" as never })
+            .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+          const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+          const childThreadId = allocator.derive.threadFromProviderThread({
+            driver: "zcode" as never,
+            nativeThreadId: "child-1",
+            providerInstanceId: "zcode-test" as never,
+          });
+          const childProviderThreadId = allocator.derive.providerThread({
+            driver: "zcode" as never,
+            nativeThreadId: "child-1",
+            providerInstanceId: "zcode-test" as never,
+          });
+          const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+          yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+            Effect.forkScoped,
+          );
+          const awaitEvent = Effect.fnUntraced(function* (
+            predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+          ) {
+            for (;;) {
+              const event = yield* Queue.take(seen);
+              if (predicate(event)) return event;
+            }
+          });
+          yield* runtime.readThreadSnapshot({ providerThread });
+          yield* runtime.startTurn({
+            appThread: {
+              id: "thread-1",
+              title: "Parent thread",
+              lineage: { rootThreadId: "thread-1" },
+              modelSelection: { instanceId: "zcode-test", model: `${PROVIDER_ID}/${MODEL_ID}` },
+            } as never,
+            threadId: "thread-1" as never,
+            runId: "run-1" as never,
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: "attempt-1" as never,
+            rootNodeId: "node-1" as never,
+            providerThread,
+            message: {
+              messageId: "msg-1" as never,
+              text: "spawn",
+              attachments: [],
+              createdBy: null,
+              creationSource: "web",
+            } as never,
+            modelSelection: sessionOpenInput.modelSelection,
+            runtimePolicy: sessionOpenInput.runtimePolicy,
+          });
+          const created = yield* awaitEvent((event) => event.type === "app_thread.created");
+          assert.equal(
+            created.type === "app_thread.created" ? created.appThread.id : undefined,
+            childThreadId,
+          );
+          const childUpdated = yield* awaitEvent(
+            (event) =>
+              event.type === "provider_thread.updated" &&
+              event.providerThread.nativeThreadRef?.nativeId === "child-1",
+          );
+          assert.equal(
+            childUpdated.type === "provider_thread.updated"
+              ? childUpdated.providerThread.forkedFrom?.providerThreadId
+              : undefined,
+            providerThread.id,
+          );
+          const subagent = yield* awaitEvent((event) => event.type === "subagent.updated");
+          assert.equal(
+            subagent.type === "subagent.updated" ? subagent.subagent.childThreadId : undefined,
+            childThreadId,
+          );
+          assert.equal(
+            subagent.type === "subagent.updated" ? subagent.subagent.providerThreadId : undefined,
+            childProviderThreadId,
+          );
+          // The running-subagents patch lands before its frame's
+          // provider_thread.updated; that emit is the apply milestone.
+          yield* awaitEvent(
+            (event) =>
+              event.type === "provider_thread.updated" &&
+              event.providerThread.nativeThreadRef?.nativeId === "s1" &&
+              event.providerThread.status === "active",
+          );
+          const hasPending = runtime.hasPendingBackgroundWork ?? Effect.succeed(false);
+          const forThread =
+            runtime.hasPendingBackgroundWorkForThread ?? (() => Effect.succeed(false));
+          assert.isTrue(yield* hasPending);
+          assert.isTrue(yield* forThread(providerThread));
+          const st = yield* Ref.get(driver.state);
+          assert.isNull(st.failure, JSON.stringify(st.failure));
+          assert.equal(st.cursor, transcript.entries.length);
+        }),
+    );
+
+    it.effect("reports retained native turns when upstream truncates the row window", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p5 retained turns on row.removed",
+          entries: [
+            ...seededSessionEntries("t3-ps9"),
+            // A committed provider-side rewind drops turn-2's rows; the
+            // surviving turnHeader ids go out on provider_thread.updated.
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [{ op: "row.removed", fromRowId: 4 }],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "ps9" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        yield* runtime.readThreadSnapshot({ providerThread });
+        const retained = yield* Effect.gen(function* () {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (event.type === "provider_thread.updated" && event.retainedNativeTurnIds) {
+              return event.retainedNativeTurnIds;
+            }
+          }
+        });
+        assert.deepEqual([...retained], ["turn-1"]);
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect(
+      "detects pending work from background works and the goal loop, not session liveness",
+      () =>
+        Effect.gen(function* () {
+          const idleControl = {
+            ...snapshotFrame.control,
+            phase: "completedSuccess",
+            sessionEnded: false,
+          };
+          const transcript = {
+            provider: "zcode",
+            protocol: "zcode.app-server-v4",
+            version: "1",
+            scenario: "p5 pending background work signals",
+            entries: [
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "startup/storageState",
+                  params: {
+                    schemaVersion: 1,
+                    attemptId: "a1",
+                    sequence: 1,
+                    databaseId: "db",
+                    databaseKind: "session",
+                    phase: "ready",
+                    elapsedMs: 1,
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 1,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps10",
+                    sessionId: null,
+                    issuedAt: "<ignored>",
+                    type: "createSession",
+                    payload: {
+                      workspaceId: "/tmp/ws",
+                      config: {
+                        mode: "build",
+                        planEnabled: false,
+                        provider: PROVIDER_ID,
+                        model: MODEL_ID,
+                        thought: "low",
+                        modelSelection: {
+                          providerId: PROVIDER_ID,
+                          modelId: MODEL_ID,
+                          options: { reasoningLevel: "low" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 1,
+                  result: {
+                    commandId: "c1",
+                    status: "accepted",
+                    revisionAtDecision: 0,
+                    result: { type: "createSession", sessionId: "s1" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 2,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/s1",
+                    connectionId: "t3-ps10",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 2,
+                  result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+                },
+              },
+              // A live session carrying every pending signal at once: running
+              // background work, a running subagent, and an active goal loop.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  1,
+                  {
+                    kind: "snapshot",
+                    snapshot: {
+                      ...snapshotFrame,
+                      control: idleControl,
+                      backgroundWorks: [
+                        {
+                          workId: "w1",
+                          kind: "bash",
+                          title: "sleep",
+                          status: "running",
+                          startedAt: 1735689600000,
+                          anchorRowId: null,
+                        },
+                      ],
+                      subagents: {
+                        revision: 1,
+                        childSessionIds: ["c1"],
+                        running: [
+                          {
+                            childSessionId: "c1",
+                            subagentType: "t",
+                            title: "t",
+                            status: "running",
+                          },
+                        ],
+                        endedTotal: 0,
+                      },
+                      goal: {
+                        objective: "keep going",
+                        status: "active",
+                        iteration: 1,
+                        verifications: [],
+                      },
+                    },
+                  },
+                  "initial",
+                ),
+              },
+              // Everything clears while sessionEnded stays false — a live
+              // session alone is not pending work.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(2, {
+                  kind: "deltas",
+                  deltas: [
+                    {
+                      op: "state.updated",
+                      patch: {
+                        backgroundWorks: [],
+                        subagents: {
+                          revision: 2,
+                          childSessionIds: ["c1"],
+                          running: [],
+                          endedTotal: 1,
+                        },
+                        goal: null,
+                        control: idleControl,
+                      },
+                    },
+                  ],
+                }),
+              },
+            ],
+          } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+          const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+          const adapter = yield* makeZcodeAdapterV2({
+            instanceId: "zcode-test" as never,
+            settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+            environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+            openClient: makeReplayOpenClient(driver),
+          });
+          const runtime = yield* adapter
+            .openSession({ ...sessionOpenInput, providerSessionId: "ps10" as never })
+            .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+          const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+          const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+          yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+            Effect.forkScoped,
+          );
+          const awaitProviderThreadUpdate = Effect.fnUntraced(function* () {
+            for (;;) {
+              const event = yield* Queue.take(seen);
+              if (event.type === "provider_thread.updated") return event;
+            }
+          });
+          yield* runtime.readThreadSnapshot({ providerThread });
+          const hasPending = runtime.hasPendingBackgroundWork ?? Effect.succeed(false);
+          // Signals are already applied once readThreadSnapshot returns.
+          assert.isTrue(yield* hasPending);
+          // Each control patch republishes provider_thread.updated — the apply
+          // milestone. After the clearing emit the live-but-idle session is not
+          // pending work.
+          yield* awaitProviderThreadUpdate();
+          yield* awaitProviderThreadUpdate();
+          assert.isFalse(yield* hasPending);
+          const st = yield* Ref.get(driver.state);
+          assert.isNull(st.failure, JSON.stringify(st.failure));
+          assert.equal(st.cursor, transcript.entries.length);
+        }),
     );
   },
 );

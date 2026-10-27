@@ -68,6 +68,11 @@ export class ZCodeAppServerClient extends Context.Service<
         ZCodeError.ZCodeAppServerError
       >,
     ) => Effect.Effect<void>;
+    /**
+     * Handlers run on dedicated fibers off the read loop (like upstream's
+     * unawaited listeners), so they may yield client.request/notify safely.
+     * Handler failures are swallowed, matching upstream's fire-and-forget.
+     */
     readonly handleServerNotification: <M extends ZCodeRpc.ServerNotificationMethod>(
       method: M,
       handler: (
@@ -109,6 +114,9 @@ const makeStorageGate = Effect.fnUntraced(function* (required: boolean) {
   const current = yield* Ref.make(Option.none<ZCodeSchema.ZCodeStorageStartupState>());
   const state = yield* Ref.make<StorageGatePhase>(required ? "waiting" : "open");
   const ready = yield* Deferred.make<void, ZCodeError.ZCodeAppServerStorageStartupError>();
+  // Separate from `ready`: succeeds/fails only on terminal failure so in-flight
+  // requests can race it even after the gate opened.
+  const failed = yield* Deferred.make<void, ZCodeError.ZCodeAppServerStorageStartupError>();
   const terminalError = yield* Ref.make(
     Option.none<ZCodeError.ZCodeAppServerStorageStartupError>(),
   );
@@ -121,6 +129,7 @@ const makeStorageGate = Effect.fnUntraced(function* (required: boolean) {
           : Ref.set(state, "failed").pipe(
               Effect.andThen(Ref.set(terminalError, Option.some(error))),
               Effect.andThen(Deferred.fail(ready, error)),
+              Effect.andThen(Deferred.fail(failed, error)),
             ),
       ),
       Effect.asVoid,
@@ -192,7 +201,15 @@ const makeStorageGate = Effect.fnUntraced(function* (required: boolean) {
       ),
     );
 
-  return { accept, isWaiting, awaitReady, close, current };
+  return {
+    accept,
+    isWaiting,
+    awaitReady,
+    awaitFailed: Deferred.await(failed),
+    close,
+    current,
+    fail,
+  };
 });
 
 export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")(function* (
@@ -209,17 +226,20 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
     | ((method: string, params: unknown) => Effect.Effect<void, ZCodeError.ZCodeAppServerError>)
     | undefined;
 
+  const clientScope = yield* Scope.Scope;
   const gate = yield* makeStorageGate(options.requireStorageStartup ?? true);
 
   // First-status watchdog only applies while the gate requires storage.
+  // Upstream cancels it on the first ACCEPTED startup frame, so only a missing
+  // first frame (gate.current still empty) can trip startup_status_timeout.
   if (options.requireStorageStartup ?? true) {
     const timeout = options.storageStartupFirstStatusTimeoutMs ?? FIRST_STATUS_TIMEOUT_MS;
     yield* Effect.sleep(timeout).pipe(
       Effect.andThen(
-        gate.isWaiting.pipe(
-          Effect.flatMap((stillWaiting) =>
-            stillWaiting
-              ? gate.close(
+        Ref.get(gate.current).pipe(
+          Effect.flatMap((current) =>
+            Option.isNone(current)
+              ? gate.fail(
                   new ZCodeError.ZCodeAppServerStorageStartupError({
                     errorCode: "startup_status_timeout",
                   }),
@@ -248,24 +268,28 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
     return dispatchDecodedNotification(notification);
   };
 
+  // Notification handlers run on their own fiber, like upstream's unawaited
+  // emitter listeners: a handler may call client.request/notify without
+  // deadlocking the read loop. The storage gate stays on the read fiber so
+  // startup frames are always accepted in wire order.
   const dispatchDecodedNotification = (
     notification: ZCodeProtocol.ZCodeAppServerIncomingNotification,
   ): Effect.Effect<void, never> => {
     const schema = getSchema(ZCodeRpc.SERVER_NOTIFICATION_PARAMS, notification.method);
     const handlers = notificationHandlers.get(notification.method) ?? [];
 
-    if (schema) {
-      return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
-        Effect.flatMap((decoded) =>
-          Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
-        ),
-        Effect.ignore,
-      );
-    }
+    const dispatch = schema
+      ? decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+          Effect.flatMap((decoded) =>
+            Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
+          ),
+          Effect.ignore,
+        )
+      : unknownNotificationHandler
+        ? unknownNotificationHandler(notification.method, notification.params).pipe(Effect.ignore)
+        : Effect.void;
 
-    return unknownNotificationHandler
-      ? unknownNotificationHandler(notification.method, notification.params).pipe(Effect.ignore)
-      : Effect.void;
+    return dispatch.pipe(Effect.forkIn(clientScope), Effect.asVoid);
   };
 
   const dispatchRequest = (
@@ -308,14 +332,17 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
   ): Effect.Effect<ZCodeRpc.ClientRequestResponsesByMethod[M], ZCodeError.ZCodeAppServerError> =>
     Effect.gen(function* () {
       // Storage gate: requests wait once a non-terminal frame landed (or
-      // immediately when required); a failed phase rejects everything.
+      // immediately when required); a failed phase rejects everything —
+      // including sends already in flight, raced against the gate failure.
       yield* gate.awaitReady;
       const encoded = yield* encodeOptionalPayload(
         method,
         getSchema(ZCodeRpc.CLIENT_REQUEST_PARAMS, method),
         payload,
       );
-      const raw = yield* transport.request(method, encoded);
+      const raw = yield* transport
+        .request(method, encoded)
+        .pipe(Effect.raceFirst(gate.awaitFailed));
       return yield* decodeOptionalPayload(
         method,
         getSchema(ZCodeRpc.CLIENT_REQUEST_RESPONSES, method),
@@ -323,8 +350,9 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
       );
     }) as Effect.Effect<ZCodeRpc.ClientRequestResponsesByMethod[M], ZCodeError.ZCodeAppServerError>;
 
-  const notify = (method: string, payload?: unknown) =>
-    gate.awaitReady.pipe(Effect.andThen(transport.notify(method, payload)));
+  // Notifies are not storage-gated: control frames (e.g. connection/flow) must
+  // flow while storage is still starting, same as upstream's send path.
+  const notify = (method: string, payload?: unknown) => transport.notify(method, payload);
 
   return ZCodeAppServerClient.of({
     raw: {
@@ -380,6 +408,14 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-zcode-protocol/ZCodeAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: ZCodeAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
+  // stderr is diagnostics-only; log chunks at debug, matching logProtocol's level.
+  yield* handle.stderr.pipe(
+    Stream.decodeText(),
+    Stream.runForEach((chunk) =>
+      Effect.logDebug("ZCode app-server stderr").pipe(Effect.annotateLogs({ stderr: chunk })),
+    ),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
   return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
 });

@@ -153,7 +153,9 @@ function stableStringify(value: unknown): string {
 }
 
 // v4/command envelopes carry a uuid-v7 commandId and a client-clock issuedAt;
-// both are randomized per run, so transcript comparison masks them.
+// both are randomized per run, so transcript comparison masks them. The mask is
+// asymmetric by design: adapter-side correlation must match on method and
+// payload shape, never on commandId.
 function normalizeReplayFrame(value: unknown): unknown {
   if (typeof value !== "object" || value === null) return value;
   if (Array.isArray(value)) return value.map(normalizeReplayFrame);
@@ -188,8 +190,9 @@ const replayTransportError = (
 
 export function layerReplay(
   transcript: ZCodeAppServerReplayTranscript,
+  options: ZCodeClient.ZCodeAppServerClientOptions = {},
 ): Layer.Layer<ZCodeClient.ZCodeAppServerClient, ZCodeAppServerReplayError> {
-  return Layer.effect(ZCodeClient.ZCodeAppServerClient, makeReplayClient(transcript));
+  return Layer.effect(ZCodeClient.ZCodeAppServerClient, makeReplayClient(transcript, options));
 }
 
 export const makeReplayDriver = Effect.fn("effect-zcode-protocol/replay.makeReplayDriver")(
@@ -207,8 +210,9 @@ export const makeReplayDriver = Effect.fn("effect-zcode-protocol/replay.makeRepl
 
 export function layerReplayWithDriver(
   driver: ZCodeAppServerReplayDriver,
+  options: ZCodeClient.ZCodeAppServerClientOptions = {},
 ): Layer.Layer<ZCodeClient.ZCodeAppServerClient, ZCodeAppServerReplayError> {
-  return Layer.effect(ZCodeClient.ZCodeAppServerClient, makeReplayClientWithState(driver));
+  return Layer.effect(ZCodeClient.ZCodeAppServerClient, makeReplayClientWithState(driver, options));
 }
 
 const makeReplayClient = Effect.fn("effect-zcode-protocol/replay.makeReplayClient")(function* (

@@ -16,6 +16,8 @@ import { ZCodeProtocolRequestId, ZCodeProtocolResponseEnvelope } from "./_intern
 const isJsonRpcId = Schema.is(ZCodeProtocolRequestId);
 const isResponseEnvelope = Schema.is(ZCodeProtocolResponseEnvelope);
 const isZCodeAppServerError = Schema.is(ZCodeError.ZCodeAppServerError);
+// zcode's own client defaults each request to a 3-minute timeout.
+const DEFAULT_REQUEST_TIMEOUT_MS = 3 * 60_000;
 const MAX_BUFFERED_RAW_MESSAGES = 32;
 // Bound JSONL lines before joining and parsing; the LF delimiter is excluded.
 const MAX_INCOMING_MESSAGE_BYTES = 128 * 1024 * 1024;
@@ -172,6 +174,7 @@ export const makeZCodeAppServerProtocol = Effect.fn("makeZCodeAppServerProtocol"
   const pending = yield* Ref.make(new Map<string, ZCodeAppServerPendingRequest>());
   const nextRequestId = yield* Ref.make(1);
   const maxIncomingMessageBytes = options.maxIncomingMessageBytes ?? MAX_INCOMING_MESSAGE_BYTES;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const remainder: Array<string> = [];
   let remainderBytes = 0;
   const terminationHandled = yield* Ref.make(false);
@@ -285,8 +288,8 @@ export const makeZCodeAppServerProtocol = Effect.fn("makeZCodeAppServerProtocol"
 
   const handleResponse = (response: typeof ZCodeProtocolResponseEnvelope.Type) => {
     const requestId = String(response.id);
-    const protocolError = response.error;
-    if (protocolError !== undefined) {
+    if ("error" in response) {
+      const protocolError = response.error;
       return resolvePending(requestId, ({ deferred, method }) =>
         Deferred.fail(
           deferred,
@@ -349,9 +352,15 @@ export const makeZCodeAppServerProtocol = Effect.fn("makeZCodeAppServerProtocol"
 
   const routeMessage = Effect.fnUntraced(function* (message: unknown) {
     if (Option.isSome(yield* Ref.get(terminationFailure))) return;
+    // Response first: upstream resolves {id, result}/{id, error} before the
+    // request/notification checks, so a degenerate {id, method, result} frame
+    // still settles the pending request.
+    if (isIncomingResponse(message)) return yield* handleResponse(message);
     if (isIncomingRequest(message)) return yield* handleRequest(message);
     if (isIncomingNotification(message)) return yield* handleNotification(message);
-    if (isIncomingResponse(message)) return yield* handleResponse(message);
+    // Upstream silently drops id-bearing frames that match no class (e.g. a
+    // bare {id}); anything else stays a typed routing failure.
+    if (isObject(message) && "id" in message) return;
     return yield* ZCodeError.ZCodeAppServerProtocolParseError.fromUnroutableMessage(message);
   });
 
@@ -475,21 +484,19 @@ export const makeZCodeAppServerProtocol = Effect.fn("makeZCodeAppServerProtocol"
       Effect.onError(() => removePending(String(requestId))),
       Effect.onInterrupt(() => removePending(String(requestId))),
     );
-    return yield* options.requestTimeoutMs === undefined
-      ? awaited
-      : awaited.pipe(
-          Effect.timeoutOrElse({
-            duration: Duration.millis(options.requestTimeoutMs),
-            orElse: () =>
-              Effect.fail(
-                new ZCodeError.ZCodeAppServerRequestTimeoutError({
-                  method,
-                  requestId: String(requestId),
-                  timeoutMs: options.requestTimeoutMs ?? 0,
-                }),
-              ),
-          }),
-        );
+    return yield* awaited.pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.millis(requestTimeoutMs),
+        orElse: () =>
+          Effect.fail(
+            new ZCodeError.ZCodeAppServerRequestTimeoutError({
+              method,
+              requestId: String(requestId),
+              timeoutMs: requestTimeoutMs,
+            }),
+          ),
+      }),
+    );
   });
 
   const notify = (method: string, payload?: unknown) =>

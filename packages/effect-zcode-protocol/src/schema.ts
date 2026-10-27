@@ -4,8 +4,11 @@
 // fields — decode as Unknown or are absent, noted at each schema site.
 import * as Schema from "effect/Schema";
 
+import * as ZCodeError from "./errors.ts";
+
 const JsonObject = Schema.Record(Schema.String, Schema.Unknown);
-const nonEmptyString = Schema.String;
+const nonEmptyString = Schema.NonEmptyString;
+const nonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 // ── shared primitives ──
 
@@ -51,11 +54,14 @@ export type ConversationRowTarget = typeof ConversationRowTarget.Type;
 
 // ── storage startup notification (startup/storageState) ──
 
+// Upstream zcodeStorageStartupStateSchema: a malformed frame (sequence <= 0,
+// failed without errorCode, unknown errorCode) is dropped by the gate rather
+// than poisoning it — the constraints below are load-bearing, not decorative.
 export const ZCodeStorageStartupState = Schema.Struct({
   schemaVersion: Schema.Literal(1),
-  attemptId: nonEmptyString,
-  sequence: Schema.Int,
-  databaseId: nonEmptyString,
+  attemptId: nonEmptyString.check(Schema.isMaxLength(128)),
+  sequence: Schema.Int.check(Schema.isGreaterThan(0)),
+  databaseId: nonEmptyString.check(Schema.isMaxLength(128)),
   databaseKind: Schema.Literals(["session", "tasks-index"]),
   phase: Schema.Literals([
     "checking",
@@ -66,14 +72,20 @@ export const ZCodeStorageStartupState = Schema.Struct({
     "failed",
   ]),
   migration: Schema.optionalKey(JsonObject),
-  elapsedMs: Schema.Number,
-  completed: Schema.optionalKey(Schema.Int),
-  total: Schema.optionalKey(Schema.Int),
-  errorCode: Schema.optionalKey(Schema.String),
+  elapsedMs: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  completed: Schema.optionalKey(nonNegativeInt),
+  total: Schema.optionalKey(nonNegativeInt),
+  errorCode: Schema.optionalKey(ZCodeError.ZCodeStorageStartupErrorCode),
   sqliteCode: Schema.optionalKey(Schema.Int),
-  systemCode: Schema.optionalKey(Schema.String),
-  migrationId: Schema.optionalKey(Schema.String),
-});
+  systemCode: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
+  migrationId: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(128))),
+}).check(
+  Schema.makeFilter((state) =>
+    state.phase === "failed" && state.errorCode === undefined
+      ? { path: ["errorCode"], issue: "failed requires errorCode" }
+      : undefined,
+  ),
+);
 export type ZCodeStorageStartupState = typeof ZCodeStorageStartupState.Type;
 
 // ── topic frames ──
@@ -948,6 +960,12 @@ const pluginUiDeltaFields = {
   subscribers: Schema.Array(JsonObject),
 } as const;
 
+// Identity of an evicted actor/node entry upstream (siteId × ordinal journal key).
+const WorkflowRunEntryRef = Schema.Struct({
+  siteId: nonEmptyString,
+  ordinal: nonNegativeInt,
+});
+
 export const ConversationDelta = Schema.Union([
   Schema.Struct({ op: Schema.Literal("row.appended"), row: ConversationRow }),
   Schema.Struct({ op: Schema.Literal("row.upserted"), row: ConversationRow }),
@@ -975,11 +993,19 @@ export const ConversationDelta = Schema.Union([
     toolName: Schema.String,
     arguments: JsonObject,
   }),
-  // Workflow-run keyed deltas stay opaque until the workflow phase lands.
+  // Workflow-run keyed deltas: entry payloads stay opaque until the workflow
+  // phase lands, but every field must survive decode — workflowRunDeltas
+  // subscribers receive them verbatim. Header keys/cleared stay strings.
   Schema.Struct({
     op: Schema.Literal("workflowRun.updated"),
     runId: Schema.String,
     revision: Schema.Number,
+    run: Schema.optionalKey(JsonObject),
+    cleared: Schema.optionalKey(Schema.Array(Schema.String)),
+    removedActors: Schema.optionalKey(Schema.Array(WorkflowRunEntryRef)),
+    removedNodes: Schema.optionalKey(Schema.Array(WorkflowRunEntryRef)),
+    actors: Schema.optionalKey(Schema.Array(JsonObject)),
+    nodes: Schema.optionalKey(Schema.Array(JsonObject)),
   }),
   Schema.Struct({
     op: Schema.Literal("workflowRun.removed"),
@@ -1715,14 +1741,30 @@ export const CommandPayloadSchemas = {
     reviewItemId: nonEmptyString,
     enabled: Schema.Boolean,
   }),
-  revokeWorkspaceHookTrust: Schema.Struct({
-    sessionId: nonEmptyString,
-    remoteSessionId: Schema.optionalKey(nonEmptyString),
-    workspaceIdentity: nonEmptyString,
-    bundleDigest: Schema.String,
-    reviewItemIds: Schema.optionalKey(Schema.Array(nonEmptyString)),
-    hookDeclarationDigests: Schema.optionalKey(Schema.Array(Schema.String)),
-  }),
+  // Upstream z.union: flow-scoped revoke (commandTarget + reviewItemIds) or
+  // declaration-digest revoke; the flattened optional version let either side
+  // through under-specified.
+  revokeWorkspaceHookTrust: Schema.Union([
+    Schema.Struct({
+      sessionId: nonEmptyString,
+      taskId: nonEmptyString,
+      runId: nonEmptyString,
+      remoteSessionId: Schema.optionalKey(nonEmptyString),
+      workspaceIdentity: nonEmptyString,
+      bundleDigest: Schema.String,
+      reviewFlowId: nonEmptyString,
+      generation: Schema.Int,
+      interactionId: nonEmptyString,
+      reviewItemIds: Schema.Array(nonEmptyString).check(Schema.isMinLength(1)),
+    }),
+    Schema.Struct({
+      sessionId: nonEmptyString,
+      remoteSessionId: Schema.optionalKey(nonEmptyString),
+      workspaceIdentity: nonEmptyString,
+      bundleDigest: Schema.String,
+      hookDeclarationDigests: Schema.Array(Schema.String).check(Schema.isMinLength(1)),
+    }),
+  ]),
   requestWorkspaceHookReview: Schema.Struct({
     sessionId: nonEmptyString,
     remoteSessionId: Schema.optionalKey(nonEmptyString),
@@ -1832,10 +1874,39 @@ export const CommandEnvelopeWire = Schema.Struct({
 });
 export type CommandEnvelopeWire = typeof CommandEnvelopeWire.Type;
 
-/** Typed outbound envelope factory; encodes through CommandEnvelopeWire. */
+// Per-type payload decoders compiled once at module scope.
+const commandPayloadDecoders = new Map(
+  Object.entries(CommandPayloadSchemas).map(([type, schema]) => [type, Schema.decodeSync(schema)]),
+);
+
+/** Thrown when an outbound envelope violates upstream CAS rules. */
+export class CommandEnvelopeValidationError extends Error {
+  readonly field: string;
+  constructor(field: string) {
+    super(`CAS commands require ${field}`);
+    this.name = "CommandEnvelopeValidationError";
+    this.field = field;
+  }
+}
+
+/**
+ * Typed outbound envelope factory. Enforces the same invariants upstream's
+ * parseCommandEnvelope checks: CAS commands must carry baseRevision (and
+ * row-targeting commands baseLogEpoch), and the payload must satisfy the
+ * per-command schema (which owns row `target` and every other field rule).
+ */
 export const makeCommandEnvelope = <T extends CommandType>(
   envelope: CommandEnvelopeFor<T>,
-): CommandEnvelopeFor<T> => envelope;
+): CommandEnvelopeFor<T> => {
+  if (COMMANDS_REQUIRING_BASE_REVISION.has(envelope.type) && envelope.baseRevision === undefined) {
+    throw new CommandEnvelopeValidationError("baseRevision");
+  }
+  if (ROW_TARGETING_COMMANDS.has(envelope.type) && envelope.baseLogEpoch === undefined) {
+    throw new CommandEnvelopeValidationError("baseLogEpoch");
+  }
+  commandPayloadDecoders.get(envelope.type)?.(envelope.payload);
+  return envelope;
+};
 
 export const CommandResult = Schema.Union([
   Schema.Struct({
@@ -1876,6 +1947,11 @@ export const CommandResult = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("amendWorkflowRunSettings"),
+    // runId/toolCallId identify the NEW run; supersededRunId only when the old
+    // run was still in flight and got stopped by this amendment.
+    runId: nonEmptyString,
+    toolCallId: nonEmptyString,
+    supersededRunId: Schema.optionalKey(nonEmptyString),
   }),
   Schema.Struct({
     type: Schema.Literal("inputAccepted"),

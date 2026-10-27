@@ -16,6 +16,8 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2UserInputQuestion,
+  type ProviderApprovalDecision,
   type ProviderApprovalOption,
   PositiveInt,
   type ProviderInstanceId,
@@ -66,9 +68,15 @@ import {
   resolveZcodeRequestApiKey,
 } from "./zcodeCredentials.ts";
 import {
+  zcodeApprovalOptions,
   zcodeExecutionStateForRuntimePolicy,
+  zcodeHookReviewPrompt,
+  zcodeHookReviewTrustItemIds,
   zcodeNativeItemId,
   zcodePermissionAnswer,
+  zcodePermissionDeniedReason,
+  zcodePermissionRpcResponse,
+  zcodeProjectedQuestions,
   zcodeProviderTurnStatus,
   zcodeReportedModelSelection,
   zcodeResolveModelSelection,
@@ -81,10 +89,14 @@ import {
   zcodeToolItemKind,
   zcodeToolOutputText,
   zcodeTurnItemStatusForText,
+  zcodeUserInputAnswer,
+  type ZcodeProjectedQuestion,
 } from "./zcodeRows.ts";
 
 const DEFAULT_ZCODE_SETTINGS = Schema.decodeSync(ZcodeSettings)({});
 const ZCODE_CLIENT_MODE = "desktop-continuous" as const;
+/** toolName upstream stamps on synthesized MCP elicitation interactions. */
+const ZCODE_MCP_ELICITATION_TOOL_NAME = "McpElicitation";
 const INTERRUPT_GRACE = Duration.seconds(15);
 const ASSISTANT_FLUSH_MS = 50;
 
@@ -216,8 +228,21 @@ interface ActiveZcodeTurn {
 
 interface PendingInteractionRecord {
   readonly requestId: OrchestrationV2RuntimeRequest["id"];
-  readonly interaction: ZCodeSchema.PendingInteraction;
+  readonly nativeItemId: string;
+  readonly turn: ActiveZcodeTurn | undefined;
+  readonly createdAt: DateTime.Utc;
+  interaction: ZCodeSchema.PendingInteraction;
+  questions: ReadonlyArray<ZcodeProjectedQuestion> | undefined;
+  /** Locally resolved; kept until upstream drops it so resyncs don't re-emit. */
+  settled: boolean;
 }
+
+interface HeldInteractionLeg {
+  readonly deferred: Deferred.Deferred<unknown>;
+}
+
+/** Bounded so an abandoned interaction can't grow it without limit. */
+const SETTLED_RESPONSE_CACHE_LIMIT = 256;
 
 interface ZcodeConversation {
   readonly sessionId: string;
@@ -313,6 +338,46 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
         const clientId = `t3-${input.providerSessionId}`;
+
+        // The CLI races each permission/userInput's legacy reverse request
+        // against our resolveInteraction; an error response kills the race, so
+        // hold each leg on a Deferred until the interaction settles.
+        const heldInteractionLegs = new Map<string, Array<HeldInteractionLeg>>();
+        const settledInteractionResponses = new Map<string, unknown>();
+        const rememberSettledResponse = (interactionId: string, response: unknown) => {
+          if (settledInteractionResponses.size >= SETTLED_RESPONSE_CACHE_LIMIT) {
+            const oldest = settledInteractionResponses.keys().next().value;
+            if (oldest !== undefined) settledInteractionResponses.delete(oldest);
+          }
+          settledInteractionResponses.set(interactionId, response);
+        };
+        const settleInteractionLegs = Effect.fnUntraced(function* (
+          interactionId: string,
+          response: unknown,
+        ) {
+          rememberSettledResponse(interactionId, response);
+          const legs = heldInteractionLegs.get(interactionId) ?? [];
+          heldInteractionLegs.delete(interactionId);
+          for (const leg of legs) yield* Deferred.succeed(leg.deferred, response);
+        });
+        const holdInteractionLeg = Effect.fnUntraced(function* <A>(interactionId: string) {
+          const settled = settledInteractionResponses.get(interactionId) as A | undefined;
+          if (settled !== undefined) return settled;
+          const deferred = yield* Deferred.make<unknown>();
+          const legs = heldInteractionLegs.get(interactionId) ?? [];
+          legs.push({ deferred });
+          heldInteractionLegs.set(interactionId, legs);
+          return (yield* Deferred.await(deferred)) as A;
+        });
+        // params.requestId is the pending interaction's interactionId.
+        yield* client.handleServerRequest(
+          ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestPermission,
+          (params) => holdInteractionLeg<ZCodeSchema.ZCodePermissionResponse>(params.requestId),
+        );
+        yield* client.handleServerRequest(
+          ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestUserInput,
+          (params) => holdInteractionLeg<ZCodeSchema.ZCodeUserInputResponse>(params.requestId),
+        );
 
         // The CLI asks for runtime preferences on createSession and again on
         // each sendText; both scopes answer with T3's fixed defaults.
@@ -442,6 +507,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           kind: OrchestrationV2ExecutionNode["kind"],
           status: OrchestrationV2ExecutionNode["status"],
           completedAt: DateTime.Utc | null,
+          runtimeRequestId?: OrchestrationV2RuntimeRequest["id"],
         ): OrchestrationV2ExecutionNode => ({
           id: idAllocator.derive.nodeFromProviderItem({
             driver: ZCODE_PROVIDER,
@@ -457,7 +523,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           providerThreadId: turn.providerThread.id,
           providerTurnId: turn.providerTurnId,
           nativeItemRef: conversationRef(nativeItemId),
-          runtimeRequestId: null,
+          runtimeRequestId: runtimeRequestId ?? null,
           checkpointScopeId: null,
           startedAt: turn.startedAt,
           completedAt,
@@ -720,12 +786,17 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           const status = zcodeToolCallItemStatus(row.status);
           const completed = status !== "running" && status !== "waiting";
           const itemKind = zcodeToolItemKind(row.toolName);
+          const approvalRequestId =
+            row.approvalInteractionId === undefined
+              ? undefined
+              : conversation.interactions.get(row.approvalInteractionId)?.requestId;
           const node = nodeFor(
             turn,
             zcodeNativeItemId(row.turnId, row.rowId),
             "tool_call",
             rowStatusToNodeStatus(status),
             completed ? at : null,
+            ...(approvalRequestId === undefined ? [] : [approvalRequestId]),
           );
           const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
           const turnItemId = idAllocator.derive.turnItemFromProviderItem({
@@ -1067,94 +1138,52 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           }
         });
 
-        const syncInteractions = Effect.fnUntraced(function* (
+        const requestKindForInteraction = (
+          interaction: ZCodeSchema.PendingInteraction,
+        ): OrchestrationV2RuntimeRequest["kind"] =>
+          interaction.kind === "userInput"
+            ? interaction.payload.kind === "userInput" &&
+              interaction.payload.toolName === ZCODE_MCP_ELICITATION_TOOL_NAME
+              ? "mcp-elicitation"
+              : "user_input"
+            : interaction.payload.kind === "permission"
+              ? zcodeRequestKindForTool(interaction.payload.toolName)
+              : "permission";
+
+        const interactionThreadId = (
           conversation: ZcodeConversation,
-          next: ReadonlyArray<ZCodeSchema.PendingInteraction>,
-        ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
-          const previous = new Set(conversation.interactions.keys());
-          conversation.pendingInteractions = next;
-          for (const interaction of next) {
-            previous.delete(interaction.interactionId);
-            if (conversation.interactions.has(interaction.interactionId)) continue;
-            // P4 demux point: permission/userInput/hookReview requests become
-            // T3 runtime requests resolved via resolveInteraction.
-            const anchorTurn =
-              interaction.anchorRowId === null
-                ? undefined
-                : (conversation.rows.get(interaction.anchorRowId)?.turnId ?? undefined);
-            const turn =
-              anchorTurn === undefined
-                ? [...conversation.turns.values()].at(-1)
-                : conversation.turns.get(anchorTurn);
-            if (turn === undefined) continue;
-            const requestId = yield* idAllocator.allocate.runtimeRequest({
-              driver: ZCODE_PROVIDER,
-              providerTurnId: turn.providerTurnId,
-              nativeRequestId: interaction.interactionId,
-            });
-            const nodeId = idAllocator.derive.approvalNode({ requestId });
-            const providerSessionId = turn.providerThread.providerSessionId;
-            if (providerSessionId === null) continue;
-            const createdAt = yield* DateTime.now;
-            const kind =
-              interaction.kind === "userInput"
-                ? ("user_input" as const)
-                : interaction.kind === "permission"
-                  ? interaction.payload.kind === "permission"
-                    ? zcodeRequestKindForTool(interaction.payload.toolName)
-                    : "permission"
-                  : ("permission" as ProviderRequestKind);
-            const request: OrchestrationV2RuntimeRequest = {
-              id: requestId,
-              nodeId,
-              providerTurnId: turn.providerTurnId,
-              nativeRequestRef: {
-                driver: ZCODE_PROVIDER,
-                nativeId: interaction.interactionId,
-                strength: "strong",
-              },
-              kind,
-              status: "pending",
-              responseCapability: { type: "live", providerSessionId },
-              createdAt,
-              resolvedAt: null,
-            };
-            const nativeItemId = `interaction:${interaction.interactionId}`;
-            const ordinal = itemOrdinal(turn, nativeItemId);
-            const node: OrchestrationV2ExecutionNode = {
-              id: nodeId,
-              threadId: turn.projectionThreadId,
-              runId: turn.projectionRunId,
-              parentNodeId: turn.rootNodeId,
-              rootNodeId: turn.rootNodeId,
-              kind: interaction.kind === "userInput" ? "user_input_request" : "approval_request",
-              status: "waiting",
-              countsForRun: false,
-              providerThreadId: turn.providerThread.id,
-              providerTurnId: turn.providerTurnId,
-              nativeItemRef: conversationRef(nativeItemId),
-              runtimeRequestId: requestId,
-              checkpointScopeId: null,
-              startedAt: createdAt,
-              completedAt: null,
-            };
-            let turnItem: OrchestrationV2TurnItem;
-            if (interaction.kind === "userInput" && interaction.payload.kind === "userInput") {
-              const payload = interaction.payload;
-              const questions = payload.questions?.map((question, index) => ({
-                id: question.header || `question-${index + 1}`,
-                header: question.header || `Question ${index + 1}`,
-                question: question.question,
-                options: question.options.map((option) => ({
-                  label: option.label,
-                  description: option.description ?? option.label,
-                  ...(option.value === undefined ? {} : { value: option.value }),
-                  ...(option.preview === undefined ? {} : { preview: option.preview }),
-                })),
-                ...(question.multiSelect === undefined
-                  ? {}
-                  : { multiSelect: question.multiSelect }),
-              })) ?? [
+          turn: ActiveZcodeTurn | undefined,
+        ) => turn?.projectionThreadId ?? conversation.providerThread.appThreadId;
+
+        const userInputItemQuestions = (
+          payload: ZCodeSchema.UserInputRequestPayload,
+          projected: ReadonlyArray<ZcodeProjectedQuestion>,
+        ): ReadonlyArray<OrchestrationV2UserInputQuestion> =>
+          payload.questions !== undefined && payload.questions.length > 0
+            ? payload.questions.map((question, index) => {
+                const draft =
+                  payload.answerDrafts?.[`answer_${index}`] ??
+                  payload.answerDrafts?.[String(index)];
+                return {
+                  id: projected[index]?.id ?? `question-${index + 1}`,
+                  header: question.header || `Question ${index + 1}`,
+                  question: question.question,
+                  options: question.options.map((option, optionIndex) => ({
+                    label: option.label || `Option ${optionIndex + 1}`,
+                    description: option.description ?? option.label,
+                    value: option.value,
+                    ...(option.preview === undefined ? {} : { preview: option.preview }),
+                  })),
+                  ...(question.multiSelect === undefined
+                    ? {}
+                    : { multiSelect: question.multiSelect }),
+                  allowCustomAnswer: payload.freeText,
+                  ...(draft !== undefined && draft.length > 0
+                    ? { initialAnswer: draft.join(", ") }
+                    : {}),
+                };
+              })
+            : [
                 {
                   id: "answer",
                   header: payload.toolName ?? "Input",
@@ -1167,110 +1196,264 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   allowCustomAnswer: payload.freeText,
                 },
               ];
-              turnItem = {
-                id: idAllocator.derive.approvalTurnItem({ requestId }),
-                threadId: turn.projectionThreadId,
-                runId: turn.projectionRunId,
-                nodeId,
-                providerThreadId: turn.providerThread.id,
-                providerTurnId: turn.providerTurnId,
-                nativeItemRef: node.nativeItemRef,
-                parentItemId: null,
-                ordinal,
-                status: "waiting",
-                title: null,
-                startedAt: createdAt,
-                completedAt: null,
-                updatedAt: createdAt,
-                type: "user_input_request",
-                requestId,
-                questions,
-              };
-            } else {
-              const prompt =
-                interaction.payload.kind === "permission"
-                  ? interaction.payload.summary
-                  : interaction.payload.kind === "workspaceHookReview"
-                    ? `ZCode asks to trust ${interaction.payload.summary.hookCount} workspace hook(s) from ${interaction.payload.workspaceLabel}.`
-                    : "ZCode requests approval.";
-              const options: Array<ProviderApprovalOption> | undefined =
-                interaction.payload.kind === "permission"
-                  ? interaction.payload.options.map((option) => ({
-                      decision:
-                        option.kind === "allowOnce"
-                          ? "accept"
-                          : option.kind === "allowAlways"
-                            ? "acceptAlways"
-                            : option.kind === "deny"
-                              ? "decline"
-                              : "accept",
-                      label: option.label,
-                    }))
-                  : [
-                      { decision: "accept" as const, label: "Allow" },
-                      { decision: "decline" as const, label: "Decline" },
-                    ];
-              turnItem = {
-                id: idAllocator.derive.approvalTurnItem({ requestId }),
-                threadId: turn.projectionThreadId,
-                runId: turn.projectionRunId,
-                nodeId,
-                providerThreadId: turn.providerThread.id,
-                providerTurnId: turn.providerTurnId,
-                nativeItemRef: node.nativeItemRef,
-                parentItemId: null,
-                ordinal,
-                status: "waiting",
-                title: null,
-                startedAt: createdAt,
-                completedAt: null,
-                updatedAt: createdAt,
-                type: "approval_request",
-                requestId,
-                requestKind: kind === "user_input" ? "permission" : kind,
-                prompt,
-                options,
-              };
-            }
-            conversation.interactions.set(interaction.interactionId, {
-              requestId,
-              interaction,
-            });
-            yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
-            yield* emit({
-              type: "runtime_request.updated",
-              driver: ZCODE_PROVIDER,
-              threadId: turn.projectionThreadId,
-              runtimeRequest: request,
-            });
-            yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+
+        const interactionTurnItem = (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          turn: ActiveZcodeTurn,
+          status: OrchestrationV2TurnItem["status"],
+          at: DateTime.Utc,
+        ): OrchestrationV2TurnItem => {
+          const interaction = record.interaction;
+          const base = {
+            id: idAllocator.derive.approvalTurnItem({ requestId: record.requestId }),
+            threadId: turn.projectionThreadId,
+            runId: turn.projectionRunId,
+            nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+            providerThreadId: turn.providerThread.id,
+            providerTurnId: turn.providerTurnId,
+            nativeItemRef: conversationRef(record.nativeItemId),
+            parentItemId: null,
+            ordinal: itemOrdinal(turn, record.nativeItemId),
+            status,
+            title: null,
+            startedAt: record.createdAt,
+            completedAt: status === "waiting" ? null : at,
+            updatedAt: at,
+          } as const;
+          if (interaction.kind === "userInput" && interaction.payload.kind === "userInput") {
+            return {
+              ...base,
+              type: "user_input_request",
+              requestId: record.requestId,
+              questions: [...userInputItemQuestions(interaction.payload, record.questions ?? [])],
+            };
           }
-          // Interactions that left the pending set resolved or expired.
+          const prompt =
+            interaction.payload.kind === "permission"
+              ? interaction.payload.summary
+              : interaction.payload.kind === "workspaceHookReview"
+                ? zcodeHookReviewPrompt(interaction.payload)
+                : "ZCode requests approval.";
+          const options: Array<ProviderApprovalOption> =
+            interaction.payload.kind === "permission"
+              ? [...zcodeApprovalOptions(interaction.payload)]
+              : [
+                  { decision: "accept", label: "Trust hooks" },
+                  { decision: "decline", label: "Not now" },
+                ];
+          const requestKind: ProviderRequestKind =
+            interaction.payload.kind === "permission"
+              ? zcodeRequestKindForTool(interaction.payload.toolName)
+              : "permission";
+          return {
+            ...base,
+            type: "approval_request",
+            requestId: record.requestId,
+            requestKind,
+            prompt,
+            options,
+            // The wire can still surface a prompt in yolo (ask rules, provider
+            // checks); flag it rather than pretending the mode asked.
+            ...(conversation.config?.mode === "yolo"
+              ? { fullAccessOverride: "provider_check" as const }
+              : {}),
+          };
+        };
+
+        const interactionNode = (
+          record: PendingInteractionRecord,
+          turn: ActiveZcodeTurn,
+          status: OrchestrationV2ExecutionNode["status"],
+          completedAt: DateTime.Utc | null,
+        ): OrchestrationV2ExecutionNode => ({
+          id: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+          threadId: turn.projectionThreadId,
+          runId: turn.projectionRunId,
+          parentNodeId: turn.rootNodeId,
+          rootNodeId: turn.rootNodeId,
+          kind: record.interaction.kind === "userInput" ? "user_input_request" : "approval_request",
+          status,
+          countsForRun: false,
+          providerThreadId: turn.providerThread.id,
+          providerTurnId: turn.providerTurnId,
+          nativeItemRef: conversationRef(record.nativeItemId),
+          runtimeRequestId: record.requestId,
+          checkpointScopeId: null,
+          startedAt: record.createdAt,
+          completedAt,
+        });
+
+        const emitInteractionItems = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          turn: ActiveZcodeTurn,
+          status: "waiting" | "completed",
+          at: DateTime.Utc,
+        ) {
+          yield* emit({
+            type: "node.updated",
+            driver: ZCODE_PROVIDER,
+            node: interactionNode(record, turn, status, status === "waiting" ? null : at),
+          });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: ZCODE_PROVIDER,
+            turnItem: interactionTurnItem(conversation, record, turn, status, at),
+          });
+        });
+
+        const emitInteractionRequest = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          status: "pending" | "resolved",
+          at: DateTime.Utc,
+          extras?: {
+            readonly decision?: ProviderApprovalDecision;
+            readonly answers?: Record<string, unknown>;
+          },
+        ) {
+          const threadId = interactionThreadId(conversation, record.turn);
+          yield* emit({
+            type: "runtime_request.updated",
+            driver: ZCODE_PROVIDER,
+            ...(threadId === null ? {} : { threadId }),
+            runtimeRequest: {
+              id: record.requestId,
+              nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+              providerTurnId: record.turn?.providerTurnId ?? null,
+              nativeRequestRef: {
+                driver: ZCODE_PROVIDER,
+                nativeId: record.interaction.interactionId,
+                strength: "strong",
+              },
+              kind: requestKindForInteraction(record.interaction),
+              status,
+              responseCapability:
+                status === "pending"
+                  ? {
+                      type: "live",
+                      providerSessionId: input.providerSessionId,
+                      ...(record.interaction.payload.kind === "permission" &&
+                      record.interaction.payload.freeText === true
+                        ? { supportsFeedback: true }
+                        : {}),
+                    }
+                  : { type: "not_resumable", reason: "Resolved." },
+              createdAt: record.createdAt,
+              resolvedAt: status === "pending" ? null : at,
+              ...(extras?.decision === undefined ? {} : { decision: extras.decision }),
+              ...(extras?.answers === undefined ? {} : { answers: extras.answers }),
+            },
+          });
+        });
+
+        // Held legacy legs of an interaction that vanished upstream get a
+        // decline-equivalent response; the CLI already settled the request and
+        // drops the late frame, so this only frees our handler fibers.
+        const interactionExpiredResponse = (
+          interaction: ZCodeSchema.PendingInteraction,
+        ): unknown =>
+          interaction.payload.kind === "permission"
+            ? { decision: "deny", reason: zcodePermissionDeniedReason() }
+            : { action: "decline" };
+
+        const settleInteraction = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          response: unknown,
+          extras?: {
+            readonly decision?: ProviderApprovalDecision;
+            readonly answers?: Record<string, unknown>;
+          },
+        ) {
+          if (record.settled) return;
+          record.settled = true;
+          yield* settleInteractionLegs(record.interaction.interactionId, response);
+          const at = yield* DateTime.now;
+          if (record.turn !== undefined) {
+            yield* emitInteractionItems(conversation, record, record.turn, "completed", at);
+          }
+          yield* emitInteractionRequest(
+            conversation,
+            record,
+            "resolved",
+            at,
+            ...(extras === undefined ? [] : [extras]),
+          );
+        });
+
+        const syncInteractions = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          next: ReadonlyArray<ZCodeSchema.PendingInteraction>,
+        ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
+          const previous = new Set(conversation.interactions.keys());
+          conversation.pendingInteractions = next;
+          for (const interaction of next) {
+            previous.delete(interaction.interactionId);
+            const existing = conversation.interactions.get(interaction.interactionId);
+            if (existing !== undefined) {
+              // Whole-array patches rebuild entries only on change; a payload
+              // change (hook generations, answer drafts) refreshes the card.
+              if (existing.interaction.payload !== interaction.payload) {
+                existing.interaction = interaction;
+                existing.questions =
+                  interaction.payload.kind === "userInput"
+                    ? zcodeProjectedQuestions(interaction.payload)
+                    : undefined;
+                if (!existing.settled && existing.turn !== undefined) {
+                  const at = yield* DateTime.now;
+                  yield* emitInteractionItems(conversation, existing, existing.turn, "waiting", at);
+                }
+              } else {
+                existing.interaction = interaction;
+              }
+              continue;
+            }
+            // Sessions can raise interactions outside any turn (hook reviews at
+            // session start); those still need a T3 card, just no turn items.
+            const anchorTurn =
+              interaction.anchorRowId === null
+                ? undefined
+                : (conversation.rows.get(interaction.anchorRowId)?.turnId ?? undefined);
+            const turn =
+              anchorTurn === undefined
+                ? [...conversation.turns.values()].at(-1)
+                : conversation.turns.get(anchorTurn);
+            const requestId = yield* idAllocator.allocate.runtimeRequest({
+              driver: ZCODE_PROVIDER,
+              ...(turn === undefined ? {} : { providerTurnId: turn.providerTurnId }),
+              nativeRequestId: interaction.interactionId,
+            });
+            const record: PendingInteractionRecord = {
+              requestId,
+              nativeItemId: `interaction:${interaction.interactionId}`,
+              turn,
+              interaction,
+              questions:
+                interaction.payload.kind === "userInput"
+                  ? zcodeProjectedQuestions(interaction.payload)
+                  : undefined,
+              settled: false,
+              createdAt: yield* DateTime.now,
+            };
+            conversation.interactions.set(interaction.interactionId, record);
+            if (turn !== undefined) {
+              yield* emitInteractionItems(conversation, record, turn, "waiting", record.createdAt);
+            }
+            yield* emitInteractionRequest(conversation, record, "pending", record.createdAt);
+          }
+          // Interactions that left the pending set resolved or expired upstream
+          // (another client answered, auto-resolution fired, the flow ended).
           for (const gone of previous) {
             const record = conversation.interactions.get(gone);
             if (record === undefined) continue;
             conversation.interactions.delete(gone);
-            const turn = [...conversation.turns.values()].at(-1);
-            yield* emit({
-              type: "runtime_request.updated",
-              driver: ZCODE_PROVIDER,
-              ...(turn === undefined ? {} : { threadId: turn.projectionThreadId }),
-              runtimeRequest: {
-                id: record.requestId,
-                nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
-                providerTurnId: turn?.providerTurnId ?? null,
-                nativeRequestRef: {
-                  driver: ZCODE_PROVIDER,
-                  nativeId: record.interaction.interactionId,
-                  strength: "strong",
-                },
-                kind: "permission",
-                status: "resolved",
-                responseCapability: { type: "not_resumable", reason: "Resolved by the runtime." },
-                createdAt: yield* DateTime.now,
-                resolvedAt: yield* DateTime.now,
-              },
-            });
+            yield* settleInteraction(
+              conversation,
+              record,
+              interactionExpiredResponse(record.interaction),
+            );
           }
         });
 
@@ -2158,114 +2341,119 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           respondToRuntimeRequest: Effect.fn("ZcodeAdapterV2.respondToRuntimeRequest")(
             function* (requestInput) {
               for (const conversation of conversations.values()) {
-                for (const [interactionId, record] of conversation.interactions) {
-                  if (record.requestId !== requestInput.requestId) continue;
-                  const interaction = record.interaction;
-                  let answer: ReturnType<typeof zcodePermissionAnswer>;
-                  if (interaction.payload.kind === "permission") {
-                    if (requestInput.decision === undefined) {
-                      return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                        driver: ZCODE_PROVIDER,
-                        requestId: requestInput.requestId,
-                        cause: "ZCode permission requests require an approval decision.",
-                      });
-                    }
-                    answer = zcodePermissionAnswer({
-                      payload: interaction.payload,
-                      decision: requestInput.decision,
-                      ...(requestInput.feedback === undefined
-                        ? {}
-                        : { feedback: requestInput.feedback }),
-                    });
-                  } else if (interaction.payload.kind === "userInput") {
-                    if (requestInput.answers === undefined && requestInput.decision === undefined) {
-                      return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                        driver: ZCODE_PROVIDER,
-                        requestId: requestInput.requestId,
-                        cause: "ZCode user-input requests require answers or a decision.",
-                      });
-                    }
-                    answer =
-                      requestInput.decision === "cancel" || requestInput.decision === "decline"
-                        ? { action: "cancel" as const }
-                        : requestInput.answers === undefined
-                          ? {}
-                          : { content: requestInput.answers };
-                  } else {
-                    answer =
-                      requestInput.decision === "accept" ||
-                      requestInput.decision === "acceptAlways" ||
-                      requestInput.decision === "acceptForSession"
-                        ? { action: "accept" as const }
-                        : { action: "decline" as const };
+                const record = [...conversation.interactions.values()].find(
+                  (entry) => entry.requestId === requestInput.requestId,
+                );
+                if (record === undefined) continue;
+                // A duplicate answer is an upstream no-op; keep it idempotent.
+                if (record.settled) return;
+                const interaction = record.interaction;
+                const interactionId = interaction.interactionId;
+                const responseError = (cause: string) =>
+                  new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                    driver: ZCODE_PROVIDER,
+                    requestId: requestInput.requestId,
+                    cause,
+                  });
+                let answer: ReturnType<typeof zcodePermissionAnswer>;
+                let legResponse: unknown = { action: "decline" };
+                let grantReview = false;
+                if (interaction.payload.kind === "permission") {
+                  if (requestInput.decision === undefined) {
+                    return yield* responseError(
+                      "ZCode permission requests require an approval decision.",
+                    );
                   }
-                  const hookReview =
-                    interaction.payload.kind === "workspaceHookReview" && answer.action === "accept"
-                      ? interaction.payload
-                      : undefined;
-                  // Hook trust decisions go through the dedicated review
-                  // command; resolveInteraction still serves rejections.
-                  const { ack } =
-                    hookReview === undefined
-                      ? yield* sendCommand({
+                  answer = zcodePermissionAnswer({
+                    payload: interaction.payload,
+                    decision: requestInput.decision,
+                    ...(requestInput.feedback === undefined
+                      ? {}
+                      : { feedback: requestInput.feedback }),
+                  });
+                  legResponse = zcodePermissionRpcResponse({
+                    payload: interaction.payload,
+                    decision: requestInput.decision,
+                    ...(requestInput.feedback === undefined
+                      ? {}
+                      : { feedback: requestInput.feedback }),
+                  });
+                } else if (interaction.payload.kind === "userInput") {
+                  if (requestInput.answers === undefined && requestInput.decision === undefined) {
+                    return yield* responseError(
+                      "ZCode user-input requests require answers or a decision.",
+                    );
+                  }
+                  answer = zcodeUserInputAnswer({
+                    questions: record.questions ?? zcodeProjectedQuestions(interaction.payload),
+                    ...(requestInput.decision === undefined
+                      ? {}
+                      : { decision: requestInput.decision }),
+                    ...(requestInput.answers === undefined
+                      ? {}
+                      : { answers: requestInput.answers }),
+                  });
+                  legResponse = answer;
+                } else {
+                  grantReview =
+                    requestInput.decision === "accept" ||
+                    requestInput.decision === "acceptAlways" ||
+                    requestInput.decision === "acceptForSession";
+                  // The review flow honors only trust_selected; a decline is a
+                  // no-op upstream, so the card dismisses while the review
+                  // stays pending until its deadline.
+                  answer = { action: grantReview ? "accept" : "decline" };
+                }
+                const hookReview =
+                  interaction.payload.kind === "workspaceHookReview" && grantReview
+                    ? interaction.payload
+                    : undefined;
+                const reviewItemIds =
+                  hookReview === undefined ? [] : [...zcodeHookReviewTrustItemIds(hookReview)];
+                // Hook trust goes through the dedicated review command; when
+                // nothing is trustable the review settles locally instead.
+                const ack =
+                  hookReview === undefined || reviewItemIds.length === 0
+                    ? hookReview === undefined
+                      ? (yield* sendCommand({
                           sessionId: conversation.sessionId,
                           type: "resolveInteraction",
                           payload: { interactionId, answer },
-                        })
-                      : yield* sendCommand({
-                          sessionId: conversation.sessionId,
-                          type: "respondWorkspaceHookReview",
-                          payload: {
-                            sessionId: hookReview.sessionId,
-                            taskId: hookReview.taskId,
-                            runId: hookReview.runId,
-                            workspaceIdentity: hookReview.workspaceIdentity,
-                            bundleDigest: hookReview.bundleDigest,
-                            reviewFlowId: hookReview.reviewFlowId,
-                            generation: hookReview.generation,
-                            interactionId: hookReview.interactionId,
-                            ...(hookReview.remoteSessionId === undefined
-                              ? {}
-                              : { remoteSessionId: hookReview.remoteSessionId }),
-                            decision: {
-                              action: "trust_selected" as const,
-                              reviewItemIds: hookReview.items.map((item) => item.reviewItemId),
-                            },
+                        })).ack
+                      : undefined
+                    : (yield* sendCommand({
+                        sessionId: conversation.sessionId,
+                        type: "respondWorkspaceHookReview",
+                        payload: {
+                          sessionId: hookReview.sessionId,
+                          taskId: hookReview.taskId,
+                          runId: hookReview.runId,
+                          workspaceIdentity: hookReview.workspaceIdentity,
+                          bundleDigest: hookReview.bundleDigest,
+                          reviewFlowId: hookReview.reviewFlowId,
+                          generation: hookReview.generation,
+                          interactionId: hookReview.interactionId,
+                          ...(hookReview.remoteSessionId === undefined
+                            ? {}
+                            : { remoteSessionId: hookReview.remoteSessionId }),
+                          decision: {
+                            action: "trust_selected" as const,
+                            reviewItemIds,
                           },
-                        });
-                  if (ack.status !== "accepted" && ack.status !== "duplicate") {
-                    return yield* protocolError(
-                      `ZCode rejected interaction resolution: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
-                    );
-                  }
-                  conversation.interactions.delete(interactionId);
-                  const resolvedAt = yield* DateTime.now;
-                  yield* emit({
-                    type: "runtime_request.updated",
-                    driver: ZCODE_PROVIDER,
-                    runtimeRequest: {
-                      id: record.requestId,
-                      nodeId: idAllocator.derive.approvalNode({
-                        requestId: record.requestId,
-                      }),
-                      providerTurnId: null,
-                      nativeRequestRef: {
-                        driver: ZCODE_PROVIDER,
-                        nativeId: interactionId,
-                        strength: "strong",
-                      },
-                      kind: interaction.kind === "userInput" ? "user_input" : "permission",
-                      status: "resolved",
-                      responseCapability: {
-                        type: "not_resumable",
-                        reason: "Resolved.",
-                      },
-                      createdAt: resolvedAt,
-                      resolvedAt,
-                    },
-                  });
-                  return;
+                        },
+                      })).ack;
+                if (ack !== undefined && !isAckOk(ack) && ack.status !== "noop") {
+                  return yield* protocolError(
+                    `ZCode rejected interaction resolution: ${ackRejectedDetail(ack)}`,
+                  );
                 }
+                yield* settleInteraction(conversation, record, legResponse, {
+                  ...(requestInput.decision === undefined
+                    ? {}
+                    : { decision: requestInput.decision }),
+                  ...(requestInput.answers === undefined ? {} : { answers: requestInput.answers }),
+                });
+                return;
               }
               return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
                 driver: ZCODE_PROVIDER,
@@ -2397,27 +2585,23 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 }
               }
               for (const record of conversation.interactions.values()) {
+                if (record.settled) continue;
                 runtimeRequests.push({
                   id: record.requestId,
                   nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
-                  providerTurnId: null,
+                  providerTurnId: record.turn?.providerTurnId ?? null,
                   nativeRequestRef: {
                     driver: ZCODE_PROVIDER,
                     nativeId: record.interaction.interactionId,
                     strength: "strong",
                   },
-                  kind:
-                    record.interaction.kind === "userInput"
-                      ? "user_input"
-                      : record.interaction.payload.kind === "permission"
-                        ? zcodeRequestKindForTool(record.interaction.payload.toolName)
-                        : "permission",
+                  kind: requestKindForInteraction(record.interaction),
                   status: "pending",
                   responseCapability: {
                     type: "live",
                     providerSessionId: input.providerSessionId,
                   },
-                  createdAt: yield* DateTime.now,
+                  createdAt: record.createdAt,
                   resolvedAt: null,
                 });
               }

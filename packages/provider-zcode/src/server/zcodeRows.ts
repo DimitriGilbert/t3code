@@ -8,12 +8,14 @@ import type {
   ModelSelection,
   OrchestrationV2TurnItem,
   ProviderApprovalDecision,
+  ProviderApprovalOption,
   ProviderInstanceId,
   ProviderInteractionMode,
   ProviderRequestKind,
   RuntimeMode,
 } from "@t3tools/contracts";
-import type * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
+import * as Schema from "effect/Schema";
+import * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
 
 /** Stable per-session native item id derived from the row coordinates. */
 export function zcodeNativeItemId(sessionId: string, rowId: number): string {
@@ -277,35 +279,86 @@ export function zcodeReportedModelSelection(input: {
 }
 
 type PermissionOption = ZCodeSchema.PermissionRequestPayload["options"][number];
+const isZCodePermissionResponse = Schema.is(ZCodeSchema.ZCodePermissionResponse);
 
-/** Pick the advertised option for a T3 approval decision (P4 refines). */
+/** optionId upstream assigns the session-scoped always-allow choice. */
+export const ZCODE_SESSION_ALLOW_OPTION_ID = "allowSession";
+/** Mirror of upstream's deny reason text (permission-options.ts). */
+export const ZCODE_PERMISSION_DENIED_CONTENT =
+  "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+
+export function zcodePermissionDeniedReason(feedback?: string): string {
+  const trimmed = feedback?.trim();
+  return trimmed === undefined || trimmed === ""
+    ? ZCODE_PERMISSION_DENIED_CONTENT
+    : `${ZCODE_PERMISSION_DENIED_CONTENT} To tell you how to proceed, the user said:\n${trimmed}`;
+}
+
+/**
+ * Pick the advertised option for a T3 approval decision. Session scope prefers
+ * the `allowSession` optionId, then `fullAccess` (the only session-scope grant
+ * the wire offers when no allowSession option exists); both under-grant to
+ * allowOnce rather than over-grant to a project rule.
+ */
 export function zcodePermissionOptionForDecision(input: {
   readonly options: ReadonlyArray<PermissionOption>;
   readonly fullAccessOption?: ZCodeSchema.PermissionRequestPayload["fullAccessOption"];
   readonly decision: ProviderApprovalDecision;
 }): PermissionOption | undefined {
-  const wanted =
-    input.decision === "accept"
-      ? "allowOnce"
-      : input.decision === "acceptAlways" || input.decision === "acceptForSession"
-        ? "allowAlways"
-        : "deny";
-  const match = input.options.find((option) => option.kind === wanted);
-  if (match !== undefined) return match;
-  if (
-    (input.decision === "acceptAlways" || input.decision === "acceptForSession") &&
-    input.fullAccessOption !== undefined
-  ) {
-    return {
-      optionId: input.fullAccessOption.optionId,
-      label: input.fullAccessOption.label,
-      kind: input.fullAccessOption.kind,
-      ...(input.fullAccessOption.response === undefined
-        ? {}
-        : { response: input.fullAccessOption.response }),
-    };
+  const byKind = (kind: PermissionOption["kind"]) =>
+    input.options.find((option) => option.kind === kind);
+  switch (input.decision) {
+    case "accept":
+      return byKind("allowOnce");
+    case "acceptAlways":
+      return byKind("allowAlways") ?? byKind("allowOnce");
+    case "acceptForSession": {
+      const session = input.options.find(
+        (option) => option.optionId === ZCODE_SESSION_ALLOW_OPTION_ID,
+      );
+      if (session !== undefined) return session;
+      if (input.fullAccessOption !== undefined) return input.fullAccessOption;
+      return byKind("allowOnce");
+    }
+    case "decline":
+      return byKind("deny");
+    case "cancel":
+      return undefined;
+    default: {
+      const unreachable: never = input.decision;
+      return unreachable;
+    }
   }
-  return undefined;
+}
+
+/**
+ * Wire options → T3 approval options. `custom` kind entries (workflow Refine)
+ * are decline-shaped and would collide on the decision key, so they stay off
+ * the card; decline-with-feedback still reaches them via freeText.
+ */
+export function zcodeApprovalOptions(
+  payload: ZCodeSchema.PermissionRequestPayload,
+): ReadonlyArray<ProviderApprovalOption> {
+  const options = payload.options.flatMap((option): ReadonlyArray<ProviderApprovalOption> => {
+    if (option.kind === "custom") return [];
+    const decision =
+      option.kind === "allowOnce"
+        ? ("accept" as const)
+        : option.kind === "allowAlways"
+          ? option.optionId === ZCODE_SESSION_ALLOW_OPTION_ID
+            ? ("acceptForSession" as const)
+            : ("acceptAlways" as const)
+          : ("decline" as const);
+    return [{ decision, label: option.label }];
+  });
+  if (payload.fullAccessOption !== undefined) {
+    options.push({
+      decision: "acceptForSession",
+      label: payload.fullAccessOption.label,
+      warning: "Grants the agent full access for this session.",
+    });
+  }
+  return options;
 }
 
 export type ZcodeInteractionAnswer = {
@@ -321,8 +374,13 @@ export function zcodePermissionAnswer(input: {
   readonly decision: ProviderApprovalDecision;
   readonly feedback?: string;
 }): ZcodeInteractionAnswer {
-  if (input.decision === "cancel") {
-    return { action: "cancel" };
+  if (input.decision === "cancel") return { action: "cancel" };
+  const feedback = input.feedback?.trim();
+  // A custom (Refine) option only earns its optionId when the decline carries
+  // feedback; a bare decline hits the plain deny option like upstream.
+  if (input.decision === "decline" && feedback !== undefined && feedback !== "") {
+    const custom = input.payload.options.find((option) => option.kind === "custom");
+    if (custom !== undefined) return { optionId: custom.optionId, freeText: feedback };
   }
   const option = zcodePermissionOptionForDecision({
     options: input.payload.options,
@@ -336,6 +394,158 @@ export function zcodePermissionAnswer(input: {
   }
   return {
     optionId: option.optionId,
-    ...(input.feedback === undefined || input.feedback === "" ? {} : { freeText: input.feedback }),
+    ...(feedback === undefined || feedback === "" ? {} : { freeText: feedback }),
   };
+}
+
+/**
+ * Equivalent response for the legacy `interaction/requestPermission` leg: it
+ * races resolveInteraction for the same interaction, so completing it mirrors
+ * the command answer. `fullAccess` has no RPC-leg form — resolveFullAccess
+ * already resolved the broker as allowOnce by the time these fire.
+ */
+export function zcodePermissionRpcResponse(input: {
+  readonly payload: ZCodeSchema.PermissionRequestPayload;
+  readonly decision: ProviderApprovalDecision;
+  readonly feedback?: string;
+}): ZCodeSchema.ZCodePermissionResponse {
+  const option = zcodePermissionOptionForDecision({
+    options: input.payload.options,
+    ...(input.payload.fullAccessOption === undefined
+      ? {}
+      : { fullAccessOption: input.payload.fullAccessOption }),
+    decision: input.decision,
+  });
+  if (
+    input.decision === "decline" ||
+    input.decision === "cancel" ||
+    option === undefined ||
+    option.optionId === ZCodeSchema.PERMISSION_FULL_ACCESS_OPTION_ID
+  ) {
+    return {
+      decision: "deny",
+      reason: zcodePermissionDeniedReason(input.feedback),
+    };
+  }
+  return option.response !== undefined && isZCodePermissionResponse(option.response)
+    ? option.response
+    : { decision: "allow", reason: "Approved once" };
+}
+
+export interface ZcodeProjectedQuestion {
+  readonly id: string;
+  readonly questionText: string;
+  readonly multiSelect: boolean;
+}
+
+/**
+ * T3 question ids are answer-record keys; zcode answers key on question text.
+ * Dedupe headers so two same-header questions keep distinct ids.
+ */
+export function zcodeProjectedQuestions(
+  payload: ZCodeSchema.UserInputRequestPayload,
+): ReadonlyArray<ZcodeProjectedQuestion> {
+  const questions = payload.questions;
+  if (questions === undefined || questions.length === 0) {
+    return [{ id: "answer", questionText: payload.prompt, multiSelect: false }];
+  }
+  const used = new Set<string>();
+  return questions.map((question, index) => {
+    const base = question.header || `question-${index + 1}`;
+    let id = base;
+    let suffix = 2;
+    while (used.has(id)) {
+      id = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    used.add(id);
+    return { id, questionText: question.question, multiSelect: question.multiSelect === true };
+  });
+}
+
+const answerStrings = (value: unknown): ReadonlyArray<string> => {
+  const values = Array.isArray(value) ? value : [value];
+  return values.flatMap((entry) =>
+    typeof entry === "string" && entry.trim().length > 0 ? [entry.trim()] : [],
+  );
+};
+
+/**
+ * Mirror of upstream `buildElicitationResponseContent`: `answers` keys on
+ * question text, plus `answer_N` per answered question and `answer` for the
+ * single-question compat readers (plan approval, free-form input).
+ */
+export function zcodeUserInputContent(input: {
+  readonly questions: ReadonlyArray<ZcodeProjectedQuestion>;
+  readonly answers: Record<string, unknown>;
+}): Record<string, unknown> {
+  const answers: Record<string, string> = {};
+  const content: Record<string, unknown> = {};
+  input.questions.forEach((question, index) => {
+    const values = answerStrings(input.answers[question.id]);
+    if (values.length === 0) return;
+    answers[question.questionText] = values.join(", ");
+    content[`answer_${index}`] = question.multiSelect ? [...values] : values[0];
+  });
+  content.answers = answers;
+  if (input.questions.length === 1) {
+    const question = input.questions[0];
+    if (question !== undefined) {
+      const values = answerStrings(input.answers[question.id]);
+      if (values.length > 0) {
+        content.answer = question.multiSelect ? [...values] : values[0];
+      }
+    }
+  }
+  return content;
+}
+
+/** Build the `resolveInteraction` answer for a pending userInput. */
+export function zcodeUserInputAnswer(input: {
+  readonly questions: ReadonlyArray<ZcodeProjectedQuestion>;
+  readonly decision?: ProviderApprovalDecision;
+  readonly answers?: Record<string, unknown>;
+}): {
+  readonly action: "accept" | "decline" | "cancel";
+  readonly content?: Record<string, unknown>;
+} {
+  if (input.decision === "cancel") return { action: "cancel" };
+  if (input.decision === "decline") return { action: "decline" };
+  if (input.answers === undefined) return { action: "accept" };
+  return {
+    action: "accept",
+    content: zcodeUserInputContent({ questions: input.questions, answers: input.answers }),
+  };
+}
+
+const ZCODE_HOOK_REVIEW_TRUSTABLE_STATES: ReadonlySet<
+  ZCodeSchema.WorkspaceHookReviewRequestPayload["items"][number]["trustState"]
+> = new Set(["pending_trust", "revoked", "stale_digest"]);
+
+/** reviewItemIds a coarse "trust" decision should cover (empty → nothing grantable). */
+export function zcodeHookReviewTrustItemIds(
+  payload: ZCodeSchema.WorkspaceHookReviewRequestPayload,
+): ReadonlyArray<string> {
+  const trustable = payload.items
+    .filter((item) => ZCODE_HOOK_REVIEW_TRUSTABLE_STATES.has(item.trustState))
+    .map((item) => item.reviewItemId);
+  return trustable.length > 0 ? trustable : payload.items.map((item) => item.reviewItemId);
+}
+
+const ZCODE_HOOK_REVIEW_MAX_LISTED_ITEMS = 8;
+
+/** One-paragraph approval-card prompt for a workspace hook review. */
+export function zcodeHookReviewPrompt(
+  payload: ZCodeSchema.WorkspaceHookReviewRequestPayload,
+): string {
+  const listed = payload.items
+    .slice(0, ZCODE_HOOK_REVIEW_MAX_LISTED_ITEMS)
+    .map((item) => `- ${item.displayName} (${item.event})`);
+  const remainder = payload.items.length - listed.length;
+  const lines = [
+    `ZCode asks to trust ${payload.summary.hookCount} workspace hook(s) from ${payload.workspaceLabel}.`,
+    ...listed,
+    ...(remainder > 0 ? [`…and ${remainder} more.`] : []),
+  ];
+  return lines.join("\n");
 }

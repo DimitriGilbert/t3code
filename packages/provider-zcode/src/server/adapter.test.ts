@@ -1171,5 +1171,795 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         );
       }),
     );
+
+    it.effect(
+      "projects permission and userInput interactions, resolves them, and releases reverse-request legs",
+      () =>
+        Effect.gen(function* () {
+          const permissionPayload = {
+            kind: "permission" as const,
+            toolCallId: "tc-1",
+            toolName: "Bash",
+            summary: "Run ls -la",
+            detail: { command: "ls -la" },
+            freeText: true,
+            options: [
+              {
+                optionId: "allowOnce",
+                label: "Allow once",
+                kind: "allowOnce" as const,
+                response: { decision: "allow", reason: "Approved once" },
+              },
+              {
+                optionId: "allow_project",
+                label: "Always allow in this project",
+                kind: "allowAlways" as const,
+                response: { decision: "allow", reason: "Approved for this project" },
+              },
+              {
+                optionId: "deny",
+                label: "Deny",
+                kind: "deny" as const,
+                response: { decision: "deny" },
+              },
+            ],
+          };
+          const permissionInteraction = (id: string, anchorRowId: number | null) => ({
+            interactionId: id,
+            kind: "permission" as const,
+            anchorRowId,
+            createdAt: 1735689600500,
+            payload: permissionPayload,
+          });
+          const userInputPayload = {
+            kind: "userInput" as const,
+            prompt: "Tell me your choices",
+            freeText: true,
+            toolCallId: "tc-2",
+            toolName: "AskUserQuestion",
+            questions: [
+              {
+                question: "Pick a color",
+                header: "color",
+                options: [
+                  { value: "red", label: "Red" },
+                  { value: "blue", label: "Blue" },
+                ],
+              },
+              {
+                question: "Pick sizes",
+                header: "sizes",
+                multiSelect: true,
+                options: [
+                  { value: "s", label: "S" },
+                  { value: "m", label: "M" },
+                ],
+              },
+            ],
+          };
+          const interactionsPatch = (pending: ReadonlyArray<unknown>) => ({
+            op: "state.updated" as const,
+            patch: { pendingInteractions: pending },
+          });
+          const transcript = {
+            provider: "zcode",
+            protocol: "zcode.app-server-v4",
+            version: "1",
+            scenario: "p4 interactions",
+            entries: [
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "startup/storageState",
+                  params: {
+                    schemaVersion: 1,
+                    attemptId: "a1",
+                    sequence: 1,
+                    databaseId: "db",
+                    databaseKind: "session",
+                    phase: "ready",
+                    elapsedMs: 1,
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 1,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps3",
+                    sessionId: null,
+                    issuedAt: "<ignored>",
+                    type: "createSession",
+                    payload: {
+                      workspaceId: "/tmp/ws",
+                      config: {
+                        mode: "build",
+                        planEnabled: false,
+                        provider: PROVIDER_ID,
+                        model: MODEL_ID,
+                        thought: "low",
+                        modelSelection: {
+                          providerId: PROVIDER_ID,
+                          modelId: MODEL_ID,
+                          options: { reasoningLevel: "low" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 1,
+                  result: {
+                    commandId: "c1",
+                    status: "accepted",
+                    revisionAtDecision: 0,
+                    result: { type: "createSession", sessionId: "s1" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 2,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/s1",
+                    connectionId: "t3-ps3",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 2,
+                  result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(1, { kind: "snapshot", snapshot: snapshotFrame }, "initial"),
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps3",
+                    sessionId: "s1",
+                    issuedAt: "<ignored>",
+                    type: "sendText",
+                    payload: {
+                      text: "go",
+                      requestedDelivery: "startNow",
+                      heldQueueDisposition: "keepQueueAndSend",
+                      mode: "build",
+                      planEnabled: false,
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 3,
+                  result: {
+                    commandId: "c3",
+                    status: "accepted",
+                    revisionAtDecision: 1,
+                    result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                  },
+                },
+              },
+              // Turn adopts; a gated tool call raises a permission plus a
+              // second unanchored permission, both pending.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(2, {
+                  kind: "deltas",
+                  deltas: [
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 1,
+                        createdAt: 1735689600000,
+                        createdAtSeq: 1,
+                        turnId: "turn-1",
+                        kind: "turnHeader",
+                        origin: "userInput",
+                        state: "running",
+                        startedAt: 1735689600000,
+                        sourceCommandId: "<sendText-commandId>",
+                      },
+                    },
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 2,
+                        createdAt: 1735689600100,
+                        createdAtSeq: 2,
+                        turnId: "turn-1",
+                        kind: "toolCall",
+                        toolName: "Bash",
+                        toolCallId: "tc-1",
+                        status: "pendingApproval",
+                        approvalInteractionId: "int-1",
+                        inputText: "ls -la",
+                      },
+                    },
+                    interactionsPatch([
+                      permissionInteraction("int-1", 2),
+                      permissionInteraction("int-2", null),
+                    ]),
+                  ],
+                }),
+              },
+              // The legacy reverse request for the same interaction must be
+              // held, never error-responded, and answered after the v4 command.
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: "srv-perm-1",
+                  method: "interaction/requestPermission",
+                  params: {
+                    requestId: "int-1",
+                    sessionId: "s1",
+                    toolCallId: "tc-1",
+                    toolName: "Bash",
+                    reason: "Run ls -la",
+                    riskLevel: "low",
+                    input: {},
+                    options: [],
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps3",
+                    sessionId: "s1",
+                    issuedAt: "<ignored>",
+                    type: "resolveInteraction",
+                    payload: {
+                      interactionId: "int-1",
+                      answer: { optionId: "allowOnce" },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 4,
+                  result: { commandId: "c4", status: "accepted", revisionAtDecision: 2 },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: "srv-perm-1",
+                  result: { decision: "allow", reason: "Approved once" },
+                },
+              },
+              // int-1 drops out (already settled); int-2 is answered nowhere —
+              // the next patch evicts it like an upstream resolution.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(3, {
+                  kind: "deltas",
+                  deltas: [interactionsPatch([permissionInteraction("int-2", null)])],
+                }),
+              },
+              // A multi-question AskUserQuestion replaces it.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(4, {
+                  kind: "deltas",
+                  deltas: [
+                    interactionsPatch([
+                      {
+                        interactionId: "int-u1",
+                        kind: "userInput",
+                        anchorRowId: null,
+                        createdAt: 1735689600600,
+                        payload: userInputPayload,
+                      },
+                    ]),
+                  ],
+                }),
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: "srv-ui-1",
+                  method: "interaction/requestUserInput",
+                  params: {
+                    requestId: "int-u1",
+                    sessionId: "s1",
+                    prompt: "Tell me your choices",
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 5,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-ps3",
+                    sessionId: "s1",
+                    issuedAt: "<ignored>",
+                    type: "resolveInteraction",
+                    payload: {
+                      interactionId: "int-u1",
+                      answer: {
+                        action: "accept",
+                        content: {
+                          answers: { "Pick a color": "blue", "Pick sizes": "s, m" },
+                          answer_0: "blue",
+                          answer_1: ["s", "m"],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 5,
+                  result: { commandId: "c5", status: "accepted", revisionAtDecision: 3 },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: "srv-ui-1",
+                  result: {
+                    action: "accept",
+                    content: {
+                      answers: { "Pick a color": "blue", "Pick sizes": "s, m" },
+                      answer_0: "blue",
+                      answer_1: ["s", "m"],
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(5, {
+                  kind: "deltas",
+                  deltas: [interactionsPatch([])],
+                }),
+              },
+            ],
+          } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+          const sentCommandIds = yield* Ref.make<Array<string | undefined>>([]);
+          const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+            onOutbound: (actual) => {
+              const frame = actual as {
+                method?: string;
+                params?: { type?: string; commandId?: string };
+              };
+              return frame.method === "v4/command"
+                ? Ref.update(sentCommandIds, (ids) => [...ids, frame.params?.commandId])
+                : Effect.void;
+            },
+            beforeEmitInbound: (entry) =>
+              Ref.get(sentCommandIds).pipe(
+                Effect.andThen((ids) =>
+                  Effect.sync(() => {
+                    const params = (
+                      entry.frame as {
+                        params?: {
+                          frame?: {
+                            payload?: {
+                              deltas?: Array<{ row?: Record<string, unknown> }>;
+                            };
+                          };
+                        };
+                      }
+                    ).params?.frame?.payload;
+                    for (const delta of params?.deltas ?? []) {
+                      if (delta.row?.sourceCommandId === "<sendText-commandId>") {
+                        delta.row.sourceCommandId = ids[1];
+                      }
+                    }
+                  }),
+                ),
+              ),
+          });
+          const openClient = (_input: ZcodeAppServerSpawnInput) =>
+            Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+              Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+              Effect.mapError(
+                (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+              ),
+            );
+
+          const adapter = yield* makeZcodeAdapterV2({
+            instanceId: "zcode-test" as never,
+            settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+            environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+            openClient,
+          });
+          const runtime = yield* adapter
+            .openSession({
+              threadId: "thread-1" as never,
+              providerSessionId: "ps3" as never,
+              modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+              runtimePolicy: {
+                runtimeMode: "approval-required",
+                interactionMode: "default",
+                cwd: "/tmp/ws",
+                reasoningEffort: "low",
+              } as never,
+            })
+            .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+          const providerThread = yield* runtime.ensureThread({
+            threadId: "thread-1" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy: {
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: "/tmp/ws",
+              reasoningEffort: "low",
+            } as never,
+          });
+          const requestEvents = yield* Queue.unbounded<{
+            readonly id: string;
+            readonly status: string;
+            readonly nativeId: string | null | undefined;
+          }>();
+          yield* Stream.runForEach(runtime.events, (event) =>
+            event.type === "runtime_request.updated" && event.runtimeRequest !== undefined
+              ? Queue.offer(requestEvents, {
+                  id: event.runtimeRequest.id,
+                  status: event.runtimeRequest.status,
+                  nativeId: event.runtimeRequest.nativeRequestRef?.nativeId,
+                })
+              : Effect.void,
+          ).pipe(Effect.forkScoped);
+          yield* runtime.readThreadSnapshot({ providerThread });
+          yield* runtime.startTurn({
+            appThread: {} as never,
+            threadId: "thread-1" as never,
+            runId: "run-1" as never,
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: "attempt-1" as never,
+            rootNodeId: "node-1" as never,
+            providerThread,
+            message: {
+              messageId: "msg-1" as never,
+              text: "go",
+              attachments: [],
+              createdBy: null,
+              creationSource: "web",
+            } as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy: {
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: "/tmp/ws",
+              reasoningEffort: "low",
+            } as never,
+          });
+          const awaitPendingRequest = Effect.fnUntraced(function* (nativeId: string) {
+            for (;;) {
+              const event = yield* Queue.take(requestEvents);
+              if (event.nativeId === nativeId && event.status === "pending") return event.id;
+            }
+          });
+          const permissionRequestId = yield* awaitPendingRequest("int-1");
+          yield* runtime.respondToRuntimeRequest({
+            requestId: permissionRequestId,
+            decision: "accept",
+          });
+          const userInputRequestId = yield* awaitPendingRequest("int-u1");
+          yield* runtime.respondToRuntimeRequest({
+            requestId: userInputRequestId,
+            answers: { color: "blue", sizes: ["s", "m"] },
+          });
+          // The final clearing patch emits a resolved event for int-u1; the
+          // driver asserts every transcript entry was consumed in order.
+          for (;;) {
+            const event = yield* Queue.take(requestEvents);
+            if (event.nativeId === "int-u1" && event.status === "resolved") break;
+          }
+          const st = yield* Ref.get(driver.state);
+          assert.isNull(st.failure, JSON.stringify(st.failure));
+          assert.equal(st.cursor, transcript.entries.length, "transcript not fully consumed");
+        }),
+    );
+
+    it.effect("projects workspace hook reviews outside any turn and trusts trustable items", () =>
+      Effect.gen(function* () {
+        const hookReviewPayload = {
+          kind: "workspaceHookReview" as const,
+          reviewFlowId: "flow-1",
+          generation: 1,
+          interactionId: "int-hook-1",
+          sessionId: "s1",
+          taskId: "task-1",
+          runId: "run-hook-1",
+          workspaceIdentity: "/tmp/ws",
+          workspaceLabel: "/tmp/ws",
+          bundleDigest: "ab".repeat(32),
+          createdAt: 1735689600000,
+          deadlineAt: 1735690200000,
+          sourceFiles: [
+            { path: "/tmp/ws/.zcode/hooks.json", displayPath: ".zcode/hooks.json", editable: true },
+          ],
+          summary: { eventCount: 2, hookCount: 2, pendingCount: 1 },
+          items: [
+            {
+              reviewItemId: "item-1",
+              event: "SessionStart" as const,
+              type: "command" as const,
+              displayName: "bootstrap",
+              displayCommand: "./scripts/bootstrap.sh",
+              sourcePath: "/tmp/ws/.zcode/hooks.json",
+              resolvedTimeoutMs: 5000,
+              resolvedMaxOutputBytes: 4096,
+              executionMode: "foreground" as const,
+              configuredEnabled: true,
+              editable: true,
+              trustState: "pending_trust" as const,
+            },
+            {
+              reviewItemId: "item-2",
+              event: "PreToolUse" as const,
+              type: "command" as const,
+              displayName: "guard",
+              displayCommand: "./scripts/guard.sh",
+              sourcePath: "/tmp/ws/.zcode/hooks.json",
+              resolvedTimeoutMs: 5000,
+              resolvedMaxOutputBytes: 4096,
+              executionMode: "foreground" as const,
+              configuredEnabled: true,
+              editable: true,
+              trustState: "trusted_persistent" as const,
+            },
+          ],
+          warningCode: "workspace_hooks_execute_code" as const,
+        };
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p4 hook review",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 1,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-ps4",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 1,
+                result: {
+                  commandId: "c1",
+                  status: "accepted",
+                  revisionAtDecision: 0,
+                  result: { type: "createSession", sessionId: "s1" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s1",
+                  connectionId: "t3-ps4",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 2,
+                result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                1,
+                {
+                  kind: "snapshot",
+                  snapshot: {
+                    ...snapshotFrame,
+                    pendingInteractions: [
+                      {
+                        interactionId: "int-hook-1",
+                        kind: "workspaceHookReview",
+                        anchorRowId: null,
+                        createdAt: 1735689600000,
+                        payload: hookReviewPayload,
+                      },
+                    ],
+                  },
+                },
+                "initial",
+              ),
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-ps4",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "respondWorkspaceHookReview",
+                  payload: {
+                    sessionId: "s1",
+                    taskId: "task-1",
+                    runId: "run-hook-1",
+                    workspaceIdentity: "/tmp/ws",
+                    bundleDigest: "ab".repeat(32),
+                    reviewFlowId: "flow-1",
+                    generation: 1,
+                    interactionId: "int-hook-1",
+                    decision: {
+                      action: "trust_selected",
+                      reviewItemIds: ["item-1"],
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: { commandId: "c3", status: "accepted", revisionAtDecision: 1 },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [{ op: "state.updated", patch: { pendingInteractions: [] } }],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient,
+        });
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-1" as never,
+            providerSessionId: "ps4" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy: {
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: "/tmp/ws",
+              reasoningEffort: "low",
+            } as never,
+          })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread({
+          threadId: "thread-1" as never,
+          modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+          runtimePolicy: {
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/tmp/ws",
+            reasoningEffort: "low",
+          } as never,
+        });
+        const requestEvents = yield* Queue.unbounded<{
+          readonly status: string;
+          readonly nativeId: string | null | undefined;
+        }>();
+        yield* Stream.runForEach(runtime.events, (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest !== undefined
+            ? Queue.offer(requestEvents, {
+                status: event.runtimeRequest.status,
+                nativeId: event.runtimeRequest.nativeRequestRef?.nativeId,
+              })
+            : Effect.void,
+        ).pipe(Effect.forkScoped);
+        // readThreadSnapshot drains the initial snapshot, surfacing the review.
+        const snapshot = yield* runtime.readThreadSnapshot({ providerThread });
+        const request = snapshot.runtimeRequests.find(
+          (entry) => entry.nativeRequestRef?.nativeId === "int-hook-1",
+        );
+        if (request === undefined) {
+          return yield* Effect.die("hook review request not projected");
+        }
+        yield* runtime.respondToRuntimeRequest({
+          requestId: request.id,
+          decision: "accept",
+        });
+        for (;;) {
+          const event = yield* Queue.take(requestEvents);
+          if (event.nativeId === "int-hook-1" && event.status === "resolved") break;
+        }
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
   },
 );

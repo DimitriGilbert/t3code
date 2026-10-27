@@ -5,11 +5,9 @@ export const DEVIN_PERMISSION_DECLINED_COMMAND = "rm /tmp/devin-permission-decli
 
 /**
  * The `auto` runtime mode maps onto Devin's `smart` session mode, which
- * auto-approves what it judges safe and escalates the rest — `rm` is gated.
- * The first ask is approved and the command runs through a client terminal;
- * the second is declined and its exec tool call never reaches a terminal.
- * (Recorded live — verified option set for the exec ask is
- * [allow_once, allow_session, allow_always, allow_always_global, reject_once].)
+ * escalates gated commands like `rm` to asks. The first ask is approved and
+ * runs through a client terminal; the second is declined and never reaches
+ * a terminal.
  */
 export function devinPermissionInput(): OrchestratorFixtureInput {
   return {

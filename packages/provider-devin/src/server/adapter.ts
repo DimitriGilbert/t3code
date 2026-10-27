@@ -121,24 +121,9 @@ export interface DevinAdapterV2Options {
 
 /**
  * T3 runtime modes onto the Devin session modes `devin acp` advertises
- * (`accept-edits|smart|ask|plan|bypass`): `accept-edits` auto-approves edits
- * but still gates the rest, `smart` auto-approves what the model judges safe,
- * `bypass` auto-approves everything.
- *
- * `approval-required` has no exact Devin mode. The CLI's strictest
- * prompt-for-everything mode (`--permission-mode auto`) is not offered over
- * ACP — setting `mode: "auto"` via `session/set_config_option` is silently
- * ignored (verified live: `currentValue` unchanged) — and `ask` is a
- * read-only Q&A mode, not a coding gate. `accept-edits` is the strictest
- * selectable coding mode: Devin auto-approves workspace edits itself, but
- * shell commands still reach T3's approval-required policy as asks through
- * `session/request_permission` and the client-terminal guard.
- *
- * `interactionMode: "plan"` deliberately maps through the runtime mode here;
- * the adapter's generic plan/build machinery switches the session to the
- * advertised `plan` mode itself after recording the pre-plan mode it must
- * restore. Returning "plan" from this hook would record `plan` as that
- * restore point.
+ * (`accept-edits|smart|ask|plan|bypass`). `approval-required` lands on
+ * `accept-edits`, the strictest selectable coding mode (verified live);
+ * `plan` stays on the runtime mode so generic machinery restores correctly.
  */
 export function devinSessionModeForPolicy(
   policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
@@ -156,16 +141,10 @@ export function devinSessionModeForPolicy(
 }
 
 /**
- * In Devin's `smart` session mode (the T3 `auto` runtime mode) the agent
- * auto-approves the actions it judges safe and only raises
- * `session/request_permission` for the rest (verified live: `rm` triggered
- * an ask) — those asks are escalations, not routine prompts. The generic
- * disposition would auto-allow every one of
- * them (kind `other` + no sandbox → allow), collapsing smart into bypass.
- * Escalate them to the user instead, the same way Grok's Auto and zcode's
- * guarded modes are handled. Explicit approval/sandbox overrides keep the
- * generic policy answer so an operator who opted out of prompts is not
- * re-asked.
+ * In Devin's `smart` mode (T3 `auto`) `session/request_permission` asks are
+ * escalations, not routine prompts; the generic disposition would auto-allow
+ * them and collapse smart into bypass. Ask instead, unless explicit
+ * approval/sandbox overrides opted the operator out of prompts.
  */
 export function devinPermissionDisposition(
   policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
@@ -182,13 +161,9 @@ export function devinPermissionDisposition(
 }
 
 /**
- * Approval choices for a Devin `session/request_permission`. Devin emits
- * standard option kinds but `allow_always` means different things per ask:
- * `allow_session` (this command for the session) on `smart`-mode exec asks,
- * `switch_accept_edits`/`switch_bypass` (a session-mode switch) on gated
- * asks, and nothing at all on `exit_plan_mode` — where offering
- * acceptForSession would answer the request as cancelled. Show the
- * session-grant button only when Devin actually offered one.
+ * Approval choices for a Devin `session/request_permission`: show the
+ * session-grant button only when Devin offered `allow_always` — it is absent
+ * on `exit_plan_mode`, where answering it would cancel the request.
  */
 export function devinApprovalOptions(
   request: EffectAcpSchema.RequestPermissionRequest,
@@ -206,11 +181,9 @@ export function devinApprovalOptions(
 }
 
 /**
- * Devin's request errors carry a structured `data` payload —
- * `{"cognition.ai/errorKind": "session_not_found", "cognition.ai/retryable":
- * false}` on `code: -32016` (verified live). Surface the kind as the failure
- * code and keep the retryable hint. No rate-limit kind has been observed yet;
- * map one onto `usage_limit` when a real payload is captured.
+ * Devin's request errors carry `{"cognition.ai/errorKind": ...,
+ * "cognition.ai/retryable": ...}` in `data` (verified live on -32016
+ * session_not_found). Map a future rate-limit kind onto `usage_limit`.
  */
 const DevinRequestErrorData = Schema.Struct({
   "cognition.ai/errorKind": Schema.optional(Schema.String),
@@ -289,11 +262,9 @@ export const makeDevinAdapterV2 = Effect.fn("makeDevinAdapterV2")(function* (
     instanceId: options.instanceId,
     flavor: makeDevinAcpAdapterFlavor(options),
     selfInvocation: options.selfInvocation,
-    // Devin runs its shell commands through client terminals (the ACP
-    // `terminal` client capability) instead of its own executor — the only
-    // provider that does so. `shellCommands` because it sends shell source in
-    // `command` rather than an executable plus args. Creation is gated by
-    // T3's runtime policy at the terminal boundary.
+    // Devin runs shell commands through client terminals (the ACP `terminal`
+    // capability) — `shellCommands` because it sends shell source in
+    // `command`. Creation is gated by T3's runtime policy at that boundary.
     clientTerminals: { environment: options.environment, shellCommands: true },
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.continuationRequests === undefined

@@ -4,11 +4,9 @@ export const DEVIN_ASK_USER_PROMPT =
   "Use your ask-user / question tool to ask me whether this fixture should use a concise or verbose style, presenting them as selectable options. After I answer, reply exactly: devin ask user fixture complete";
 
 /**
- * Devin's ask-user tool reaches T3 as a form-mode `elicitation/create`
- * (the advertised `elicitation.form` capability): one `oneOf` field of
- * `{const, title}` entries — verified live in the p4 probes. The titled
- * variants map onto the user-input card's options while `const` stays the
- * wire value.
+ * Devin's ask-user tool reaches T3 as a form-mode `elicitation/create`: one
+ * `oneOf` field of `{const, title}` entries, where `const` stays the wire
+ * value (verified live).
  */
 export function devinAskUserInput(): OrchestratorFixtureInput {
   return {

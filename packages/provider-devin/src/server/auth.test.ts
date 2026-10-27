@@ -18,11 +18,9 @@ const settings = Schema.decodeSync(DevinSettings);
 
 /**
  * Answers `initialize`, `authenticate`, and `session/new` over stdio so the
- * auth controller's agent-method path (initialize → authenticate →
- * credentials-file verify → session/new) runs end to end without a PTY.
- * `authenticate` writes the fake credentials file named by
- * `DEVIN_FAKE_CRED_FILE`; `devin auth logout` removes it. Every agent-bound
- * method and CLI subcommand lands in the log named by `DEVIN_FAKE_LOG`.
+ * agent-method sign-in path runs end to end without a PTY. `authenticate`
+ * writes the fake credentials file named by `DEVIN_FAKE_CRED_FILE`; calls
+ * land in the `DEVIN_FAKE_LOG` log.
  */
 const fakeDevinSource = `
 import { appendFileSync, unlinkSync, writeFileSync } from "node:fs";

@@ -1,13 +1,7 @@
 /**
- * Records a Devin ACP replay transcript from a live `devin acp` process.
- *
- * The fixture's own scenario (the same commands and steps the replay test
- * dispatches) runs through the real orchestrator and the real DevinAdapterV2;
- * only the ACP runtime's protocol logger is swapped for a tee. Outbound frames
- * are therefore exactly what T3 sends, and inbound frames exactly what Devin
- * answered. Run from apps/server with an authenticated `devin` CLI on PATH
- * (or T3_DEVIN_ACP_BIN / T3_DEVIN_BIN):
- *
+ * Records a Devin ACP replay transcript from a live `devin acp` process: the
+ * real orchestrator and DevinAdapterV2 run the fixture scenario while the ACP
+ * protocol logger tees every frame. Run from apps/server with `devin` on PATH:
  *   node scripts/record-devin-acp-replay-fixture.ts --scenario devin_basic_turn
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";

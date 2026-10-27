@@ -69,11 +69,9 @@ describe("DevinAdapterV2", () => {
   });
 
   describe("session mode mapping", () => {
-    // Devin's ACP session modes: accept-edits|smart|ask|plan|bypass. The CLI's
-    // `--permission-mode auto` (prompt-for-everything) is not selectable over
-    // ACP — `set_config_option mode:"auto"` is silently ignored (verified
-    // live) — so approval-required lands on the strictest selectable coding
-    // mode, accept-edits, which still gates shell and dangerous operations.
+    // Devin's ACP session modes: accept-edits|smart|ask|plan|bypass.
+    // `--permission-mode auto` is not selectable over ACP (verified live),
+    // so approval-required lands on accept-edits.
     const mode = (runtimeMode: RuntimeMode, interactionMode: "default" | "plan" = "default") =>
       devinSessionModeForPolicy(
         ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({

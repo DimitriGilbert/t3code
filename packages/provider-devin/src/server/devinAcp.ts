@@ -5,11 +5,8 @@
  * @module provider-devin/server/devinAcp
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Scope from "effect/Scope";
-import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
@@ -57,11 +54,8 @@ export function devinAcpRuntimeProcessOwnership(
   AcpSessionRuntime.AcpSessionRuntimeOptions,
   "ownDescendantProcessGroups" | "ownDetachedProcessGroup" | "processGroupPlatform"
 > {
-  // `devin acp` is a single binary but spawns tool subprocesses and child
-  // agents, so Stop must reach the whole group or detached work survives.
-  // Same caveat as Grok: descendant tracking rides the linux cgroup ledger
-  // only until a stable identity provider covers nested detached groups on
-  // macOS.
+  // `devin acp` spawns tool subprocesses and child agents, so Stop must
+  // reach the whole group or detached work survives — same caveat as Grok.
   return {
     ownDescendantProcessGroups: processGroupPlatform === "linux",
     ownDetachedProcessGroup: true,
@@ -69,67 +63,58 @@ export function devinAcpRuntimeProcessOwnership(
   };
 }
 
-export const makeDevinAcpRuntime = (
+export const makeDevinAcpRuntime = Effect.fn("makeDevinAcpRuntime")(function* (
   input: DevinAcpRuntimeInput,
-): Effect.Effect<
-  AcpSessionRuntime.AcpSessionRuntime["Service"],
-  EffectAcpErrors.AcpError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
-> =>
-  Effect.gen(function* () {
-    const processGroupPlatform = yield* HostProcess.Platform.pipe(
-      Effect.provide(NodeServices.layer),
-    );
-    const acpContext = yield* Layer.build(
-      AcpSessionRuntime.layer({
-        ...input,
-        spawn: buildDevinAcpSpawnInput(input.settings, input.cwd, input.environment),
-        authMethodId: DEVIN_ACP_AUTH_METHOD_ID,
-        ...devinAcpRuntimeProcessOwnership(processGroupPlatform),
-      }),
-    );
-    return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
-      Effect.provide(acpContext),
-    );
-  });
+) {
+  const processGroupPlatform = yield* HostProcess.Platform.pipe(Effect.provide(NodeServices.layer));
+  const acpContext = yield* Layer.build(
+    AcpSessionRuntime.layer({
+      ...input,
+      spawn: buildDevinAcpSpawnInput(input.settings, input.cwd, input.environment),
+      authMethodId: DEVIN_ACP_AUTH_METHOD_ID,
+      ...devinAcpRuntimeProcessOwnership(processGroupPlatform),
+    }),
+  );
+  return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
+    Effect.provide(acpContext),
+  );
+});
 
 /**
  * Applies the model picker through Devin's `model` config option
- * (`session/set_config_option`; `runtime.setModel` resolves the option id).
- * Values are Devin model slugs (`swe-2-high`, `adaptive`, `claude-*`, ...).
- * The `default`/`auto` slugs mean "keep the session's current model" and are
- * never sent. Returns the model the session now runs on, or undefined when
- * Devin advertises no model option.
+ * (`runtime.setModel` resolves the option id). `default`/`auto` mean "keep
+ * the session's current model" and are never sent. Returns the model the
+ * session now runs on, or undefined when Devin advertises no model option.
  */
-export function applyDevinAcpModelSelection<E>(input: {
+export const applyDevinAcpModelSelection = Effect.fn("applyDevinAcpModelSelection")(function* <
+  E,
+>(input: {
   readonly runtime: Pick<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     "getConfigOptions" | "setModel"
   >;
   readonly requestedModelId: string | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
-}): Effect.Effect<string | undefined, E> {
-  return Effect.gen(function* () {
-    const configOptions = yield* input.runtime.getConfigOptions;
-    const modelOption = configOptions.find((option) => option.category === "model");
-    if (modelOption === undefined) {
-      return undefined;
-    }
-    const currentModelId =
-      modelOption.type === "select" && typeof modelOption.currentValue === "string"
-        ? modelOption.currentValue
-        : undefined;
-    const requestedModelId = input.requestedModelId?.trim();
-    if (
-      requestedModelId === undefined ||
-      requestedModelId === "" ||
-      requestedModelId === "default" ||
-      requestedModelId === "auto" ||
-      requestedModelId === currentModelId
-    ) {
-      return currentModelId;
-    }
-    yield* input.runtime.setModel(requestedModelId).pipe(Effect.mapError(input.mapError));
-    return requestedModelId;
-  });
-}
+}) {
+  const configOptions = yield* input.runtime.getConfigOptions;
+  const modelOption = configOptions.find((option) => option.category === "model");
+  if (modelOption === undefined) {
+    return undefined;
+  }
+  const currentModelId =
+    modelOption.type === "select" && typeof modelOption.currentValue === "string"
+      ? modelOption.currentValue
+      : undefined;
+  const requestedModelId = input.requestedModelId?.trim();
+  if (
+    requestedModelId === undefined ||
+    requestedModelId === "" ||
+    requestedModelId === "default" ||
+    requestedModelId === "auto" ||
+    requestedModelId === currentModelId
+  ) {
+    return currentModelId;
+  }
+  yield* input.runtime.setModel(requestedModelId).pipe(Effect.mapError(input.mapError));
+  return requestedModelId;
+});

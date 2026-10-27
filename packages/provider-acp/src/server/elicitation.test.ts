@@ -30,7 +30,7 @@ describe("acpElicitationFormQuestions", () => {
     ]);
   });
 
-  it("maps devin's oneOf const+title ask-user form with the sentinel value preserved", () => {
+  it("maps oneOf/anyOf const+title variants with the sentinel value preserved", () => {
     // Devin's ask-user form is the verified live shape: titled `oneOf`
     // entries where the wire value is the `const` behind a readable title.
     // ZCode uses the same encoding with a `__skip__` sentinel.

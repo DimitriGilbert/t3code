@@ -17,6 +17,7 @@ import {
   zcodePermissionOptionForDecision,
   zcodeReportedModelSelection,
   zcodeRequestKindForTool,
+  zcodeResolveModelSelection,
   zcodeSessionModeForRuntimeMode,
   zcodeTimelineMarkerText,
   zcodeToolCallItemStatus,
@@ -96,6 +97,114 @@ it("reports the session model selection for nativeMetadata", () => {
   expect(
     zcodeReportedModelSelection({ config: null, instanceId: "zcode-test" as never }),
   ).toBeUndefined();
+});
+
+it("resolves model slugs into wire model selections", () => {
+  const config = {
+    provider: "account:zai-individual-coding-plan",
+    model: "GLM-5.3",
+    thought: "max",
+    followupMode: "queue" as const,
+  };
+  expect(
+    zcodeResolveModelSelection({
+      model: "account:zai-individual-coding-plan/GLM-5.3-Flash",
+      config,
+    }),
+  ).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3-Flash",
+    reasoningLevel: "max",
+  });
+  // A bare model id pairs with the session's current provider.
+  expect(zcodeResolveModelSelection({ model: "GLM-5.3-Flash", config })).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3-Flash",
+    reasoningLevel: "max",
+  });
+  // `default` (and empty) keep the session's current selection.
+  for (const model of ["default", ""]) {
+    expect(zcodeResolveModelSelection({ model, config })).toEqual({
+      providerId: "account:zai-individual-coding-plan",
+      modelId: "GLM-5.3",
+      reasoningLevel: "max",
+    });
+  }
+});
+
+it("migrates cached ACP-era model slugs to current provider ids", () => {
+  const config = {
+    provider: "account:zai-individual-coding-plan",
+    model: "GLM-5.3",
+    thought: "max",
+    followupMode: "queue" as const,
+  };
+  // The ACP bridge advertised `providerId\modelId` values with `builtin:` ids;
+  // a cached picker slug must not leak into the registry model id.
+  expect(zcodeResolveModelSelection({ model: "builtin:zai-coding-plan\\GLM-5.3", config })).toEqual(
+    {
+      providerId: "account:zai-individual-coding-plan",
+      modelId: "GLM-5.3",
+      reasoningLevel: "max",
+    },
+  );
+  expect(
+    zcodeResolveModelSelection({ model: "builtin:bigmodel-coding-plan\\GLM-5.3", config }),
+  ).toEqual({
+    providerId: "account:bigmodel-individual-coding-plan",
+    modelId: "GLM-5.3",
+    reasoningLevel: "max",
+  });
+  // `/`-joined legacy picker values can carry a `model$level` suffix.
+  expect(
+    zcodeResolveModelSelection({ model: "builtin:zai-coding-plan/GLM-5.3$high", config }),
+  ).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3",
+    reasoningLevel: "high",
+  });
+  // The runtime policy's effort still wins over an embedded level.
+  expect(
+    zcodeResolveModelSelection({
+      model: "builtin:zai-coding-plan/GLM-5.3$high",
+      reasoningEffort: "low",
+      config,
+    }),
+  ).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3",
+    reasoningLevel: "low",
+  });
+  // `custom:` values URI-decode their components and special-case `builtin:`.
+  expect(
+    zcodeResolveModelSelection({ model: "custom:builtin:zai-coding-plan:GLM-5.3", config }),
+  ).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3",
+    reasoningLevel: "max",
+  });
+  expect(
+    zcodeResolveModelSelection({
+      model: "custom:account%3Azai-individual-coding-plan:GLM-5.3-Flash",
+      config,
+    }),
+  ).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3-Flash",
+    reasoningLevel: "max",
+  });
+  // `glm`/`zcode` are old execution-backend names, and unknown `builtin:` ids
+  // have no current provider — both defer to the session's selection.
+  expect(zcodeResolveModelSelection({ model: "glm\\GLM-5.3", config })).toBeUndefined();
+  expect(zcodeResolveModelSelection({ model: "builtin:unknown\\GLM-5.3", config })).toBeUndefined();
+  // Official GLM ids canonicalize case on legacy providers.
+  expect(
+    zcodeResolveModelSelection({ model: "builtin:zai-coding-plan\\glm-5.3-flash", config }),
+  ).toEqual({
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3-Flash",
+    reasoningLevel: "max",
+  });
 });
 
 it("maps text row states onto turn item statuses", () => {
@@ -727,6 +836,210 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
           `cursor=${st.cursor} events=${JSON.stringify(seen)}`,
         );
         assert.isTrue(seen.includes("turn.terminal"), JSON.stringify(seen));
+      }),
+    );
+
+    it.effect("sends the registry model pair for a cached ACP-era slug", () =>
+      Effect.gen(function* () {
+        // A stale picker slug cached by the old ACP bridge (`provider\model`
+        // with a `builtin:` id) must resolve to the pair the pushed registry
+        // actually published — previously it leaked through verbatim and the
+        // registry rejected sendText as modelUnavailable.
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "legacy model slug migration",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 1,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-ps3",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 1,
+                result: {
+                  commandId: "c1",
+                  status: "accepted",
+                  revisionAtDecision: 0,
+                  result: { type: "createSession", sessionId: "s1" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s1",
+                  connectionId: "t3-ps3",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 2,
+                result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(1, { kind: "snapshot", snapshot: snapshotFrame }, "initial"),
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-ps3",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "sendText",
+                  payload: {
+                    text: "ping",
+                    requestedDelivery: "startNow",
+                    heldQueueDisposition: "keepQueueAndSend",
+                    mode: "build",
+                    planEnabled: false,
+                    modelSelection: {
+                      providerId: PROVIDER_ID,
+                      modelId: MODEL_ID,
+                      options: { reasoningLevel: "low" },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 2,
+                  result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                },
+              },
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient,
+        });
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-1" as never,
+            providerSessionId: "ps3" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy: {
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: "/tmp/ws",
+              reasoningEffort: "low",
+            } as never,
+          })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread({
+          threadId: "thread-1" as never,
+          modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+          runtimePolicy: {
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/tmp/ws",
+            reasoningEffort: "low",
+          } as never,
+        });
+        yield* Stream.runDrain(runtime.events).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          appThread: {} as never,
+          threadId: "thread-1" as never,
+          runId: "run-1" as never,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: "attempt-1" as never,
+          rootNodeId: "node-1" as never,
+          providerThread,
+          message: {
+            messageId: "msg-1" as never,
+            text: "ping",
+            attachments: [],
+            createdBy: null,
+            creationSource: "web",
+          } as never,
+          // The stale slug the ACP bridge advertised (literal backslash).
+          modelSelection: { model: "builtin:zai-coding-plan\\GLM-5.3" } as never,
+          runtimePolicy: {
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/tmp/ws",
+            reasoningEffort: "low",
+          } as never,
+        });
+        yield* runtime.readThreadSnapshot({ providerThread });
+        for (let i = 0; i < 100; i += 1) yield* Effect.yieldNow;
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length, `cursor=${st.cursor}`);
       }),
     );
 

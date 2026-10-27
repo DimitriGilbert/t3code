@@ -172,6 +172,116 @@ const ZCODE_DEFAULT_MODEL_SLUG_VALUE = "default";
 /** Default reasoning level when the session config carries none. */
 export const ZCODE_DEFAULT_REASONING_LEVEL = "max";
 
+/**
+ * `builtin:` provider ids from the ACP bridge and pre-registry ZCode, mapped
+ * to current ids (mirrors upstream `migrateLegacyModelProviderId`). Unknown
+ * `builtin:` ids carry no provider.
+ */
+const ZCODE_LEGACY_PROVIDER_ID_MAP: Readonly<Record<string, string>> = {
+  "builtin:bigmodel": "bigmodel-api",
+  "builtin:zai": "zai-api",
+  "builtin:bigmodel-start-plan": "account:bigmodel-start-plan",
+  "builtin:zai-start-plan": "account:zai-start-plan",
+  "builtin:bigmodel-coding-plan": "account:bigmodel-individual-coding-plan",
+  "builtin:zai-coding-plan": "account:zai-individual-coding-plan",
+};
+
+/** Current provider id for a possibly-legacy `builtin:` id; undefined when unmappable. */
+function zcodeMigrateLegacyProviderId(providerId: string): string | undefined {
+  return providerId.startsWith("builtin:") ? ZCODE_LEGACY_PROVIDER_ID_MAP[providerId] : providerId;
+}
+
+/** Old `provider=glm|zcode` values name execution backends, not supplier ids. */
+const ZCODE_LEGACY_BACKEND_PROVIDER_IDS: ReadonlySet<string> = new Set(["glm", "zcode"]);
+
+/**
+ * Providers whose model ids canonicalize to the official GLM spelling on
+ * legacy reads — mirrors upstream `migrateLegacyOfficialGlmModelId`.
+ */
+const ZCODE_OFFICIAL_GLM_PROVIDER_PATTERN =
+  /^(?:builtin:(?:zai|bigmodel)(?:-start-plan|-coding-plan)?|account:(?:zai|bigmodel)-(?:start-plan|individual-coding-plan|team-coding-plan))$/;
+
+/** Upstream `OFFICIAL_GLM_MODEL_IDS` (shared/official-glm-model-id.ts). */
+const ZCODE_OFFICIAL_GLM_MODEL_IDS: ReadonlyArray<string> = [
+  "GLM-5.3",
+  "GLM-5.3-Flash",
+  "GLM-5V-Turbo",
+  "GLM-5.2",
+  "GLM-5.1",
+  "GLM-5.1-Highspeed",
+  "GLM-5",
+  "GLM-5-Turbo",
+  "GLM-4.7",
+  "GLM-4.7-FlashX",
+  "GLM-4.7-Flash",
+  "GLM-4.6",
+  "GLM-4.5-Air",
+  "GLM-4.5",
+  "GLM-4.6V",
+  "GLM-4.6V-Flash",
+  "GLM-4.6V-FlashX",
+  "GLM-4.1V-Thinking-FlashX",
+  "GLM-4.1V-Thinking-Flash",
+  "GLM-4-FlashX-250414",
+  "GLM-4-Flash-250414",
+  "GLM-4V-Flash",
+];
+const ZCODE_OFFICIAL_GLM_MODEL_ID_BY_LOWERCASE: ReadonlyMap<string, string> = new Map(
+  ZCODE_OFFICIAL_GLM_MODEL_IDS.map((id) => [id.toLowerCase(), id]),
+);
+
+const zcodeDecodeSlugComponent = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+interface ZcodeParsedModelSlug {
+  readonly providerId?: string | undefined;
+  readonly modelId?: string | undefined;
+  readonly reasoningLevel?: string | undefined;
+}
+
+/**
+ * Split a stored slug into provider/model/reasoning parts. Besides
+ * `providerId/modelId`, persisted values also appear as `providerId\modelId`,
+ * `custom:<provider>:<model>` (URI-encoded, `builtin:` two-segment), and
+ * `modelId$reasoningLevel`.
+ */
+function zcodeParseModelSlug(slug: string): ZcodeParsedModelSlug {
+  if (slug.startsWith("custom:")) {
+    const body = slug.slice("custom:".length);
+    const separator = body.indexOf(":");
+    if (separator < 0) return { providerId: zcodeDecodeSlugComponent(body) };
+    const parts = body.split(":");
+    if (parts.length >= 3 && parts[0] === "builtin") {
+      return {
+        providerId: `builtin:${parts[1]}`,
+        modelId: zcodeDecodeSlugComponent(parts.slice(2).join(":")),
+      };
+    }
+    return {
+      providerId: zcodeDecodeSlugComponent(body.slice(0, separator)),
+      modelId: zcodeDecodeSlugComponent(body.slice(separator + 1)),
+    };
+  }
+  const slash = slug.indexOf("/");
+  const backslash = slug.indexOf("\\");
+  const separator =
+    slash >= 0 && (backslash < 0 || slash < backslash) ? slash : backslash >= 0 ? backslash : slash;
+  if (separator <= 0) return { modelId: slug };
+  let modelId = slug.slice(separator + 1);
+  let reasoningLevel: string | undefined;
+  const levelSeparator = modelId.indexOf("$");
+  if (levelSeparator > 0 && levelSeparator < modelId.length - 1) {
+    reasoningLevel = modelId.slice(levelSeparator + 1);
+    modelId = modelId.slice(0, levelSeparator);
+  }
+  return { providerId: slug.slice(0, separator), modelId, reasoningLevel };
+}
+
 export interface ZcodeResolvedModelSelection {
   readonly providerId: string;
   readonly modelId: string;
@@ -181,8 +291,8 @@ export interface ZcodeResolvedModelSelection {
 /**
  * Resolve a T3 model slug (`<providerId>/<modelId>`, a bare `<modelId>`, or
  * `default` for the session's current selection) plus runtime reasoning
- * effort into the wire ModelSelection. Returns undefined when no model can be
- * named — the session's current selection then applies.
+ * effort into the wire ModelSelection; legacy slug shapes migrate to current
+ * ids. Undefined means no model can be named — the session selection applies.
  */
 export function zcodeResolveModelSelection(input: {
   readonly model: string;
@@ -190,21 +300,28 @@ export function zcodeResolveModelSelection(input: {
   readonly config?: ZCodeSchema.SessionConfigState | null;
 }): ZcodeResolvedModelSelection | undefined {
   const slug = input.model.trim();
-  const separator = slug.indexOf("/");
+  const parsed = zcodeParseModelSlug(slug);
+  const slugProviderId = parsed.providerId === "" ? undefined : parsed.providerId;
   const configProviderId = input.config?.modelSelection?.providerId ?? input.config?.provider;
   const providerId =
-    (separator > 0 ? slug.slice(0, separator) : undefined) ??
+    slugProviderId ??
     (configProviderId === undefined || configProviderId === "" ? undefined : configProviderId);
+  const configModelId = input.config?.modelSelection?.modelId ?? input.config?.model;
   const modelId =
-    separator > 0
-      ? slug.slice(separator + 1)
-      : slug === "" || slug === ZCODE_DEFAULT_MODEL_SLUG_VALUE
-        ? (input.config?.modelSelection?.modelId ?? input.config?.model)
-        : slug;
+    slug === "" || slug === ZCODE_DEFAULT_MODEL_SLUG_VALUE
+      ? configModelId
+      : (parsed.modelId ?? configModelId);
   if (providerId === undefined || modelId === undefined || modelId === "") return undefined;
+  if (ZCODE_LEGACY_BACKEND_PROVIDER_IDS.has(providerId)) return undefined;
+  const migratedProviderId = zcodeMigrateLegacyProviderId(providerId);
+  if (migratedProviderId === undefined) return undefined;
+  const resolvedModelId = ZCODE_OFFICIAL_GLM_PROVIDER_PATTERN.test(providerId)
+    ? (ZCODE_OFFICIAL_GLM_MODEL_ID_BY_LOWERCASE.get(modelId.toLowerCase()) ?? modelId)
+    : modelId;
   const levels = input.config?.thoughtLevels;
   const reasoningLevel =
     input.reasoningEffort?.trim() ||
+    parsed.reasoningLevel?.trim() ||
     input.config?.modelSelection?.options?.reasoningLevel ||
     input.config?.thought ||
     (levels !== undefined && levels.length > 0
@@ -212,7 +329,7 @@ export function zcodeResolveModelSelection(input: {
         ? ZCODE_DEFAULT_REASONING_LEVEL
         : (levels[0] ?? ZCODE_DEFAULT_REASONING_LEVEL)
       : ZCODE_DEFAULT_REASONING_LEVEL);
-  return { providerId, modelId, reasoningLevel };
+  return { providerId: migratedProviderId, modelId: resolvedModelId, reasoningLevel };
 }
 
 /**
@@ -267,13 +384,17 @@ export function zcodeReportedModelSelection(input: {
   if (config === null) return undefined;
   const providerId = config.modelSelection?.providerId ?? config.provider;
   const modelId = config.modelSelection?.modelId ?? config.model;
-  if (providerId === "" || modelId === "") return undefined;
+  // Legacy `builtin:` session configs report their migrated id so the slug
+  // matches the registry-published (picker) provider.
+  const reportedProviderId =
+    providerId === "" ? undefined : (zcodeMigrateLegacyProviderId(providerId) ?? providerId);
+  if (reportedProviderId === undefined || modelId === "") return undefined;
   const thought =
     config.modelSelection?.options?.reasoningLevel ??
     (config.thought === "" ? undefined : config.thought);
   return {
     instanceId: input.instanceId,
-    model: `${providerId}/${modelId}`,
+    model: `${reportedProviderId}/${modelId}`,
     options: thought === undefined ? [] : [{ id: "reasoningEffort", value: thought }],
   };
 }

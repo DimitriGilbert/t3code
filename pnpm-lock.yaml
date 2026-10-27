@@ -935,6 +935,9 @@ importers:
       '@t3tools/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@t3tools/effect-zcode-protocol':
+        specifier: workspace:*
+        version: link:../../packages/effect-zcode-protocol
       '@t3tools/provider-testing':
         specifier: workspace:*
         version: link:../../packages/provider-testing

@@ -10,6 +10,7 @@ import {
   type ModelCapabilities,
   type ServerProviderAuth,
   type ServerProviderModel,
+  type ServerProviderSkill,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import type { ZcodeSettings } from "../settings.ts";
@@ -47,6 +48,7 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "@t3tools/provider-core/server/maintenanceResolver";
 import type { ServerProvider } from "@t3tools/contracts";
+import * as ZCodeClient from "@t3tools/effect-zcode-protocol/client";
 import * as ZCodeRpc from "@t3tools/effect-zcode-protocol/rpc";
 import * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
 import {
@@ -94,6 +96,18 @@ const ZCODE_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
 const withZcodeSnapshotDefaults = (draft: ServerProviderDraft): ServerProviderDraft => ({
   ...draft,
   supportsTextGeneration: false,
+  // Native sessions list/resume/delete are local `session/list` + v4
+  // `deleteSession` calls; no credentials needed once the CLI is installed.
+  ...(draft.installed
+    ? {
+        nativeSessions: {
+          canList: true,
+          canLoad: true,
+          canResume: true,
+          canDelete: true,
+        },
+      }
+    : {}),
   // ZCode has no remote sign-out the bridge can drive (auth.ts logout is a
   // guided failure). canLogout must say so explicitly — otherwise the UI's
   // `canLogout ?? setup.canAuthenticate` fallback offers a control that can
@@ -270,6 +284,7 @@ interface ZcodeProbeResult {
   readonly authenticated: boolean;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly skills: ReadonlyArray<ServerProviderSkill>;
 }
 
 export interface ZcodeStatusProbeOptions {
@@ -303,7 +318,7 @@ function zcodeModelsFromWorkspaceOptions(
   return models;
 }
 
-function zcodeSlashCommandsFromWorkspaceConfig(
+export function zcodeSlashCommandsFromWorkspaceConfig(
   commands: ReadonlyArray<ZCodeSchema.WorkspaceSlashCommand>,
 ): ReadonlyArray<ServerProviderSlashCommand> {
   const seen = new Set<string>([COMPACT_SLASH_COMMAND.name]);
@@ -332,10 +347,69 @@ function zcodeSlashCommandsFromWorkspaceConfig(
   return slashCommands;
 }
 
+const MAX_SKILLS = 256;
+const MAX_SKILL_TEXT_LENGTH = 1_024;
+
+export function zcodeSkillsFromCatalog(
+  entries: ReadonlyArray<ZCodeSchema.ZCodeSkillReferenceCatalogEntry>,
+): ReadonlyArray<ServerProviderSkill> {
+  const skills: Array<ServerProviderSkill> = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const name = nonEmptyTrimmed(entry.name);
+    const path = nonEmptyTrimmed(entry.path);
+    if (name === undefined || path === undefined || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    const description = nonEmptyTrimmed(entry.description)?.slice(0, MAX_SKILL_TEXT_LENGTH);
+    skills.push({
+      name,
+      path,
+      scope: entry.scope,
+      enabled: true,
+      ...(description === undefined ? {} : { description }),
+    });
+    if (skills.length >= MAX_SKILLS) break;
+  }
+  return skills;
+}
+
+/**
+ * Cold catalog probe for a workspace on an already-open client:
+ * `skills/referenceCatalog` + `workspace/readPresentation`. Each call is
+ * best-effort — a failed catalog degrades to an empty list, not a probe error.
+ */
+export const probeZcodeWorkspaceCatalog = Effect.fn("probeZcodeWorkspaceCatalog")(function* (
+  client: ZCodeClient.ZCodeAppServerClient["Service"],
+  cwd: string,
+) {
+  const workspace = { workspacePath: cwd, workspaceKey: cwd };
+  const [skills, presentation] = yield* Effect.all(
+    [
+      client
+        .request(ZCodeRpc.LEGACY_METHODS.skillsReferenceCatalog, { workspace })
+        .pipe(Effect.option),
+      client
+        .request(ZCodeRpc.LEGACY_METHODS.workspaceReadPresentation, { workspace })
+        .pipe(Effect.option),
+    ],
+    { concurrency: "unbounded" },
+  );
+  return {
+    skills: Option.isSome(skills) ? zcodeSkillsFromCatalog(skills.value.skills) : [],
+    slashCommands: Option.isSome(presentation)
+      ? zcodeSlashCommandsFromWorkspaceConfig(presentation.value.slashCommands)
+      : [],
+  } satisfies {
+    skills: ReadonlyArray<ServerProviderSkill>;
+    slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  };
+});
+
 /**
  * One disposable `app-server` round trip: subscribe `workspace-config/<cwd>`
- * and read the first frame's model options + slash commands. Auth is never
- * triggered — a storage/subscription failure is the probe's signal.
+ * (liveness gate), then pull the skill catalog and the workspace
+ * presentation (`readPresentation` scans slash commands cold — the
+ * workspace-config topic only seeds while a live session exists).
  */
 const discoverZcodeMetadataViaAppServer = Effect.fn("discoverZcodeMetadataViaAppServer")(function* (
   zcodeSettings: ZcodeSettings,
@@ -380,10 +454,17 @@ const discoverZcodeMetadataViaAppServer = Effect.fn("discoverZcodeMetadataViaApp
   // A timed-out snapshot is a probe failure, not proof of auth — the caller
   // treats undefined as "probe failed" and falls back to credential checks.
   if (Option.isNone(snapshot)) return undefined;
+  const catalog = yield* probeZcodeWorkspaceCatalog(client, cwd);
+  const configCommands = zcodeSlashCommandsFromWorkspaceConfig(snapshot.value.config.slashCommands);
+  // workspace-config stays empty until a live session exists; readPresentation
+  // is the cold authority when it answered.
+  const slashCommands =
+    catalog.slashCommands.length > configCommands.length ? catalog.slashCommands : configCommands;
   return {
     authenticated: true,
     models: zcodeModelsFromWorkspaceOptions(snapshot.value.config.configOptions),
-    slashCommands: zcodeSlashCommandsFromWorkspaceConfig(snapshot.value.config.slashCommands),
+    slashCommands,
+    skills: catalog.skills,
   } satisfies ZcodeProbeResult;
 }, Effect.scoped);
 
@@ -405,6 +486,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
     readonly enabled: boolean;
     readonly models?: ReadonlyArray<ServerProviderModel>;
     readonly slashCommands?: ReadonlyArray<ServerProviderSlashCommand>;
+    readonly skills?: ReadonlyArray<ServerProviderSkill>;
     readonly probe: {
       readonly installed: boolean;
       readonly version: string | null;
@@ -420,6 +502,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
         checkedAt,
         models: input.models ?? fallbackModels,
         ...(input.slashCommands ? { slashCommands: input.slashCommands } : {}),
+        ...(input.skills ? { skills: input.skills } : {}),
         probe: input.probe,
       }),
     );
@@ -576,6 +659,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
     enabled: zcodeSettings.enabled,
     models,
     slashCommands: probe?.slashCommands ?? [COMPACT_SLASH_COMMAND],
+    skills: probe?.skills ?? [],
     probe: {
       installed: true,
       version,

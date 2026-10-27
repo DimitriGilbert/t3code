@@ -36,6 +36,7 @@ export const LEGACY_METHODS = {
   providerUpdateAccountConfig: "provider/updateAccountConfig",
   providerRefreshRegistry: "provider/refreshRegistry",
   providerTestModelConnectivity: "provider/testModelConnectivity",
+  workspaceReadPresentation: "workspace/readPresentation",
   workspaceGenerateText: "workspace/generateText",
   workspaceCancelGenerateText: "workspace/cancelGenerateText",
 } as const;
@@ -88,6 +89,7 @@ export const CLIENT_REQUEST_PARAMS = {
   [LEGACY_METHODS.providerRefreshRegistry]: ZCodeSchema.ZCodeProviderRefreshRegistryParams,
   [LEGACY_METHODS.providerTestModelConnectivity]:
     ZCodeSchema.ZCodeProviderTestModelConnectivityParams,
+  [LEGACY_METHODS.workspaceReadPresentation]: ZCodeSchema.ZCodeWorkspaceReadPresentationParams,
   [LEGACY_METHODS.workspaceGenerateText]: ZCodeSchema.ZCodeWorkspaceGenerateTextParams,
   [LEGACY_METHODS.workspaceCancelGenerateText]: ZCodeSchema.ZCodeWorkspaceCancelGenerateTextParams,
 } as const;
@@ -129,6 +131,7 @@ export const CLIENT_REQUEST_RESPONSES = {
   [LEGACY_METHODS.providerRefreshRegistry]: ZCodeSchema.ZCodeProviderRefreshRegistryResult,
   [LEGACY_METHODS.providerTestModelConnectivity]:
     ZCodeSchema.ZCodeProviderTestModelConnectivityResult,
+  [LEGACY_METHODS.workspaceReadPresentation]: ZCodeSchema.ZCodeWorkspacePresentation,
   [LEGACY_METHODS.workspaceGenerateText]: ZCodeSchema.ZCodeWorkspaceGenerateTextResult,
   [LEGACY_METHODS.workspaceCancelGenerateText]: ZCodeSchema.ZCodeWorkspaceCancelGenerateTextResult,
 } as const;

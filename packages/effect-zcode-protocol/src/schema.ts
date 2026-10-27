@@ -2118,6 +2118,21 @@ export const ZCodePluginsReferenceCatalogResult = Schema.Struct({
   plugins: Schema.Array(ZCodePluginReferenceCatalogEntry),
 });
 
+// workspace/readPresentation is the cold path to the slash-command catalog:
+// unlike the workspace-config topic it scans builtins + custom commands
+// without requiring a live session in the process.
+export const ZCodeWorkspaceReadPresentationParams = Schema.Struct({
+  workspace: ZCodeWorkspaceRef,
+});
+export type ZCodeWorkspaceReadPresentationParams = typeof ZCodeWorkspaceReadPresentationParams.Type;
+
+export const ZCodeWorkspacePresentation = Schema.Struct({
+  workspace: ZCodeWorkspaceRef,
+  mode: Schema.Literals(["plan", "build", "edit", "yolo", "guarded", "auto"]),
+  slashCommands: Schema.Array(WorkspaceSlashCommand),
+});
+export type ZCodeWorkspacePresentation = typeof ZCodeWorkspacePresentation.Type;
+
 export const ZCodeProviderUpdateAccountConfigParams = Schema.Struct({
   revision: nonEmptyString,
   basedOnZCodeBuiltinRevision: nonEmptyString,

@@ -54,6 +54,7 @@ import {
   openZcodeAppServerClient,
   type ZcodeAppServerClientOpener,
 } from "./zcodeAppServer.ts";
+import { discoverZcodeModels } from "./zcodeCredentials.ts";
 
 const ZCODE_PRESENTATION = {
   displayName: "ZCode",
@@ -69,7 +70,7 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 // `zcode app-server --stdio` can be slow to reach storage-ready on
 // a cold install; this still bounds the whole disposable session.
-const ZCODE_ACP_PROBE_TIMEOUT_MS = 15_000;
+const ZCODE_APP_SERVER_PROBE_TIMEOUT_MS = 15_000;
 
 const ZCODE_CLI_COMMAND = "zcode";
 const ZCODE_BIN_ENV = "ZCODE_BIN";
@@ -180,7 +181,7 @@ export const zcodeCredentialFilesPresent = Effect.fn("zcodeCredentialFilesPresen
   for (const relative of [
     path.join("v2", "config.json"),
     path.join("v2", "credentials.json"),
-    "provider_config.json",
+    path.join("v2", "provider_config.json"),
   ]) {
     if (
       yield* fileSystem.exists(path.join(home, relative)).pipe(Effect.orElseSucceed(() => false))
@@ -260,6 +261,7 @@ const runZcodeCliCommand = Effect.fn("runZcodeCliCommand")(function* (
     ChildProcess.make(spawnCommand.command, spawnCommand.args, {
       env: childEnv,
       shell: spawnCommand.shell,
+      ...(cwd === undefined ? {} : { cwd }),
     }),
   );
 });
@@ -373,11 +375,11 @@ const discoverZcodeMetadataViaAppServer = Effect.fn("discoverZcodeMetadataViaApp
     clientMode: "desktop-continuous" as const,
   });
   const snapshot = yield* Deferred.await(snapshotReady).pipe(
-    Effect.timeoutOption(ZCODE_ACP_PROBE_TIMEOUT_MS / 2),
+    Effect.timeoutOption(ZCODE_APP_SERVER_PROBE_TIMEOUT_MS / 2),
   );
-  if (Option.isNone(snapshot)) {
-    return { authenticated: true, models: [], slashCommands: [] } satisfies ZcodeProbeResult;
-  }
+  // A timed-out snapshot is a probe failure, not proof of auth — the caller
+  // treats undefined as "probe failed" and falls back to credential checks.
+  if (Option.isNone(snapshot)) return undefined;
   return {
     authenticated: true,
     models: zcodeModelsFromWorkspaceOptions(snapshot.value.config.configOptions),
@@ -523,7 +525,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
     environment,
     cwd ?? process.cwd(),
     probeOptions?.openClient ?? makeDefaultProbeOpener(),
-  ).pipe(Effect.timeoutOption(ZCODE_ACP_PROBE_TIMEOUT_MS), Effect.exit);
+  ).pipe(Effect.timeoutOption(ZCODE_APP_SERVER_PROBE_TIMEOUT_MS), Effect.exit);
   const probe = Exit.isSuccess(probeExit) ? Option.getOrUndefined(probeExit.value) : undefined;
   const probeFailed = probe === undefined;
   if (probeFailed) {
@@ -532,7 +534,18 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
     });
   }
 
-  const discoveredModels = probe?.models ?? [];
+  // workspace-config carries no model options on this build; the executable
+  // model list is derived from the builtin provider file + local credentials.
+  const accountModels = yield* discoverZcodeModels(environment);
+  const discoveredModels: ReadonlyArray<ServerProviderModel> =
+    accountModels.length > 0
+      ? accountModels.map((model) => ({
+          slug: model.slug,
+          name: model.name,
+          isCustom: false,
+          capabilities: EMPTY_CAPABILITIES,
+        }))
+      : (probe?.models ?? []);
   const models =
     discoveredModels.length > 0
       ? zcodeModelsFromSettings(zcodeSettings.customModels, discoveredModels)

@@ -41,6 +41,7 @@ export const LEGACY_METHODS = {
 } as const;
 
 export const SERVER_REQUEST_METHODS = {
+  sessionRequestRuntimePreferences: "session/requestRuntimePreferences",
   interactionRequestPermission: "interaction/requestPermission",
   interactionRequestUserInput: "interaction/requestUserInput",
   interactionRequestProviderRuntimeHeaders: "interaction/requestProviderRuntimeHeaders",
@@ -140,6 +141,8 @@ export type ClientRequestResponsesByMethod = {
 };
 
 export const SERVER_REQUEST_PARAMS = {
+  [SERVER_REQUEST_METHODS.sessionRequestRuntimePreferences]:
+    ZCodeSchema.ZCodeSessionRequestRuntimePreferencesParams,
   [SERVER_REQUEST_METHODS.interactionRequestPermission]: ZCodeSchema.ZCodePermissionRequestParams,
   [SERVER_REQUEST_METHODS.interactionRequestUserInput]: ZCodeSchema.ZCodeUserInputRequestParams,
   [SERVER_REQUEST_METHODS.interactionRequestProviderRuntimeHeaders]:
@@ -156,6 +159,8 @@ export type ServerRequestParamsByMethod = {
 };
 
 export const SERVER_REQUEST_RESPONSES = {
+  [SERVER_REQUEST_METHODS.sessionRequestRuntimePreferences]:
+    ZCodeSchema.ZCodeSessionRuntimePreferencesResult,
   [SERVER_REQUEST_METHODS.interactionRequestPermission]: ZCodeSchema.ZCodePermissionResponse,
   [SERVER_REQUEST_METHODS.interactionRequestUserInput]: ZCodeSchema.ZCodeUserInputResponse,
   [SERVER_REQUEST_METHODS.interactionRequestProviderRuntimeHeaders]:

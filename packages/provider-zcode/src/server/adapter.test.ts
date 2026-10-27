@@ -2830,6 +2830,41 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
             sessionId: "child-1",
             logEpoch: "ec1",
             control: { ...snapshotFrame.control, phase: "running", sessionEnded: false },
+            rows: {
+              window: [
+                {
+                  rowId: 1,
+                  createdAt: 1735689600200,
+                  createdAtSeq: 1,
+                  turnId: "cturn-1",
+                  kind: "turnHeader",
+                  origin: "userInput",
+                  executionKind: "agent",
+                  state: "running",
+                  startedAt: 1735689600200,
+                },
+                {
+                  rowId: 2,
+                  createdAt: 1735689600200,
+                  createdAtSeq: 2,
+                  turnId: "cturn-1",
+                  kind: "userInput",
+                  origin: "mailbox",
+                  text: "Review the zcode protocol package.",
+                },
+                {
+                  rowId: 3,
+                  createdAt: 1735689600300,
+                  createdAtSeq: 3,
+                  turnId: "cturn-1",
+                  kind: "assistantText",
+                  text: "Scanning",
+                  state: "streaming",
+                },
+              ],
+              totalCount: 3,
+              firstRowId: null,
+            },
           };
           const transcript = {
             provider: "zcode",
@@ -3054,6 +3089,49 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
                   "subc1",
                 ),
               },
+              // The child's own turn completes on its own topic — rows land
+              // through the same turn-less turnHeader path the snapshot used.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  2,
+                  {
+                    kind: "deltas",
+                    deltas: [
+                      {
+                        op: "row.upserted",
+                        row: {
+                          rowId: 3,
+                          createdAt: 1735689600300,
+                          createdAtSeq: 4,
+                          turnId: "cturn-1",
+                          kind: "assistantText",
+                          text: "Scanning done",
+                          state: "complete",
+                        },
+                      },
+                      {
+                        op: "row.upserted",
+                        row: {
+                          rowId: 1,
+                          createdAt: 1735689600200,
+                          createdAtSeq: 5,
+                          turnId: "cturn-1",
+                          kind: "turnHeader",
+                          origin: "userInput",
+                          executionKind: "agent",
+                          state: "completedSuccess",
+                          startedAt: 1735689600200,
+                          endedAt: 1735689605000,
+                        },
+                      },
+                    ],
+                  },
+                  "online",
+                  "conversation/child-1",
+                  "subc1",
+                ),
+              },
             ],
           } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
           const sentCommandId = yield* Ref.make<string | undefined>(undefined);
@@ -3185,6 +3263,78 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
             runtime.hasPendingBackgroundWorkForThread ?? (() => Effect.succeed(false));
           assert.isTrue(yield* hasPending);
           assert.isTrue(yield* forThread(providerThread));
+          // The child session's own turn projects as runless work on the
+          // child thread: root node, provider turn, prompt, and content.
+          const childRootNode = yield* awaitEvent(
+            (event) =>
+              event.type === "node.updated" &&
+              event.node.threadId === childThreadId &&
+              event.node.kind === "root_turn",
+          );
+          assert.equal(
+            childRootNode.type === "node.updated" ? childRootNode.node.status : undefined,
+            "running",
+          );
+          assert.equal(
+            childRootNode.type === "node.updated" ? childRootNode.node.runId : "set",
+            null,
+          );
+          const childTurnRunning = yield* awaitEvent(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.providerThreadId === childProviderThreadId,
+          );
+          assert.equal(
+            childTurnRunning.type === "provider_turn.updated"
+              ? childTurnRunning.providerTurn.status
+              : undefined,
+            "running",
+          );
+          assert.equal(
+            childTurnRunning.type === "provider_turn.updated"
+              ? childTurnRunning.providerTurn.runAttemptId
+              : "set",
+            null,
+          );
+          const childPrompt = yield* awaitEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.threadId === childThreadId &&
+              event.turnItem.type === "user_message",
+          );
+          assert.equal(
+            childPrompt.type === "turn_item.updated" ? childPrompt.turnItem.runId : "set",
+            null,
+          );
+          yield* awaitEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.threadId === childThreadId &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.status === "running",
+          );
+          // The child's terminal turnHeader finalizes its observed turn:
+          // provider_turn completed, root node completed — no run-scoped
+          // turn.terminal is emitted for a runless turn.
+          const childTurnDone = yield* awaitEvent(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.providerThreadId === childProviderThreadId &&
+              event.providerTurn.status === "completed",
+          );
+          assert.equal(
+            childTurnDone.type === "provider_turn.updated"
+              ? childTurnDone.providerTurn.runAttemptId
+              : "set",
+            null,
+          );
+          yield* awaitEvent(
+            (event) =>
+              event.type === "node.updated" &&
+              event.node.threadId === childThreadId &&
+              event.node.kind === "root_turn" &&
+              event.node.status === "completed",
+          );
           const st = yield* Ref.get(driver.state);
           assert.isNull(st.failure, JSON.stringify(st.failure));
           assert.equal(st.cursor, transcript.entries.length);

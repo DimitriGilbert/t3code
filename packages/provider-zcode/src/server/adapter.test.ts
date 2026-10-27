@@ -170,6 +170,7 @@ it("renders timeline markers into user-facing text", () => {
 // ── replayed app-server lifecycle (P2 seam) ──
 
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as FileSystem from "effect/FileSystem";
@@ -3124,6 +3125,92 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
           assert.isNull(st.failure, JSON.stringify(st.failure));
           assert.equal(st.cursor, transcript.entries.length);
         }),
+    );
+
+    it.effect("subscribes workspace-config after the first session and publishes its catalog", () =>
+      Effect.gen(function* () {
+        const gotConfig = yield* Deferred.make<{
+          workspaceId: string;
+          state: { slashCommands: ReadonlyArray<{ name: string }> };
+        }>();
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p6 workspace catalog",
+          entries: [
+            ...seededSessionEntries("t3-ps6"),
+            {
+              type: "expect_outbound" as const,
+              frame: {
+                id: 3,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "workspace-config//tmp/ws",
+                  connectionId: "t3-ps6",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound" as const,
+              frame: {
+                id: 3,
+                result: {
+                  ack: { subscriptionId: "wcs1", mode: "snapshot", logEpoch: "e1" },
+                },
+              },
+            },
+            {
+              type: "emit_inbound" as const,
+              frame: wireFrame(
+                1,
+                {
+                  kind: "snapshot",
+                  snapshot: {
+                    protocolVersion: 1,
+                    workspaceId: "/tmp/ws",
+                    logEpoch: "e1",
+                    config: {
+                      configOptions: [
+                        {
+                          id: "mode",
+                          name: "Mode",
+                          type: "select",
+                          currentValue: "build",
+                        },
+                      ],
+                      slashCommands: [{ name: "review", description: "Review changes" }],
+                    },
+                  },
+                },
+                "initial",
+                "workspace-config//tmp/ws",
+                "wcs1",
+              ),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+          onWorkspaceConfig: (workspaceId, state) =>
+            Deferred.succeed(gotConfig, { workspaceId, state }).pipe(Effect.asVoid),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "ps6" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        yield* runtime.ensureThread(sessionOpenInput);
+        const pushed = yield* Deferred.await(gotConfig);
+        assert.equal(pushed.workspaceId, "/tmp/ws");
+        assert.equal(pushed.state.slashCommands[0]?.name, "review");
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
     );
   },
 );

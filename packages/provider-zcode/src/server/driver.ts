@@ -5,11 +5,17 @@
  *
  * @module provider-zcode/server/driver
  */
-import { ProviderSetupError, TextGenerationError } from "@t3tools/contracts";
+import {
+  AcpRegistryOperationError,
+  ProviderSetupError,
+  TextGenerationError,
+} from "@t3tools/contracts";
 import { ZcodeSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
@@ -18,14 +24,20 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import { ZcodeAdapterV2Driver, type ZcodeAdapterV2DriverEnv } from "./adapter.ts";
+import * as ZCodeClient from "@t3tools/effect-zcode-protocol/client";
+import * as ZCodeRpc from "@t3tools/effect-zcode-protocol/rpc";
+import * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
+import { makeZcodeAdapterV2, type ZcodeAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import {
   buildInitialZcodeProviderSnapshot,
   checkZcodeProviderStatus,
   enrichZcodeSnapshot,
+  probeZcodeWorkspaceCatalog,
+  zcodeSlashCommandsFromWorkspaceConfig,
 } from "./status.ts";
 import { makeZcodeAuth } from "./auth.ts";
+import { buildZcodeAppServerSpawnInput, openZcodeAppServerClient } from "./zcodeAppServer.ts";
 import { ZCODE_PROVIDER } from "./driverKind.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
@@ -88,6 +100,8 @@ export type ZcodeDriverEnv =
   | ProviderLatestVersions.ProviderLatestVersions
   | Path.Path
   | ProviderEventLoggers.ProviderEventLoggers;
+
+const isManagementError = Schema.is(AcpRegistryOperationError);
 
 export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
   driverKind: DRIVER_KIND,
@@ -171,13 +185,21 @@ export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
       ),
     );
 
-    const orchestrationAdapter = yield* ZcodeAdapterV2Driver.create({
+    // Live workspace-config catalogs pushed by the adapter's sessions; keyed
+    // by workspaceId (the session's cwd). readPresentation probes stay the
+    // cold path; these win once a live session seeds the real catalog.
+    const liveWorkspaceConfigs = new Map<string, ZCodeSchema.WorkspaceConfigState>();
+
+    const orchestrationAdapter = yield* makeZcodeAdapterV2({
       instanceId,
-      displayName,
-      accentColor,
-      environment,
-      enabled,
-      config,
+      settings: effectiveConfig,
+      environment: processEnv,
+      onWorkspaceConfig: (workspaceId, state) =>
+        Effect.sync(() => {
+          liveWorkspaceConfigs.set(workspaceId, state);
+        }),
+      resolveAttachmentPath: host.resolveAttachmentPath,
+      resolveExtractedTextPath: host.resolveExtractedTextPath,
     }).pipe(
       Effect.mapError(
         (cause) =>
@@ -232,6 +254,55 @@ export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
       ),
     );
 
+    const managementError =
+      (operation: string, reason: AcpRegistryOperationError["reason"]) => (cause: unknown) =>
+        new AcpRegistryOperationError({
+          reason,
+          message: `ZCode ${operation} failed.`,
+          cause,
+        });
+
+    // Disposable app-server for session management; requests self-gate on the
+    // storage gate so no handshake work is needed before session/list.
+    const withManagementClient = <A>(
+      cwd: string,
+      use: (
+        client: ZCodeClient.ZCodeAppServerClient["Service"],
+      ) => Effect.Effect<A, AcpRegistryOperationError>,
+      operation: string,
+    ): Effect.Effect<A, AcpRegistryOperationError> =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const spawnInput = buildZcodeAppServerSpawnInput(effectiveConfig, cwd, processEnv);
+          const client = yield* openZcodeAppServerClient({
+            command: spawnInput.command,
+            args: spawnInput.args,
+            cwd: spawnInput.cwd,
+            env: spawnInput.env,
+          }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+          return yield* use(client);
+        }),
+      ).pipe(
+        Effect.timeoutOption("20 seconds"),
+        Effect.flatMap(
+          Option.match({
+            onNone: () =>
+              Effect.fail(
+                new AcpRegistryOperationError({
+                  reason: "session_list_unsupported",
+                  message: `ZCode ${operation} timed out.`,
+                }),
+              ),
+            onSome: Effect.succeed,
+          }),
+        ),
+        Effect.mapError((cause) =>
+          isManagementError(cause)
+            ? cause
+            : managementError(operation, "session_list_unsupported")(cause),
+        ),
+      );
+
     return {
       instanceId,
       driverKind: DRIVER_KIND,
@@ -241,6 +312,153 @@ export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
       enabled,
       auth,
       snapshot,
+      snapshotForCwd: (cwd) =>
+        (!effectiveConfig.enabled
+          ? snapshot.getSnapshot
+          : Effect.gen(function* () {
+              const machineSnapshot = yield* snapshot.getSnapshot;
+              const probed = yield* Effect.scoped(
+                Effect.gen(function* () {
+                  const spawnInput = buildZcodeAppServerSpawnInput(
+                    effectiveConfig,
+                    cwd,
+                    processEnv,
+                  );
+                  const client = yield* openZcodeAppServerClient({
+                    command: spawnInput.command,
+                    args: spawnInput.args,
+                    cwd: spawnInput.cwd,
+                    env: spawnInput.env,
+                  });
+                  return yield* probeZcodeWorkspaceCatalog(client, cwd);
+                }),
+              ).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                Effect.timeoutOption("20 seconds"),
+                Effect.option,
+                Effect.map(Option.flatten),
+                Effect.map(Option.getOrUndefined),
+              );
+              const live = liveWorkspaceConfigs.get(cwd);
+              const slashCommands =
+                live !== undefined
+                  ? zcodeSlashCommandsFromWorkspaceConfig(live.slashCommands)
+                  : probed?.slashCommands;
+              return {
+                ...machineSnapshot,
+                skills: probed?.skills ?? machineSnapshot.skills,
+                ...(slashCommands === undefined ? {} : { slashCommands }),
+                // A probe that never answered leaves command discovery pending.
+                ...(probed === undefined && live === undefined
+                  ? { slashCommandsPending: true as const }
+                  : {}),
+              };
+            })
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: `Failed to probe the ZCode workspace catalog for '${cwd}'`,
+                cause,
+              }),
+          ),
+        ),
+      acpSessionManagement: {
+        listSessions: ({ cwd }) =>
+          withManagementClient(
+            cwd,
+            (client) =>
+              client
+                .request(ZCodeRpc.LEGACY_METHODS.sessionList, {
+                  workspace: { workspacePath: cwd, workspaceKey: cwd },
+                })
+                .pipe(
+                  Effect.map((result) => ({
+                    sessions: result.sessions.map((session) => ({
+                      sessionId: session.sessionId,
+                      cwd: session.workspace.workspacePath,
+                      additionalDirectories: [],
+                      title: session.title === "" ? null : session.title,
+                      updatedAt: Option.match(DateTime.make(session.updatedAt), {
+                        onNone: () => null,
+                        onSome: DateTime.formatIso,
+                      }),
+                      importedThreadId: null,
+                    })),
+                    nextCursor: null,
+                    canLoad: true,
+                    canResume: true,
+                    canDelete: true,
+                  })),
+                  Effect.mapError(managementError("session list", "session_import_failed")),
+                ),
+            "session list",
+          ),
+        deleteSession: ({ cwd, sessionId }) =>
+          withManagementClient(
+            cwd,
+            (client) =>
+              Effect.gen(function* () {
+                const ack = yield* client
+                  .request(
+                    ZCodeRpc.V4_METHODS.command,
+                    ZCodeSchema.makeCommandEnvelope({
+                      commandId: yield* Effect.orDie(crypto.randomUUIDv7()),
+                      clientId: `t3-${instanceId}-session-management`,
+                      sessionId,
+                      issuedAt: DateTime.toEpochMillis(yield* DateTime.now),
+                      type: "deleteSession",
+                      payload: {},
+                    }),
+                  )
+                  .pipe(
+                    Effect.mapError(managementError("session delete", "session_delete_failed")),
+                  );
+                if (
+                  ack.status !== "accepted" &&
+                  ack.status !== "duplicate" &&
+                  ack.status !== "noop"
+                ) {
+                  return yield* new AcpRegistryOperationError({
+                    reason: "session_delete_failed",
+                    message: `ZCode rejected deleteSession: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
+                  });
+                }
+              }),
+            "session delete",
+          ),
+        logout: () =>
+          Effect.fail(
+            new AcpRegistryOperationError({
+              reason: "logout_unsupported",
+              message:
+                "ZCode has no remote sign-out. Remove the credentials under ~/.zcode/v2 or sign out in the ZCode desktop app.",
+            }),
+          ),
+        listProviders: () =>
+          Effect.fail(
+            new AcpRegistryOperationError({
+              reason: "providers_unsupported",
+              message: "ZCode providers are managed by the ZCode CLI, not by T3 Code.",
+            }),
+          ),
+        setProvider: () =>
+          Effect.fail(
+            new AcpRegistryOperationError({
+              reason: "provider_configuration_failed",
+              message: "ZCode providers are managed by the ZCode CLI, not by T3 Code.",
+            }),
+          ),
+        disableProvider: () =>
+          Effect.fail(
+            new AcpRegistryOperationError({
+              reason: "provider_configuration_failed",
+              message: "ZCode providers are managed by the ZCode CLI, not by T3 Code.",
+            }),
+          ),
+      },
       orchestrationAdapter,
       textGeneration: makeUnsupportedTextGeneration(),
     } satisfies ProviderInstance;

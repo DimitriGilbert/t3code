@@ -6,6 +6,8 @@
  * @module provider-zcode/server/adapter
  */
 import {
+  type ChatAttachment,
+  type ChatImageAttachment,
   type NodeId,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
@@ -44,6 +46,10 @@ import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  isProviderNativeImageAttachment,
+  providerMessageTextWithAttachmentPaths,
+} from "@t3tools/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   makeSubagentChildThread,
@@ -338,6 +344,20 @@ export interface ZcodeAdapterV2Options {
   readonly environment: NodeJS.ProcessEnv;
   /** Test seam: replaces the spawned `zcode app-server --stdio` process. */
   readonly openClient?: ZcodeAppServerClientOpener;
+  /**
+   * Receives the live `workspace-config/<workspaceId>` catalog (mode options
+   * + slash commands) once a session in this process seeds it. The driver
+   * caches it per cwd for `snapshotForCwd`.
+   */
+  readonly onWorkspaceConfig?: (
+    workspaceId: string,
+    state: ZCodeSchema.WorkspaceConfigState,
+  ) => Effect.Effect<void>;
+  /** Resolves a chat attachment to its stored path (ProviderHost seam). */
+  readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
+  readonly resolveExtractedTextPath?:
+    | ((path: string) => Effect.Effect<string | undefined>)
+    | undefined;
 }
 
 export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
@@ -501,6 +521,25 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         // childSessionIds already given a T3 thread/provider thread pair.
         const projectedChildSessions = new Set<string>();
         const wire = new ZCodeWire.TopicWireFrameAssembler<unknown>(Schema.Unknown);
+        // workspace-config seeds its publisher from a live session on first
+        // subscribe, so subscribe only after a conversation exists — an early
+        // subscribe would pin the empty catalog for the process lifetime.
+        let workspaceConfigSubscribed = false;
+        const ensureWorkspaceConfigSubscription = Effect.fnUntraced(function* () {
+          if (adapterOptions.onWorkspaceConfig === undefined || workspaceConfigSubscribed) return;
+          workspaceConfigSubscribed = true;
+          yield* client
+            .request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
+              topic: ZCodeSchema.workspaceConfigTopic(workspaceId),
+              connectionId: clientId,
+              clientMode: ZCODE_CLIENT_MODE,
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode workspace-config subscribe failed", { cause }),
+              ),
+            );
+        });
 
         const sendCommand = Effect.fn("ZcodeAdapterV2.sendCommand")(function* <
           T extends ZCodeSchema.CommandType,
@@ -1872,7 +1911,29 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             }
             return;
           }
-          // sessions-index + workspace-config frames land here in later phases.
+          if (topic.startsWith("workspace-config/")) {
+            const decoded = yield* Schema.decodeUnknownEffect(workspaceConfigFrameCodec)(
+              frame,
+            ).pipe(Effect.option);
+            if (Option.isNone(decoded)) {
+              yield* Effect.logWarning("ZCode workspace-config frame failed to decode", {
+                deliveryKind,
+              });
+              return;
+            }
+            const payload = decoded.value.payload;
+            const config =
+              payload.kind === "snapshot"
+                ? payload.snapshot.config
+                : payload.deltas[payload.deltas.length - 1]?.config;
+            if (config === undefined || adapterOptions.onWorkspaceConfig === undefined) return;
+            yield* adapterOptions.onWorkspaceConfig(
+              topic.slice("workspace-config/".length),
+              config,
+            );
+            return;
+          }
+          // sessions-index frames land here in later phases.
         });
 
         // DecodingServices is `unknown` for schemas containing Unknown fields;
@@ -1886,6 +1947,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         const conversationFrameCodec =
           ZCodeSchema.ConversationTopicFrame as unknown as Schema.Codec<
             ZCodeSchema.ConversationTopicFrame,
+            unknown,
+            never,
+            never
+          >;
+        const workspaceConfigFrameCodec =
+          ZCodeSchema.WorkspaceConfigTopicFrame as unknown as Schema.Codec<
+            ZCodeSchema.WorkspaceConfigTopicFrame,
             unknown,
             never,
             never
@@ -1977,6 +2045,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             );
           conversation.subscriptionId = subscribed.ack.subscriptionId;
           conversation.logEpoch = subscribed.ack.logEpoch;
+          // The session is live now; the workspace-config publisher can seed
+          // a real catalog (slash commands + mode options) for this workspace.
+          yield* ensureWorkspaceConfigSubscription();
           return conversation;
         });
 
@@ -2030,10 +2101,112 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         const isAckOk = (ack: ZCodeSchema.CommandAck) =>
           ack.status === "accepted" || ack.status === "duplicate";
 
+        const ZCODE_ATTACHMENT_CHUNK_BYTES = 512 * 1024;
+        /** Upload one saved image through the v4 attachment transaction. */
+        const uploadZcodeAttachment = Effect.fnUntraced(function* (
+          sessionId: string,
+          attachment: ChatImageAttachment,
+        ) {
+          const resolvePath = adapterOptions.resolveAttachmentPath;
+          const filePath = resolvePath === undefined ? null : resolvePath(attachment);
+          if (filePath === null) {
+            return yield* protocolError(`Invalid attachment id '${attachment.id}'.`);
+          }
+          const bytes = yield* fileSystem
+            .readFile(filePath)
+            .pipe(
+              Effect.mapError((cause) =>
+                protocolError(`Failed to read attachment '${attachment.id}'.`, cause),
+              ),
+            );
+          const uploadId = yield* Effect.orDie(crypto.randomUUIDv7());
+          const digest = yield* crypto
+            .digest("SHA-256", bytes)
+            .pipe(
+              Effect.mapError((cause) =>
+                protocolError(`Failed to checksum attachment '${attachment.id}'.`, cause),
+              ),
+            );
+          const upload = {
+            connectionId: clientId,
+            uploadId,
+            sessionId,
+          } as const;
+          const totalChunks = Math.ceil(bytes.length / ZCODE_ATTACHMENT_CHUNK_BYTES);
+          const transfer = Effect.gen(function* () {
+            const begun = yield* client.request(ZCodeRpc.V4_METHODS.attachmentBegin, {
+              ...upload,
+              fileName: attachment.name,
+              mime: attachment.mimeType,
+              totalBytes: bytes.length,
+              totalChunks,
+              checksum: `sha256:${Buffer.from(digest).toString("hex")}`,
+            });
+            // begin replays an interrupted upload: "committed" resumes with its ref.
+            if (begun.state === "committed") {
+              return begun.ref;
+            }
+            for (let chunkIndex = begun.nextChunkIndex; chunkIndex < totalChunks; chunkIndex += 1) {
+              const chunk = bytes.subarray(
+                chunkIndex * ZCODE_ATTACHMENT_CHUNK_BYTES,
+                (chunkIndex + 1) * ZCODE_ATTACHMENT_CHUNK_BYTES,
+              );
+              yield* client.request(ZCodeRpc.V4_METHODS.attachmentChunk, {
+                ...upload,
+                chunkIndex,
+                dataBase64: Buffer.from(chunk).toString("base64"),
+              });
+            }
+            const committed = yield* client.request(ZCodeRpc.V4_METHODS.attachmentCommit, upload);
+            return committed.ref;
+          });
+          const ref = yield* transfer.pipe(
+            // A half-finished transaction must not stage forever on the CLI.
+            Effect.onError(() =>
+              client.request(ZCodeRpc.V4_METHODS.attachmentAbort, upload).pipe(Effect.ignore),
+            ),
+          );
+          return {
+            ref,
+            fileName: attachment.name,
+            mime: attachment.mimeType,
+            bytes: bytes.length,
+          } satisfies ZCodeSchema.AttachmentRef;
+        });
+
+        // Text attachments always fold into the prompt as saved paths; images
+        // additionally upload through the attachment transaction for the
+        // model's native image input.
+        const prepareSendTextInput = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          message: ProviderAdapter.ProviderAdapterV2TurnMessage,
+        ) {
+          if (message.attachments.length === 0) {
+            return { text: message.text, attachments: [] };
+          }
+          const text = yield* providerMessageTextWithAttachmentPaths({
+            text: message.text,
+            attachments: message.attachments,
+            resolveAttachmentPath: adapterOptions.resolveAttachmentPath ?? (() => null),
+            ...(adapterOptions.resolveExtractedTextPath === undefined
+              ? {}
+              : { resolveExtractedTextPath: adapterOptions.resolveExtractedTextPath }),
+          });
+          const attachments = yield* Effect.forEach(
+            message.attachments.filter((attachment): attachment is ChatImageAttachment =>
+              isProviderNativeImageAttachment(attachment),
+            ),
+            (attachment) => uploadZcodeAttachment(conversation.sessionId, attachment),
+            { concurrency: 1 },
+          );
+          return { text, attachments };
+        });
+
         const sendTextCommand = Effect.fn("ZcodeAdapterV2.sendTextCommand")(function* (
           conversation: ZcodeConversation,
           options: {
             readonly text: string;
+            readonly attachments?: ReadonlyArray<ZCodeSchema.AttachmentRef>;
             readonly requestedDelivery: "startNow" | "queue" | "guide";
             readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
             readonly resolved?: ReturnType<typeof zcodeResolveModelSelection>;
@@ -2049,6 +2222,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             type: "sendText",
             payload: {
               text: options.text,
+              ...(options.attachments === undefined || options.attachments.length === 0
+                ? {}
+                : { attachments: options.attachments }),
               requestedDelivery: options.requestedDelivery,
               ...(options.heldQueueDisposition === undefined
                 ? {}
@@ -2357,6 +2533,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 config: conversation.config,
               });
               yield* syncSessionConfig(conversation, turnInput.runtimePolicy, resolved);
+              const prepared = yield* prepareSendTextInput(conversation, turnInput.message);
               const execution = zcodeExecutionStateForRuntimePolicy(turnInput.runtimePolicy);
               const envelope = ZCodeSchema.makeCommandEnvelope({
                 commandId,
@@ -2365,7 +2542,10 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 issuedAt: DateTime.toEpochMillis(yield* DateTime.now),
                 type: "sendText" as const,
                 payload: {
-                  text: turnInput.message.text,
+                  text: prepared.text,
+                  ...(prepared.attachments.length === 0
+                    ? {}
+                    : { attachments: prepared.attachments }),
                   requestedDelivery: "startNow" as const,
                   // A paused (held) queue would reject a bare startNow; keep
                   // foreign queue items instead of clearing them.
@@ -2417,8 +2597,10 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   `Provider turn ${steerInput.providerTurnId} is not active on ZCode session ${sessionId} and cannot be steered.`,
                 );
               }
+              const prepared = yield* prepareSendTextInput(conversation, steerInput.message);
               const { ack, envelope } = yield* sendTextCommand(conversation, {
-                text: steerInput.message.text,
+                text: prepared.text,
+                attachments: prepared.attachments,
                 requestedDelivery: "guide",
               });
               if (!isAckOk(ack)) {

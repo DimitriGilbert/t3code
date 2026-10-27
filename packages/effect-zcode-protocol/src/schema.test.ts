@@ -13,6 +13,7 @@ const isStorageState = Schema.is(ZCodeSchema.ZCodeStorageStartupState);
 const isWorkspaceConfigSnapshot = Schema.is(ZCodeSchema.WorkspaceConfigSnapshot);
 const decodeEnvelope = Schema.decodeUnknownSync(ZCodeSchema.CommandEnvelopeWire);
 const encodeEnvelope = Schema.encodeSync(ZCodeSchema.CommandEnvelopeWire);
+const decodeDelta = Schema.decodeSync(ZCodeSchema.ConversationDelta);
 
 it("decodes the live-smoke subscribe params and frame-adjacent shapes", () => {
   assert.equal(
@@ -250,4 +251,150 @@ it("decodes storage startup and workspace-config payloads", () => {
     }),
     true,
   );
+});
+
+it("rejects malformed storage startup frames the gate must ignore", () => {
+  const base = {
+    schemaVersion: 1,
+    attemptId: "a1",
+    databaseId: "d1",
+    databaseKind: "session",
+    elapsedMs: 1,
+  } as const;
+  assert.equal(isStorageState({ ...base, sequence: 0, phase: "ready" }), false);
+  // failed without errorCode is malformed upstream — ignored, not a gate fault.
+  assert.equal(isStorageState({ ...base, sequence: 1, phase: "failed" }), false);
+  assert.equal(isStorageState({ ...base, sequence: 1, phase: "failed", errorCode: "nope" }), false);
+  assert.equal(
+    isStorageState({ ...base, sequence: 1, phase: "failed", errorCode: "corrupt" }),
+    true,
+  );
+});
+
+it("enforces upstream CAS fields in outbound command envelopes", () => {
+  const base = { commandId: "c", clientId: "t3", sessionId: "s1", issuedAt: 0 };
+  // retryTurn is row-targeting: it needs baseRevision AND baseLogEpoch.
+  assert.throws(
+    () =>
+      ZCodeSchema.makeCommandEnvelope({
+        ...base,
+        type: "retryTurn",
+        payload: { target: { rowId: 1, entityId: "e" } },
+      }),
+    ZCodeSchema.CommandEnvelopeValidationError,
+  );
+  assert.throws(
+    () =>
+      ZCodeSchema.makeCommandEnvelope({
+        ...base,
+        type: "retryTurn",
+        baseRevision: 1,
+        payload: { target: { rowId: 1, entityId: "e" } },
+      }),
+    ZCodeSchema.CommandEnvelopeValidationError,
+  );
+  const ok = ZCodeSchema.makeCommandEnvelope({
+    ...base,
+    type: "retryTurn",
+    baseRevision: 1,
+    baseLogEpoch: "e1",
+    payload: { target: { rowId: 1, entityId: "e" } },
+  });
+  assert.equal(ok.type, "retryTurn");
+  // pauseGoal needs baseRevision but not baseLogEpoch.
+  assert.throws(
+    () => ZCodeSchema.makeCommandEnvelope({ ...base, type: "pauseGoal", payload: {} }),
+    ZCodeSchema.CommandEnvelopeValidationError,
+  );
+  // Payload shape itself is validated per command type.
+  assert.throws(
+    () =>
+      ZCodeSchema.makeCommandEnvelope({
+        ...base,
+        type: "sendText",
+        payload: { text: 1 } as unknown as ZCodeSchema.CommandPayloadFor<"sendText">,
+      }),
+    Schema.SchemaError,
+  );
+});
+
+it("decodes the two upstream revokeWorkspaceHookTrust target shapes", () => {
+  const isRevokePayload = Schema.is(ZCodeSchema.CommandPayloadSchemas.revokeWorkspaceHookTrust);
+  const flowTarget = {
+    sessionId: "s",
+    taskId: "t",
+    runId: "r",
+    workspaceIdentity: "w",
+    bundleDigest: "d",
+    reviewFlowId: "f",
+    generation: 1,
+    interactionId: "i",
+    reviewItemIds: ["x"],
+  };
+  const digestTarget = {
+    sessionId: "s",
+    workspaceIdentity: "w",
+    bundleDigest: "d",
+    hookDeclarationDigests: ["a".repeat(64)],
+  };
+  assert.equal(isRevokePayload(flowTarget), true);
+  assert.equal(isRevokePayload(digestTarget), true);
+  assert.equal(
+    isRevokePayload({ sessionId: "s", workspaceIdentity: "w", bundleDigest: "d" }),
+    false,
+  );
+  assert.equal(isRevokePayload({ ...digestTarget, hookDeclarationDigests: [] }), false);
+});
+
+it("decodes the amendWorkflowRunSettings command result fields", () => {
+  assert.equal(
+    isAck({
+      commandId: "c1",
+      status: "accepted",
+      revisionAtDecision: 1,
+      result: { type: "amendWorkflowRunSettings", runId: "r1", toolCallId: "tc1" },
+    }),
+    true,
+  );
+  assert.equal(
+    isAck({
+      commandId: "c1",
+      status: "accepted",
+      revisionAtDecision: 1,
+      result: {
+        type: "amendWorkflowRunSettings",
+        runId: "r1",
+        toolCallId: "tc1",
+        supersededRunId: "r0",
+      },
+    }),
+    true,
+  );
+  // runId/toolCallId are required upstream.
+  assert.equal(
+    isAck({
+      commandId: "c1",
+      status: "accepted",
+      revisionAtDecision: 1,
+      result: { type: "amendWorkflowRunSettings" },
+    }),
+    false,
+  );
+});
+
+it("preserves opaque workflowRun.updated delta fields through decode", () => {
+  const wire = {
+    op: "workflowRun.updated" as const,
+    runId: "r1",
+    revision: 2,
+    run: { status: "running" },
+    cleared: ["endedAt"],
+    removedActors: [{ siteId: "a", ordinal: 0 }],
+    removedNodes: [],
+    actors: [{ siteId: "a", ordinal: 0, extra: 1 }],
+    nodes: [],
+  };
+  const delta = decodeDelta(wire);
+  // workflowRunDeltas subscribers receive these fields verbatim.
+  assert.deepEqual(delta, wire);
 });

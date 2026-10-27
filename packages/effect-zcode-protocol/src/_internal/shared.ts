@@ -11,11 +11,11 @@ const ZCodeProtocolErrorObject = Schema.Struct({
   data: Schema.optional(Schema.Unknown),
 });
 
-export const ZCodeProtocolResponseEnvelope = Schema.Struct({
-  id: ZCodeProtocolRequestId,
-  result: Schema.optional(Schema.Unknown),
-  error: Schema.optional(ZCodeProtocolErrorObject),
-});
+// A response must carry result or error; upstream drops a bare {id} frame.
+export const ZCodeProtocolResponseEnvelope = Schema.Union([
+  Schema.Struct({ id: ZCodeProtocolRequestId, result: Schema.Unknown }),
+  Schema.Struct({ id: ZCodeProtocolRequestId, error: ZCodeProtocolErrorObject }),
+]);
 
 export const decodeOptionalPayload = <A, I>(
   method: string,

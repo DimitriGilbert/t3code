@@ -34,6 +34,8 @@ export const TopicWireChecksum = Schema.Struct({
 });
 export type TopicWireChecksum = typeof TopicWireChecksum.Type;
 
+const nonEmptyString = Schema.NonEmptyString;
+
 /**
  * Route boundary validation only: deliveryKind/fragment internals are checked
  * inside the owned assembler so malformed pieces become typed faults.
@@ -43,20 +45,20 @@ export const TopicWireFrameCandidate = Schema.Union([
     wireVersion: Schema.Literal(V4_WIRE_PROTOCOL_VERSION),
     kind: Schema.Literal("complete"),
     deliveryKind: Schema.optionalKey(Schema.Unknown),
-    logicalFrameId: Schema.String,
+    logicalFrameId: nonEmptyString,
     logicalFrameOrdinal: Schema.Number,
-    topic: Schema.String,
-    subscriptionId: Schema.String,
+    topic: nonEmptyString,
+    subscriptionId: nonEmptyString,
     frame: Schema.optionalKey(Schema.Unknown),
   }),
   Schema.Struct({
     wireVersion: Schema.Literal(V4_WIRE_PROTOCOL_VERSION),
     kind: Schema.Literal("fragment"),
     deliveryKind: Schema.optionalKey(Schema.Unknown),
-    logicalFrameId: Schema.String,
+    logicalFrameId: nonEmptyString,
     logicalFrameOrdinal: Schema.Number,
-    topic: Schema.String,
-    subscriptionId: Schema.String,
+    topic: nonEmptyString,
+    subscriptionId: nonEmptyString,
     fragmentIndex: Schema.optionalKey(Schema.Unknown),
     fragmentCount: Schema.optionalKey(Schema.Unknown),
     logicalBytes: Schema.optionalKey(Schema.Unknown),
@@ -219,7 +221,7 @@ export function encodeTopicWireFrames<F>(
     subscriptionId: options.subscriptionId,
     frame,
   };
-  if (utf8JsonByteLength(complete) <= maxPhysicalFrameBytes) {
+  if (measureCliPhysicalFrameBytes(complete) <= maxPhysicalFrameBytes) {
     return [complete];
   }
 
@@ -252,7 +254,7 @@ export function encodeTopicWireFrames<F>(
       worstCount,
       "A".repeat(4 * Math.ceil(candidate / 3)),
     );
-    if (utf8JsonByteLength(wire) <= maxPhysicalFrameBytes) {
+    if (measureCliPhysicalFrameBytes(wire) <= maxPhysicalFrameBytes) {
       chunkBytes = candidate;
       low = candidate + 1;
     } else {
@@ -271,13 +273,17 @@ export function encodeTopicWireFrames<F>(
   for (let fragmentIndex = 0; fragmentIndex < fragmentCount; fragmentIndex += 1) {
     const start = fragmentIndex * chunkBytes;
     const end = Math.min(start + chunkBytes, logical.byteLength);
-    frames.push(
-      makeFragment(
-        fragmentIndex,
-        fragmentCount,
-        encodeWireBytesBase64(logical.subarray(start, end)),
-      ),
+    const wire = makeFragment(
+      fragmentIndex,
+      fragmentCount,
+      encodeWireBytesBase64(logical.subarray(start, end)),
     );
+    // The budget includes the real NDJSON envelope; any estimation drift must
+    // fail closed rather than emit a frame the assembler will reject.
+    if (measureCliPhysicalFrameBytes(wire) > maxPhysicalFrameBytes) {
+      throw new TopicWireFrameEncodingError("proto.frameEnvelopeTooLarge");
+    }
+    frames.push(wire);
   }
   return frames;
 }
@@ -382,7 +388,8 @@ function hasValidFragmentInner(wire: FragmentWireCandidate): wire is ValidatedFr
   return typeof checksum.algorithm === "string" && typeof checksum.value === "string";
 }
 
-const routeKey = (topic: string, subscriptionId: string): string => `${topic}${subscriptionId}`;
+// \0 separator: ("a","bc") and ("ab","c") must not share a route's assembly state.
+const routeKey = (topic: string, subscriptionId: string): string => `${topic}\0${subscriptionId}`;
 
 const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => {
   if (left.byteLength !== right.byteLength) return false;

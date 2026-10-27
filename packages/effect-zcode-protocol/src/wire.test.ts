@@ -6,6 +6,7 @@ import {
   encodeTopicWireFrames,
   encodeWireBytesBase64,
   crc32WireBytes,
+  utf8JsonByteLength,
   TopicWireFrameAssembler,
   WIRE_FAULT_INVALID_PAYLOAD,
 } from "./wire.ts";
@@ -54,6 +55,33 @@ it("emits a complete wire frame under the physical budget", () => {
   const wires = encodeTopicWireFrames(baseFrame(), wireOptions);
   assert.equal(wires.length, 1);
   assert.equal(wires[0]!.kind, "complete");
+});
+
+it("budgets the full NDJSON envelope, not the bare wire frame", () => {
+  const frame = baseFrame({
+    payload: { kind: "deltas", deltas: [{ op: "x", v: "y".repeat(2000) }] },
+  });
+  const [complete] = encodeTopicWireFrames(frame, wireOptions);
+  const bareBytes = utf8JsonByteLength(complete);
+  const envelopeBytes =
+    utf8JsonByteLength({
+      method: "v4/conversation/frame",
+      params: complete,
+    }) + 1;
+  // Bare wire JSON fits the budget, but the NDJSON envelope around it does
+  // not — the encoder must fragment and every emitted frame must fit too.
+  const maxPhysicalFrameBytes = bareBytes;
+  assert.isAbove(envelopeBytes, maxPhysicalFrameBytes);
+  const wires = encodeTopicWireFrames(frame, { ...wireOptions, maxPhysicalFrameBytes });
+  assert.isAbove(wires.length, 1);
+  for (const wire of wires) {
+    const emitted = utf8JsonByteLength({ method: "v4/conversation/frame", params: wire }) + 1;
+    assert.isAtMost(emitted, maxPhysicalFrameBytes);
+  }
+  // ...and the assembler accepts what the encoder emitted.
+  const assembler = new TopicWireFrameAssembler(frameSchema, { maxPhysicalFrameBytes });
+  const events = wires.flatMap((w) => assembler.accept(w as TopicWireFrameCandidate, 0));
+  assert.isTrue(events.some((e) => e.kind === "complete" && e.frame.topic === frame.topic));
 });
 
 it("reassembles fragments across a UTF-8 boundary and schema-decodes", () => {
@@ -162,6 +190,29 @@ it("supersedes an incomplete assembly with a newer ordinal", () => {
     ),
   );
   assert.isTrue(events.some((e) => e.kind === "complete"));
+});
+
+it("keeps assembly routes separate for colliding concatenations", () => {
+  const assembler = new TopicWireFrameAssembler(frameSchema);
+  const make = (
+    id: string,
+    ordinal: number,
+    topic: string,
+    subscriptionId: string,
+  ): TopicWireFrameCandidate => ({
+    wireVersion: 3,
+    kind: "complete",
+    deliveryKind: "online",
+    logicalFrameId: id,
+    logicalFrameOrdinal: ordinal,
+    topic,
+    subscriptionId,
+    frame: baseFrame({ topic, subscriptionId }),
+  });
+  // ("a","bc") and ("ab","c") share the naive string concatenation; an
+  // already-settled id+ordinal on one route must not suppress the other's.
+  assert.equal(assembler.accept(make("lf-1", 1, "a", "bc"), 0)[0]?.kind, "complete");
+  assert.equal(assembler.accept(make("lf-1", 1, "ab", "c"), 0)[0]?.kind, "complete");
 });
 
 it("expires timed-out assemblies", () => {

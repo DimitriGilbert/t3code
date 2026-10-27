@@ -1,15 +1,7 @@
 /**
- * ZCode provider status probing.
- *
- * Two binaries are involved: the `zcode-acp-server` bridge (npm) and the
- * `zcode` backend the bridge spawns (desktop app / installer, not on npm).
- * The probe versions the bridge, resolves the backend the same way the
- * bridge does (`ZCODE_BIN` → PATH → well-known install paths), then opens a
- * disposable `initialize` + `session/new` ACP session to read auth methods,
- * the `model` config option, and advertised slash commands. Credentials are
- * detected by the files ZCode writes under `~/.zcode` (`ZCODE_HOME`
- * re-roots it) — the store itself is encrypted, so presence plus a
- * successful session probe is the only honest signal.
+ * ZCode provider status probing: version the `zcode` CLI, resolve the binary
+ * (`binaryPath` → `ZCODE_BIN` → PATH → well-known paths), then open a
+ * disposable `workspace-config` subscription for models and slash commands.
  *
  * @module provider-zcode/server/status
  */
@@ -21,9 +13,7 @@ import {
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import type { ZcodeSettings } from "../settings.ts";
-import type * as EffectAcpSchema from "effect-acp/compat";
 import { causeErrorTag } from "@t3tools/shared/observability";
-import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -32,8 +22,8 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -57,10 +47,13 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "@t3tools/provider-core/server/maintenanceResolver";
 import type { ServerProvider } from "@t3tools/contracts";
-import type * as EffectAcpErrors from "effect-acp/errors";
-import type * as Scope from "effect/Scope";
-import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import { makeZcodeAcpRuntime, ZCODE_ACP_SERVER_BIN, zcodeProviderConfigEnv } from "./zcodeAcp.ts";
+import * as ZCodeRpc from "@t3tools/effect-zcode-protocol/rpc";
+import * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
+import {
+  buildZcodeAppServerSpawnInput,
+  openZcodeAppServerClient,
+  type ZcodeAppServerClientOpener,
+} from "./zcodeAppServer.ts";
 
 const ZCODE_PRESENTATION = {
   displayName: "ZCode",
@@ -74,17 +67,16 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-// `session/new` makes the bridge boot `zcode app-server`, which can be slow on
+// `zcode app-server --stdio` can be slow to reach storage-ready on
 // a cold install; this still bounds the whole disposable session.
 const ZCODE_ACP_PROBE_TIMEOUT_MS = 15_000;
-const COMMAND_ADVERTISEMENT_GRACE = "500 millis";
 
 const ZCODE_CLI_COMMAND = "zcode";
 const ZCODE_BIN_ENV = "ZCODE_BIN";
 const ZCODE_HOME_ENV = "ZCODE_HOME";
 const ZCODE_DOCUMENTATION_URL = "https://github.com/zai-org/ZCode";
 
-/** The slug that means "keep the session's current model" (see zcodeAcp.ts). */
+/** The slug that means "keep the session's current model". */
 export const ZCODE_DEFAULT_MODEL_SLUG = "default";
 
 const ZCODE_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
@@ -120,10 +112,8 @@ function zcodeModelsFromSettings(
   return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
 }
 
-export function buildInitialZcodeProviderSnapshot(
-  zcodeSettings: ZcodeSettings,
-): Effect.Effect<ServerProviderDraft> {
-  return Effect.gen(function* () {
+export const buildInitialZcodeProviderSnapshot = Effect.fn("buildInitialZcodeProviderSnapshot")(
+  function* (zcodeSettings: ZcodeSettings) {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
     const models = zcodeModelsFromSettings(zcodeSettings.customModels);
 
@@ -160,50 +150,159 @@ export function buildInitialZcodeProviderSnapshot(
         },
       }),
     );
-  });
-}
-
+  },
+);
 const MAX_MODEL_ID_LENGTH = 256;
 const MAX_COMMAND_NAME_LENGTH = 128;
 const MAX_COMMAND_DESCRIPTION_LENGTH = 1_024;
 
+/** The directory ZCode keeps credentials and provider config in. */
+export const zcodeHomePath = Effect.fn("zcodeHomePath")(function* (
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<string, never, Path.Path> {
+  const fromEnv = nonEmptyTrimmed(environment[ZCODE_HOME_ENV]);
+  if (fromEnv !== undefined) return fromEnv;
+  const path = yield* Path.Path;
+  return path.join(yield* HostProcess.HomeDirectory, ".zcode");
+});
+
 /**
- * Models from the session's `model` config option. The bridge encodes values
- * as `providerId\modelId` / `custom:...`; T3 keeps them verbatim — they round
- * trip back through `session/set_config_option`.
+ * True when ZCode has written any of its credential-bearing files: the GLM
+ * config, the encrypted credential store, or personal provider rules.
+ * Presence is the best signal available — `credentials.json` is encrypted.
  */
-export function zcodeModelsFromConfigOptions(
-  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
+export const zcodeCredentialFilesPresent = Effect.fn("zcodeCredentialFilesPresent")(function* (
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<boolean, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* zcodeHomePath(environment);
+  for (const relative of [
+    path.join("v2", "config.json"),
+    path.join("v2", "credentials.json"),
+    "provider_config.json",
+  ]) {
+    if (
+      yield* fileSystem.exists(path.join(home, relative)).pipe(Effect.orElseSucceed(() => false))
+    ) {
+      return true;
+    }
+  }
+  return false;
+});
+type ZcodeBackendResolution =
+  | { readonly kind: "resolved"; readonly commandPath: string }
+  | { readonly kind: "configured-missing"; readonly commandPath: string; readonly source: string }
+  | { readonly kind: "missing" };
+
+const fileExists = Effect.fnUntraced(function* (
+  candidate: string,
+): Effect.fn.Return<boolean, never, FileSystem.FileSystem> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false));
+});
+
+/**
+ * Where the `zcode` binary comes from: the `binaryPath` setting (when it
+ * points somewhere other than the default name), `ZCODE_BIN`, PATH, then the
+ * well-known paths the installer and desktop bundle write.
+ */
+const resolveZcodeBackend = Effect.fn("resolveZcodeBackend")(function* (
+  zcodeSettings: ZcodeSettings,
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<ZcodeBackendResolution, never, FileSystem.FileSystem | Path.Path> {
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const executable = platform === "win32" ? `${ZCODE_CLI_COMMAND}.exe` : ZCODE_CLI_COMMAND;
+
+  const configured = nonEmptyTrimmed(zcodeSettings.binaryPath);
+  if (configured !== undefined && configured !== ZCODE_CLI_COMMAND) {
+    return (yield* fileExists(configured))
+      ? { kind: "resolved", commandPath: configured }
+      : { kind: "configured-missing", commandPath: configured, source: "binaryPath" };
+  }
+  const fromEnv = nonEmptyTrimmed(environment[ZCODE_BIN_ENV]);
+  if (fromEnv !== undefined) {
+    return (yield* fileExists(fromEnv))
+      ? { kind: "resolved", commandPath: fromEnv }
+      : { kind: "configured-missing", commandPath: fromEnv, source: ZCODE_BIN_ENV };
+  }
+  const onPath = yield* resolveCommandPath(ZCODE_CLI_COMMAND, { env: environment });
+  if (onPath !== null) {
+    return { kind: "resolved", commandPath: onPath };
+  }
+  const home = yield* HostProcess.HomeDirectory;
+  const zcodeHome = yield* zcodeHomePath(environment);
+  for (const candidate of [
+    path.join(home, ".local", "bin", executable),
+    path.join(zcodeHome, "runtime", "bin", executable),
+  ]) {
+    if (yield* fileExists(candidate)) {
+      return { kind: "resolved", commandPath: candidate };
+    }
+  }
+  return { kind: "missing" };
+});
+
+const runZcodeCliCommand = Effect.fn("runZcodeCliCommand")(function* (
+  zcodeSettings: ZcodeSettings,
+  args: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv,
+  cwd?: string,
+) {
+  const command = zcodeSettings.binaryPath || ZCODE_CLI_COMMAND;
+  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+  // Same env the real session spawn gets: headless installs need the
+  // provider-config files resolved or the backend boots with no registry.
+  const childEnv = buildZcodeAppServerSpawnInput(zcodeSettings, cwd ?? ".", environment).env;
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: childEnv,
+      shell: spawnCommand.shell,
+    }),
+  );
+});
+
+interface ZcodeProbeResult {
+  readonly authenticated: boolean;
+  readonly models: ReadonlyArray<ServerProviderModel>;
+  readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+}
+
+export interface ZcodeStatusProbeOptions {
+  /**
+   * Overrides the disposable app-server the probe spawns; tests substitute a
+   * fake client. The default spawns `zcode app-server --stdio`.
+   */
+  readonly openClient?: ZcodeAppServerClientOpener;
+}
+
+function zcodeModelsFromWorkspaceOptions(
+  options: ReadonlyArray<ZCodeSchema.WorkspaceConfigOption>,
 ): ReadonlyArray<ServerProviderModel> {
   const seen = new Set<string>();
   const models: Array<ServerProviderModel> = [];
-  let currentValue: string | undefined;
-  for (const option of configOptions ?? []) {
-    if (option.category !== "model" || option.type !== "select") continue;
-    currentValue = nonEmptyTrimmed(option.currentValue) ?? currentValue;
-    for (const candidate of option.options) {
-      const choices = "value" in candidate ? [candidate] : candidate.options;
-      for (const choice of choices) {
-        const slug = nonEmptyTrimmed(choice.value);
-        if (slug === undefined || slug.length > MAX_MODEL_ID_LENGTH || seen.has(slug)) continue;
-        seen.add(slug);
-        models.push({
-          slug,
-          name: nonEmptyTrimmed(choice.name) ?? slug,
-          isCustom: false,
-          capabilities: EMPTY_CAPABILITIES,
-        });
-        if (models.length >= 256) return models;
-      }
+  for (const option of options) {
+    if (option.id !== "model") continue;
+    for (const candidate of option.options ?? []) {
+      const slug = nonEmptyTrimmed(candidate.value);
+      if (slug === undefined || slug.length > MAX_MODEL_ID_LENGTH || seen.has(slug)) continue;
+      seen.add(slug);
+      models.push({
+        slug,
+        name: nonEmptyTrimmed(candidate.name) ?? slug,
+        isCustom: false,
+        capabilities: EMPTY_CAPABILITIES,
+      });
+      if (models.length >= 256) return models;
     }
   }
-  const current = currentValue !== undefined && seen.has(currentValue) ? currentValue : undefined;
-  return models.map((model) => (model.slug === current ? { ...model, isDefault: true } : model));
+  return models;
 }
 
-/** Slash commands the bridge advertises via `available_commands_update`. */
-export function zcodeSlashCommandsFromCommands(
-  commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+function zcodeSlashCommandsFromWorkspaceConfig(
+  commands: ReadonlyArray<ZCodeSchema.WorkspaceSlashCommand>,
 ): ReadonlyArray<ServerProviderSlashCommand> {
   const seen = new Set<string>([COMPACT_SLASH_COMMAND.name]);
   const slashCommands: Array<ServerProviderSlashCommand> = [COMPACT_SLASH_COMMAND];
@@ -220,7 +319,7 @@ export function zcodeSlashCommandsFromCommands(
     }
     seen.add(key);
     const description = command.description.trim().slice(0, MAX_COMMAND_DESCRIPTION_LENGTH);
-    const hint = command.input?.hint.trim().slice(0, MAX_COMMAND_DESCRIPTION_LENGTH);
+    const hint = (command.inputHint ?? "").trim().slice(0, MAX_COMMAND_DESCRIPTION_LENGTH);
     slashCommands.push({
       name,
       ...(description ? { description } : {}),
@@ -231,196 +330,62 @@ export function zcodeSlashCommandsFromCommands(
   return slashCommands;
 }
 
-/** The directory ZCode keeps credentials and provider config in. */
-export const zcodeHomePath = (
-  environment: NodeJS.ProcessEnv,
-): Effect.Effect<string, never, Path.Path> =>
-  Effect.gen(function* () {
-    const fromEnv = nonEmptyTrimmed(environment[ZCODE_HOME_ENV]);
-    if (fromEnv !== undefined) return fromEnv;
-    const path = yield* Path.Path;
-    return path.join(yield* HostProcess.HomeDirectory, ".zcode");
-  });
-
 /**
- * True when ZCode has written any of its credential-bearing files: the GLM
- * config, the encrypted credential store, or personal provider rules.
- * Presence is the best signal available — `credentials.json` is encrypted.
+ * One disposable `app-server` round trip: subscribe `workspace-config/<cwd>`
+ * and read the first frame's model options + slash commands. Auth is never
+ * triggered — a storage/subscription failure is the probe's signal.
  */
-export const zcodeCredentialFilesPresent = (
-  environment: NodeJS.ProcessEnv,
-): Effect.Effect<boolean, never, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const home = yield* zcodeHomePath(environment);
-    for (const relative of [
-      path.join("v2", "config.json"),
-      path.join("v2", "credentials.json"),
-      "provider_config.json",
-    ]) {
-      if (
-        yield* fileSystem.exists(path.join(home, relative)).pipe(Effect.orElseSucceed(() => false))
-      ) {
-        return true;
-      }
-    }
-    return false;
-  });
-
-type ZcodeBackendResolution =
-  | { readonly kind: "resolved"; readonly commandPath: string }
-  | { readonly kind: "configured-missing"; readonly commandPath: string; readonly source: string }
-  | { readonly kind: "missing" };
-
-const fileExists = (candidate: string): Effect.Effect<boolean, never, FileSystem.FileSystem> =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    return yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false));
-  });
-
-/**
- * Where the `zcode` backend binary comes from, mirroring the bridge's own
- * discovery order: the `zcodeBinaryPath` setting (forwarded as `ZCODE_BIN`),
- * then `ZCODE_BIN` in the instance environment, then PATH, then the
- * well-known paths the installer and desktop bundle write.
- */
-const resolveZcodeBackend = (
-  zcodeSettings: ZcodeSettings,
-  environment: NodeJS.ProcessEnv,
-): Effect.Effect<ZcodeBackendResolution, never, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
-    const path = yield* Path.Path;
-    const platform = yield* HostProcess.Platform;
-    const executable = platform === "win32" ? `${ZCODE_CLI_COMMAND}.exe` : ZCODE_CLI_COMMAND;
-
-    const configured = nonEmptyTrimmed(zcodeSettings.zcodeBinaryPath);
-    if (configured !== undefined) {
-      return (yield* fileExists(configured))
-        ? { kind: "resolved", commandPath: configured }
-        : { kind: "configured-missing", commandPath: configured, source: "zcodeBinaryPath" };
-    }
-    const fromEnv = nonEmptyTrimmed(environment[ZCODE_BIN_ENV]);
-    if (fromEnv !== undefined) {
-      return (yield* fileExists(fromEnv))
-        ? { kind: "resolved", commandPath: fromEnv }
-        : { kind: "configured-missing", commandPath: fromEnv, source: ZCODE_BIN_ENV };
-    }
-    const onPath = yield* resolveCommandPath(ZCODE_CLI_COMMAND, { env: environment });
-    if (onPath !== null) {
-      return { kind: "resolved", commandPath: onPath };
-    }
-    const home = yield* HostProcess.HomeDirectory;
-    const zcodeHome = yield* zcodeHomePath(environment);
-    for (const candidate of [
-      path.join(home, ".local", "bin", executable),
-      path.join(zcodeHome, "runtime", "bin", executable),
-    ]) {
-      if (yield* fileExists(candidate)) {
-        return { kind: "resolved", commandPath: candidate };
-      }
-    }
-    return { kind: "missing" };
-  });
-
-const runZcodeBridgeCommand = Effect.fn("runZcodeBridgeCommand")(function* (
-  zcodeSettings: ZcodeSettings,
-  args: ReadonlyArray<string>,
-  environment: NodeJS.ProcessEnv,
-) {
-  const command = zcodeSettings.binaryPath || ZCODE_ACP_SERVER_BIN;
-  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
-  // Same env the real session spawn gets: the bridge needs the headless
-  // provider-config files resolved or it boots the backend with no registry.
-  const childEnv = { ...zcodeProviderConfigEnv(environment), ...environment };
-  return yield* spawnAndCollect(
-    command,
-    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-      env: childEnv,
-      shell: spawnCommand.shell,
-    }),
-  );
-});
-
-interface ZcodeAcpProbeResult {
-  readonly authMethods: ReadonlyArray<EffectAcpSchema.AuthMethod>;
-  readonly models: ReadonlyArray<ServerProviderModel>;
-  readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
-}
-
-/** The surface the disposable session probe actually exercises. */
-type ZcodeProbeRuntime = Pick<
-  AcpSessionRuntime.AcpSessionRuntime["Service"],
-  "handleSessionUpdate" | "start"
->;
-
-export interface ZcodeStatusProbeOptions {
-  /**
-   * Overrides the disposable ACP session the probe opens; tests substitute a
-   * fake bridge. The default spawns `zcode-acp-server` and never authenticates.
-   */
-  readonly makeRuntime?: (input: {
-    readonly settings: ZcodeSettings;
-    readonly environment: NodeJS.ProcessEnv;
-    readonly cwd: string;
-  }) => Effect.Effect<
-    ZcodeProbeRuntime,
-    EffectAcpErrors.AcpError,
-    Scope.Scope | ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
-  >;
-}
-
-/**
- * One disposable `initialize` + `session/new` round trip. `session/new` is
- * where the bridge reports the `model` config option; `available_commands_update`
- * can land just after it, so the read waits out a short grace period. Auth is
- * never triggered — an auth-required answer is the probe's signal, not an
- * invitation to log in.
- */
-const discoverZcodeMetadataViaAcp = Effect.fn("discoverZcodeMetadataViaAcp")(function* (
+const discoverZcodeMetadataViaAppServer = Effect.fn("discoverZcodeMetadataViaAppServer")(function* (
   zcodeSettings: ZcodeSettings,
   environment: NodeJS.ProcessEnv,
   cwd: string,
-  makeRuntime: NonNullable<ZcodeStatusProbeOptions["makeRuntime"]>,
+  openClient: ZcodeAppServerClientOpener,
 ) {
-  const acp = yield* makeRuntime({ settings: zcodeSettings, environment, cwd });
-  const commandsRef = yield* Ref.make<ReadonlyArray<ServerProviderSlashCommand>>([]);
-  const commandsAdvertised = yield* Deferred.make<void>();
-  yield* acp.handleSessionUpdate((notification) =>
-    notification.update.sessionUpdate === "available_commands_update"
-      ? Ref.set(
-          commandsRef,
-          zcodeSlashCommandsFromCommands(notification.update.availableCommands),
-        ).pipe(Effect.andThen(Deferred.succeed(commandsAdvertised, undefined)), Effect.asVoid)
-      : Effect.void,
+  const spawnInput = buildZcodeAppServerSpawnInput(zcodeSettings, cwd, environment);
+  const client = yield* openClient({
+    command: spawnInput.command,
+    args: spawnInput.args,
+    cwd: spawnInput.cwd,
+    env: spawnInput.env,
+  });
+  const snapshotReady = yield* Deferred.make<ZCodeSchema.WorkspaceConfigSnapshot>();
+  yield* client.handleServerNotification("v4/conversation/frame", (params: unknown) =>
+    Effect.gen(function* () {
+      const frame = (params as { readonly frame?: unknown }).frame;
+      // See adapter.ts: DecodingServices is a phantom `unknown` for schemas
+      // containing Unknown fields; nothing is actually required.
+      const codec = ZCodeSchema.WorkspaceConfigTopicFrame as unknown as Schema.Codec<
+        ZCodeSchema.WorkspaceConfigTopicFrame,
+        unknown,
+        never,
+        never
+      >;
+      const decoded = yield* Schema.decodeUnknownEffect(codec)(frame).pipe(Effect.option);
+      const payload = Option.getOrUndefined(decoded)?.payload;
+      if (payload?.kind === "snapshot") {
+        yield* Deferred.succeed(snapshotReady, payload.snapshot);
+      }
+    }),
   );
-  const started = yield* acp.start();
-  yield* Deferred.await(commandsAdvertised).pipe(Effect.timeoutOption(COMMAND_ADVERTISEMENT_GRACE));
+  yield* client.request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
+    topic: ZCodeSchema.workspaceConfigTopic(cwd),
+    connectionId: "t3-status-probe",
+    clientMode: "desktop-continuous" as const,
+  });
+  const snapshot = yield* Deferred.await(snapshotReady).pipe(
+    Effect.timeoutOption(ZCODE_ACP_PROBE_TIMEOUT_MS / 2),
+  );
+  if (Option.isNone(snapshot)) {
+    return { authenticated: true, models: [], slashCommands: [] } satisfies ZcodeProbeResult;
+  }
   return {
-    authMethods: started.initializeResult.authMethods ?? [],
-    models: zcodeModelsFromConfigOptions(started.sessionSetupResult.configOptions ?? []),
-    slashCommands: yield* Ref.get(commandsRef),
-  } satisfies ZcodeAcpProbeResult;
+    authenticated: true,
+    models: zcodeModelsFromWorkspaceOptions(snapshot.value.config.configOptions),
+    slashCommands: zcodeSlashCommandsFromWorkspaceConfig(snapshot.value.config.slashCommands),
+  } satisfies ZcodeProbeResult;
 }, Effect.scoped);
 
-const isAcpAuthRequired = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  (error as { readonly _tag?: unknown })._tag === "AcpRequestError" &&
-  (error as { readonly code?: unknown }).code === -32000;
-
-const makeZcodeProbeRuntime = (input: {
-  readonly settings: ZcodeSettings;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly cwd: string;
-}) =>
-  makeZcodeAcpRuntime({
-    settings: input.settings,
-    environment: input.environment,
-    cwd: input.cwd,
-    clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
-    authenticateOnAuthRequired: false,
-  });
+const makeDefaultProbeOpener = (): ZcodeAppServerClientOpener => openZcodeAppServerClient;
 
 export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(function* (
   zcodeSettings: ZcodeSettings,
@@ -470,15 +435,16 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
     });
   }
 
-  const versionResult = yield* runZcodeBridgeCommand(
+  const versionResult = yield* runZcodeCliCommand(
     zcodeSettings,
     ["--version"],
     environment,
+    cwd,
   ).pipe(Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS), Effect.result);
 
   if (Result.isFailure(versionResult)) {
     const error = versionResult.failure;
-    yield* Effect.logWarning("ZCode ACP bridge health check failed.", {
+    yield* Effect.logWarning("ZCode CLI health check failed.", {
       errorTag: error._tag,
     });
     return snapshot({
@@ -489,8 +455,8 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "The ZCode ACP bridge (`zcode-acp-server`) is not installed or not on PATH."
-          : "Failed to execute the ZCode ACP bridge health check.",
+          ? "The ZCode CLI (`zcode`) is not installed or not on PATH."
+          : "Failed to execute the ZCode CLI health check.",
       },
     });
   }
@@ -503,7 +469,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: "The ZCode ACP bridge is installed but timed out while running `--version`.",
+        message: "The ZCode CLI is installed but timed out while running `--version`.",
       },
     });
   }
@@ -511,7 +477,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
   const versionOutput = versionResult.success.value;
   const version = parseGenericCliVersion(`${versionOutput.stdout}\n${versionOutput.stderr}`);
   if (versionOutput.code !== 0) {
-    yield* Effect.logWarning("ZCode ACP bridge version probe exited with a non-zero status.", {
+    yield* Effect.logWarning("ZCode CLI version probe exited with a non-zero status.", {
       exitCode: versionOutput.code,
       stdoutLength: versionOutput.stdout.length,
       stderrLength: versionOutput.stderr.length,
@@ -523,7 +489,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
         version,
         status: "error",
         auth: { status: "unknown" },
-        message: "The ZCode ACP bridge is installed but failed to run.",
+        message: "The ZCode CLI is installed but failed to run.",
       },
     });
   }
@@ -552,20 +518,16 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
     });
   }
 
-  const probeExit = yield* discoverZcodeMetadataViaAcp(
+  const probeExit = yield* discoverZcodeMetadataViaAppServer(
     zcodeSettings,
     environment,
     cwd ?? process.cwd(),
-    probeOptions?.makeRuntime ?? makeZcodeProbeRuntime,
+    probeOptions?.openClient ?? makeDefaultProbeOpener(),
   ).pipe(Effect.timeoutOption(ZCODE_ACP_PROBE_TIMEOUT_MS), Effect.exit);
   const probe = Exit.isSuccess(probeExit) ? Option.getOrUndefined(probeExit.value) : undefined;
-  const probeError = Exit.isFailure(probeExit)
-    ? Option.getOrNull(Cause.findErrorOption(probeExit.cause))
-    : null;
-  const authRequired = isAcpAuthRequired(probeError);
   const probeFailed = probe === undefined;
   if (probeFailed) {
-    yield* Effect.logWarning("ZCode ACP session probe failed or timed out.", {
+    yield* Effect.logWarning("ZCode app-server probe failed or timed out.", {
       errorTag: Exit.isFailure(probeExit) ? causeErrorTag(probeExit.cause) : "Timeout",
     });
   }
@@ -576,13 +538,11 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
       ? zcodeModelsFromSettings(zcodeSettings.customModels, discoveredModels)
       : fallbackModels;
 
-  const auth: ServerProviderAuth = authRequired
+  const auth: ServerProviderAuth = !hasCredentials
     ? unauthenticated
-    : !hasCredentials
-      ? unauthenticated
-      : probe !== undefined
-        ? { status: "authenticated", type: "zcode", label: "ZCode account" }
-        : { status: "unknown" };
+    : probe !== undefined
+      ? { status: "authenticated", type: "zcode", label: "ZCode account" }
+      : { status: "unknown" };
 
   if (auth.status === "unauthenticated") {
     return snapshot({
@@ -613,7 +573,7 @@ export const checkZcodeProviderStatus = Effect.fn("checkZcodeProviderStatus")(fu
       ...(probeFailed
         ? {
             message:
-              "The ZCode ACP bridge is installed but its session probe failed. Model options may be incomplete.",
+              "The ZCode CLI is installed but its app-server probe failed. Model options may be incomplete.",
           }
         : {}),
     },

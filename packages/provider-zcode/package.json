@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@t3tools/contracts": "workspace:*",
-    "@t3tools/provider-acp": "workspace:*",
+    "@t3tools/effect-zcode-protocol": "workspace:*",
     "@t3tools/provider-core": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "effect": "catalog:"
@@ -36,7 +36,6 @@
     "@effect/vitest": "catalog:",
     "@t3tools/provider-testing": "workspace:*",
     "@types/node": "catalog:",
-    "effect-acp": "workspace:*",
     "vite-plus": "catalog:"
   }
 }

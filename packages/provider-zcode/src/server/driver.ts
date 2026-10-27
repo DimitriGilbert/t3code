@@ -1,14 +1,7 @@
 /**
- * ZcodeDriver — `ProviderDriver` for ZCode through the third-party
- * `zcode-acp-server` ACP bridge.
- *
- * The bridge is the npm-installed artifact T3 owns: it is version-probed,
- * update-checked against the npm registry, and updated through whatever
- * package manager installed it (no self-update command exists). The `zcode`
- * backend it spawns is only discovered — updating it belongs to the ZCode
- * desktop app or installer. Credentials live under `~/.zcode`; the auth
- * controller offers the bridge's `zcode-credentials` agent method plus a
- * terminal `zcode login`.
+ * ZcodeDriver — `ProviderDriver` for ZCode through a spawned
+ * `zcode app-server --stdio` process (ZCode Protocol v4). Credentials live
+ * under `~/.zcode`; auth offers saved-credential adoption plus `zcode login`.
  *
  * @module provider-zcode/server/driver
  */
@@ -56,7 +49,7 @@ import {
 const decodeZcodeSettings = Schema.decodeSync(ZcodeSettings);
 
 const DRIVER_KIND = ZCODE_PROVIDER;
-const ZCODE_NPM_PACKAGE = "zcode-acp-server";
+const ZCODE_NPM_PACKAGE = "zcode-cli";
 // The bridge is only ever npm-installed (or a standalone binary the user
 // dropped somewhere): package-manager ownership is proven from the resolved
 // path, everything else stays manual. No `update` subcommand exists.

@@ -795,6 +795,7 @@ export const SubagentProjectionState = Schema.Struct({
   running: Schema.Array(RunningSubagentSummary),
   endedTotal: Schema.Int,
 });
+export type SubagentProjectionState = typeof SubagentProjectionState.Type;
 
 export const PlanItem = Schema.Struct({
   id: Schema.String,

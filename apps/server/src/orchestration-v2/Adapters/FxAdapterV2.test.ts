@@ -365,4 +365,57 @@ describe("FxAdapterV2", () => {
       ],
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
+
+  // Recorded initialize frames pin `clientCapabilities`; the comparator masks
+  // it on both sides, so a capability bump never invalidates a transcript.
+  it.effect.each([
+    {
+      scenario: "capabilities-before-notices",
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+      },
+    },
+    {
+      scenario: "capabilities-with-future-shape",
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: true,
+        session: { notices: {}, upcomingCapability: {} },
+        experimental: { futureFeature: true },
+      },
+    },
+  ])(
+    "replays an initialize recorded with $scenario clientCapabilities",
+    ({ scenario, clientCapabilities }) =>
+      openFxSession({
+        scenario,
+        runtimeMode: "approval-required",
+        frames: [
+          outbound("initialize", {
+            protocolVersion: 2,
+            info: "<any>",
+            capabilities: "<any>",
+            clientCapabilities,
+            clientInfo: "<any>",
+          }),
+          answer("initialize", {
+            protocolVersion: 1,
+            agentCapabilities: {
+              loadSession: true,
+              promptCapabilities: { image: true, audio: false, embeddedContext: true },
+            },
+            agentInfo: { name: "fx", title: "fx", version: "0.0.13" },
+            authMethods: [],
+          }),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", fxSession({ model: FX_DEFAULT_MODEL, modes: FX_0_0_13_MODES })),
+          ...setConfig(
+            "mode",
+            "ask",
+            fxConfig({ model: FX_DEFAULT_MODEL, modes: FX_0_0_13_MODES }),
+          ),
+        ],
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
 });

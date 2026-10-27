@@ -126,6 +126,22 @@ function matchesExpected(expected: unknown, actual: unknown): boolean {
   return Object.is(expected, actual);
 }
 
+// Capability bytes churn on every ACP shape bump while fixtures assert session
+// flow, so an initialize frame masks clientCapabilities on both sides; the
+// field itself must still be present.
+function normalizeComparableFrame(frame: unknown): unknown {
+  if (typeof frame !== "object" || frame === null) return frame;
+  const record = frame as Record<string, unknown>;
+  if (record.method !== "initialize") return frame;
+  const params = record.params;
+  if (typeof params !== "object" || params === null || Array.isArray(params)) return frame;
+  if (!("clientCapabilities" in params)) return frame;
+  return {
+    ...record,
+    params: { ...(params as Record<string, unknown>), clientCapabilities: "<any>" },
+  };
+}
+
 function stopWithFailure(detail: string, actual?: unknown): void {
   if (stopped) return;
   stopped = true;
@@ -261,7 +277,10 @@ function handleMessage(message: JsonRpcMessage): void {
     return;
   }
   const entry = transcript.entries[cursor];
-  if (entry?.type !== "expect_outbound" || !matchesExpected(entry.frame, actual)) {
+  if (
+    entry?.type !== "expect_outbound" ||
+    !matchesExpected(normalizeComparableFrame(entry.frame), normalizeComparableFrame(actual))
+  ) {
     stopWithFailure("Unexpected outbound ACP frame", actual);
     if (actual.kind === "request" && message.id !== undefined && message.id !== null) {
       send({

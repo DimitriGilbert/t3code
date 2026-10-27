@@ -70,12 +70,7 @@ import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { registerCommands } from "~/shortcuts/dispatcher";
 import { readLocalApi } from "~/localApi";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
-import {
-  useActiveEnvironmentId,
-  useProjects,
-  useServerConfigs,
-  useThreadShells,
-} from "~/state/entities";
+import { useProjects, useServerConfigs, useThreadShells } from "~/state/entities";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import {
@@ -413,10 +408,13 @@ export function settleWatchWidgetConfigure(
 }
 
 export function WatchScreen() {
-  const activeEnvironmentId = useActiveEnvironmentId();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const environmentId: EnvironmentId | null = activeEnvironmentId ?? primaryEnvironmentId;
   const { environments } = useEnvironments();
+  // Mirror the mobile entry point: open the first environment that advertises
+  // the watch screen, falling back to primary so the unsupported state renders.
+  const environmentId: EnvironmentId | null =
+    environments.find((entry) => entry.serverConfig?.watchScreen === true)?.environmentId ??
+    primaryEnvironmentId;
   const environment = environments.find((entry) => entry.environmentId === environmentId);
   const watchSupported = environment?.serverConfig?.watchScreen === true;
 

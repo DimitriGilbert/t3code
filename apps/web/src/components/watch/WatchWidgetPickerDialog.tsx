@@ -3,7 +3,7 @@ import {
   type WatchFirstPartyWidgetSpec,
 } from "@t3tools/client-runtime/state/watch-pages";
 import type { WatchPackWidgetSource } from "@t3tools/contracts";
-import { FileJsonIcon, PackageIcon, SquareActivityIcon, UnplugIcon } from "lucide-react";
+import { PackageIcon, SquareActivityIcon, UnplugIcon } from "lucide-react";
 
 import {
   Dialog,
@@ -37,8 +37,6 @@ export function WatchWidgetPickerDialog(props: {
   /** Live (non-archived) pack-registered widget sources, from `connectorsLive`. */
   readonly packSources?: ReadonlyArray<WatchPackWidgetSource>;
   readonly onPickPackSource?: (source: WatchPackWidgetSource) => void;
-  /** Opens the widget import dialog — import lives under "Add a widget". */
-  readonly onImport?: () => void;
 }) {
   const sections = (Object.keys(SECTION_LABELS) as Array<keyof typeof SECTION_LABELS>)
     .map((section) => ({
@@ -102,29 +100,6 @@ export function WatchWidgetPickerDialog(props: {
                   ))}
                 </DiscoveryList>
               </div>
-            )}
-            {props.onImport === undefined ? null : (
-              <>
-                <div className="flex items-center gap-3" aria-hidden>
-                  <div className="h-px flex-1 bg-border" />
-                  <span className="text-muted-foreground text-2xs uppercase tracking-wider">
-                    or import
-                  </span>
-                  <div className="h-px flex-1 bg-border" />
-                </div>
-                <DiscoveryList>
-                  <DiscoveryListRow
-                    icon={
-                      <span className="flex size-9 shrink-0 items-center justify-center rounded-md border border-border/60 bg-card text-muted-foreground">
-                        <FileJsonIcon className="size-4" />
-                      </span>
-                    }
-                    title="Import a widget"
-                    description="From a t3-widget .json export shared from another page or server."
-                    onClick={props.onImport}
-                  />
-                </DiscoveryList>
-              </>
             )}
           </div>
         </DialogPanel>

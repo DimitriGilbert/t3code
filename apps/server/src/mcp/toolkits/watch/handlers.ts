@@ -2,8 +2,6 @@ import * as Effect from "effect/Effect";
 
 import * as ConnectorService from "../../../watch/connectors/ConnectorService.ts";
 import * as UserNotificationService from "../../../notifications/UserNotificationService.ts";
-import * as WatchPageService from "../../../watch/WatchPageService.ts";
-import * as WatchWidgetTransferService from "../../../watch/WatchWidgetTransferService.ts";
 import * as WidgetTranspileService from "../../../watch/WidgetTranspileService.ts";
 import { unavailable } from "../../threadAccess.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -23,21 +21,6 @@ export const layer = McpToolAccess.toLayer(WatchToolkit, {
   t3_watch_widget_source_publish: McpToolAccess.writes((params) =>
     Effect.flatMap(WidgetTranspileService.WidgetTranspileService, (service) =>
       service.publish(params).pipe(Effect.mapError(unavailable)),
-    ),
-  ),
-  t3_watch_pages_list: McpToolAccess.reads((params) =>
-    Effect.flatMap(WatchPageService.WatchPageService, (service) =>
-      service.list(params).pipe(Effect.mapError(unavailable)),
-    ),
-  ),
-  t3_watch_widget_export: McpToolAccess.reads((params) =>
-    Effect.flatMap(WatchWidgetTransferService.WatchWidgetTransferService, (service) =>
-      service.exportWidget(params).pipe(Effect.mapError(unavailable)),
-    ),
-  ),
-  t3_watch_widget_import: McpToolAccess.writes((params) =>
-    Effect.flatMap(WatchWidgetTransferService.WatchWidgetTransferService, (service) =>
-      service.importWidget(params).pipe(Effect.mapError(unavailable)),
     ),
   ),
   t3_watch_connectors_list: McpToolAccess.reads((params) =>

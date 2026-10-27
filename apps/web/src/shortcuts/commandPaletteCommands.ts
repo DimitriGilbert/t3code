@@ -15,6 +15,7 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { type CommandHandler, type CommandScopeOptions, registerCommands } from "./dispatcher";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
+import { emitWatchUiAction } from "../components/watch/watchUiBus";
 
 function consume(event: KeyboardEvent): void {
   event.preventDefault();

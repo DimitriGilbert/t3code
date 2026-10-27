@@ -17,9 +17,6 @@ describe("watch MCP toolkit", () => {
       "t3_watch_connector_rollback",
       "t3_watch_connector_uninstall",
       "t3_watch_widget_source_publish",
-      "t3_watch_pages_list",
-      "t3_watch_widget_export",
-      "t3_watch_widget_import",
     ]) {
       expect(toolNames).toContain(name);
     }

@@ -1,11 +1,7 @@
 /**
- * ZCode's `ProviderAuthController`. Credentials live in `~/.zcode` (the
- * `ZCODE_HOME` env re-roots it), never in T3, so sign-in offers two methods:
- * the bridge's `zcode-credentials` agent method, which asks the ACP bridge to
- * adopt whatever is already saved, and a terminal method that runs
- * `zcode login` interactively when a PTY is available on this environment.
- * ZCode exposes no sign-out the bridge can drive, so logout is a guided
- * failure rather than a silent no-op.
+ * ZCode's `ProviderAuthController`. Credentials live in `~/.zcode`
+ * (`ZCODE_HOME` re-roots it): saved-credential adoption via a disposable
+ * app-server probe, plus a terminal `zcode login`. Logout is a guided failure.
  *
  * @module provider-zcode/server/auth
  */
@@ -15,7 +11,6 @@ import {
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import type { ZcodeSettings } from "../settings.ts";
-import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -27,13 +22,16 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import * as ProviderAuthFlow from "@t3tools/provider-core/server/providerAuthFlow";
-import { makeZcodeAcpRuntime, ZCODE_ACP_AUTH_METHOD_ID } from "./zcodeAcp.ts";
+import { buildZcodeAppServerSpawnInput, openZcodeAppServerClient } from "./zcodeAppServer.ts";
 import { zcodeCredentialFilesPresent, zcodeHomePath } from "./status.ts";
 
-/** The terminal method id for `zcode login` (the bridge advertises none itself). */
+/** The saved-credentials method id (the app-server exposes no auth requests). */
+export const ZCODE_CREDENTIALS_METHOD_ID = "zcode-credentials";
+
+/** The terminal method id for `zcode login`. */
 export const ZCODE_LOGIN_METHOD_ID = "zcode-login";
 
-type ZcodeAuthSettings = Pick<ZcodeSettings, "enabled" | "binaryPath" | "zcodeBinaryPath">;
+type ZcodeAuthSettings = Pick<ZcodeSettings, "enabled" | "binaryPath">;
 
 export const makeZcodeAuth = Effect.fn("makeZcodeAuth")(function* (options: {
   readonly instanceId: ProviderInstanceId;
@@ -43,7 +41,6 @@ export const makeZcodeAuth = Effect.fn("makeZcodeAuth")(function* (options: {
   readonly onChanged: (authenticated: boolean) => Effect.Effect<void, ProviderSetupError>;
 }) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const pty = yield* Effect.serviceOption(PtyAdapter.PtyAdapter);
@@ -55,22 +52,38 @@ export const makeZcodeAuth = Effect.fn("makeZcodeAuth")(function* (options: {
       ...(cause === undefined ? {} : { cause }),
     });
 
-  const makeRuntime = () =>
-    makeZcodeAcpRuntime({
-      settings: options.settings,
-      environment: options.environment,
-      cwd: options.cwd,
-      clientInfo: { name: "t3-code-provider-auth", version: "0.0.0" },
-      authenticateOnAuthRequired: false,
+  // Adopting saved credentials == the app-server can spawn, reach
+  // storage-ready, and list sessions against this workspace.
+  const probeSavedCredentials = Effect.fn("probeSavedCredentials")(function* () {
+    const spawnInput = buildZcodeAppServerSpawnInput(
+      options.settings,
+      options.cwd,
+      options.environment,
+    );
+    const client = yield* openZcodeAppServerClient({
+      command: spawnInput.command,
+      args: spawnInput.args,
+      cwd: spawnInput.cwd,
+      env: spawnInput.env,
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      Effect.provideService(Crypto.Crypto, crypto),
-      Effect.mapError((cause) => failure("start", "Could not start the ZCode ACP bridge.", cause)),
+      Effect.provideService(Scope.Scope, yield* Scope.Scope),
+      Effect.mapError((cause) => failure("start", "Could not start the ZCode app-server.", cause)),
     );
+    yield* client
+      .request("session/list", {
+        workspace: { workspacePath: options.cwd, workspaceKey: options.cwd },
+      })
+      .pipe(
+        Effect.mapError((cause) =>
+          failure("verify", "ZCode could not list sessions with the saved credentials.", cause),
+        ),
+      );
+  }, Effect.scoped);
 
   const methods: ReadonlyArray<ProviderAuthMethod> = [
     {
-      id: ZCODE_ACP_AUTH_METHOD_ID,
+      id: ZCODE_CREDENTIALS_METHOD_ID,
       name: "ZCode account",
       description: "Use the credentials saved in the ZCode home directory.",
       type: "agent",
@@ -97,7 +110,7 @@ export const makeZcodeAuth = Effect.fn("makeZcodeAuth")(function* (options: {
         "Interactive provider login is unavailable on this environment.",
       );
     }
-    const command = nonEmptyCommand(options.settings.zcodeBinaryPath) ?? "zcode";
+    const command = nonEmptyCommand(options.settings.binaryPath) ?? "zcode";
     const exited = yield* Deferred.make<number>();
     const output = yield* Queue.sliding<string>(64);
     const process = yield* pty.value
@@ -168,64 +181,32 @@ export const makeZcodeAuth = Effect.fn("makeZcodeAuth")(function* (options: {
     Effect.provideService(Path.Path, path),
   );
 
-  const authenticate = (
+  const authenticate = Effect.fn("ZcodeAuth.authenticate")(function* (
     methodId: string,
     context: ProviderAuthFlow.ProviderAuthFlowContext,
-  ): Effect.Effect<void, ProviderSetupError, Scope.Scope> =>
-    Effect.gen(function* () {
-      if (!options.settings.enabled) {
-        return yield* failure("start", "Enable this provider before signing in.");
-      }
-      if (methodId === ZCODE_LOGIN_METHOD_ID) {
-        yield* runLoginTerminal(context).pipe(Effect.scoped);
-        yield* context.verifying;
-        // `zcode login` persists under ~/.zcode itself; its files are the proof.
-        if (!(yield* credentialCheck)) {
-          return yield* failure(
-            "verify",
-            "`zcode login` finished but no ZCode credentials were found.",
-          );
-        }
-      } else {
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const runtime = yield* makeRuntime();
-            const initialized = yield* runtime
-              .initialize()
-              .pipe(
-                Effect.mapError((cause) =>
-                  failure("start", "Could not initialize the ZCode ACP bridge.", cause),
-                ),
-              );
-            const method = initialized.authMethods?.find((entry) => entry.id === methodId);
-            if (!method) {
-              return yield* failure(
-                "start",
-                "The ZCode ACP bridge did not advertise its credentials sign-in method.",
-              );
-            }
-            yield* (runtime.authenticate ?? (() => Effect.void))(methodId).pipe(
-              Effect.mapError((cause) =>
-                failure("start", "The bridge could not complete ZCode sign-in.", cause),
-              ),
-            );
-            yield* context.verifying;
-            yield* runtime
-              .start()
-              .pipe(
-                Effect.mapError((cause) =>
-                  failure(
-                    "verify",
-                    "ZCode could not create a session with the saved credentials.",
-                    cause,
-                  ),
-                ),
-              );
-          }),
+  ): Effect.fn.Return<void, ProviderSetupError, Scope.Scope> {
+    if (!options.settings.enabled) {
+      return yield* failure("start", "Enable this provider before signing in.");
+    }
+    if (methodId === ZCODE_LOGIN_METHOD_ID) {
+      yield* runLoginTerminal(context).pipe(Effect.scoped);
+      yield* context.verifying;
+      // `zcode login` persists under ~/.zcode itself; its files are the proof.
+      if (!(yield* credentialCheck)) {
+        return yield* failure(
+          "verify",
+          "`zcode login` finished but no ZCode credentials were found.",
         );
       }
-      yield* options.onChanged(true);
-    });
+    } else {
+      if (methodId !== ZCODE_CREDENTIALS_METHOD_ID) {
+        return yield* failure("start", `Unknown ZCode auth method ${methodId}.`);
+      }
+      yield* context.verifying;
+      yield* probeSavedCredentials();
+    }
+    yield* options.onChanged(true);
+  });
 
   const zcodeHome = yield* zcodeHomePath(options.environment).pipe(
     Effect.provideService(Path.Path, path),

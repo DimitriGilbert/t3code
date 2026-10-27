@@ -1876,7 +1876,9 @@ export type CommandEnvelopeWire = typeof CommandEnvelopeWire.Type;
 
 // Per-type payload decoders compiled once at module scope.
 const commandPayloadDecoders = new Map(
-  Object.entries(CommandPayloadSchemas).map(([type, schema]) => [type, Schema.decodeSync(schema)]),
+  (Object.keys(CommandPayloadSchemas) as Array<CommandType>).map(
+    (type) => [type, Schema.decodeSync(CommandPayloadSchemas[type])] as const,
+  ),
 );
 
 /** Thrown when an outbound envelope violates upstream CAS rules. */

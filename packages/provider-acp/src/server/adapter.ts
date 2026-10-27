@@ -1006,12 +1006,9 @@ function elicitationContent(
 }
 
 /**
- * Choice list of one elicitation form field. A flat `enum` is the common
- * shape; the titled variants (`oneOf`/`anyOf` of `{const, title}`, or string
- * literals) are the spec's labelled-choice encoding — the label renders
- * `title` while `const` stays the wire value so sentinel picks (e.g. ZCode's
- * `__skip__` "Skip this question") reach the provider unchanged. Array fields
- * (multi-select) carry the same shapes under `items`.
+ * Choice list of one elicitation form field: flat `enum` or the titled
+ * `oneOf`/`anyOf`/`const` variants; `title` renders while `const` stays
+ * the wire value so sentinel picks reach the provider unchanged.
  */
 function acpElicitationFieldChoices(
   field: Record<string, unknown> | undefined,

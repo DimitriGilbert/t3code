@@ -1,14 +1,7 @@
 /**
  * DevinDriver — `ProviderDriver` for Devin through the first-party
- * `devin acp` ACP server.
- *
- * The `devin` CLI is the only artifact involved: a self-contained native
- * binary (not on npm) that version-probes with `--version` and self-updates
- * with `devin update`, so maintenance resolves to the resolved binary's own
- * updater instead of a package manager. Credentials live in
- * `credentials.toml` under the XDG data dir; the auth controller offers the
- * ACP `devin-browser` agent method plus a terminal `devin auth login`, and
- * logout runs `devin auth logout`.
+ * `devin acp` ACP server. The `devin` CLI self-updates with `devin update`,
+ * so maintenance resolves to the binary's own updater.
  *
  * @module provider-devin/server/driver
  */

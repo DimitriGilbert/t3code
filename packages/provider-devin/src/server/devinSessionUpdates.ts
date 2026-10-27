@@ -1,9 +1,7 @@
 /**
- * Devin's typed `cognition.ai/*` session metadata, captured from its native
- * ACP stream: subagent-context routing, grouped streaming message ids, and the
- * real tool names Devin attaches to generic tool calls. The ACP Registry's
- * `agentId: "devin"` special case reuses these for registry-configured
- * instances.
+ * Devin's typed `cognition.ai/*` session metadata: subagent-context routing,
+ * grouped streaming message ids, and real tool names. The ACP Registry's
+ * `agentId: "devin"` special case reuses these.
  *
  * @module provider-devin/server/devinSessionUpdates
  */
@@ -46,12 +44,9 @@ export function normalizeDevinToolCall(tool: AcpToolCallState): AcpToolCallState
 }
 
 /**
- * The proposed-plan markdown Devin writes mid-turn through its `write_plan`
- * tool (verified live): the start frame carries the steps in `rawInput.plan`,
- * the completed frame the full plan file in `rawInput.content` plus a
- * `cognition.ai/isPlanFileEdit` diff. `exit_plan_mode` is deliberately not a
- * source — its `rawInput.plan` is a one-line summary that would overwrite the
- * fuller capture.
+ * The proposed-plan markdown Devin writes mid-turn through `write_plan`
+ * (verified live). `exit_plan_mode` is deliberately not a source — its
+ * `rawInput.plan` is a one-line summary that would overwrite the capture.
  */
 export function extractDevinProposedPlanMarkdown(tool: AcpToolCallState): string | undefined {
   const meta = record(tool.data.meta);

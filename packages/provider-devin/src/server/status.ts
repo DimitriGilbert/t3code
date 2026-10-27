@@ -1,15 +1,7 @@
 /**
- * Devin provider status probing.
- *
- * One binary does everything: `devin --version` proves the install, and a
- * disposable `initialize` + `session/new` ACP session reads auth methods,
- * the `model` config option, and advertised slash commands. Auth cannot be
- * read off the session probe — Devin's `session/new` succeeds without
- * credentials (verified live) and `devin auth status` always exits 0 — so
- * the probe parses the command's stdout (`Logged in` / `Not logged in`) and
- * checks whether `credentials.toml` exists under the XDG data dir. Env API
- * keys (`WINDSURF_API_KEY`, or `ACP_BACKEND` + `OPENAI_API_KEY`) only weaken
- * a signed-out verdict to `unknown`; they never prove sign-in on their own.
+ * Devin provider status probing: `devin --version` proves the install, a
+ * disposable ACP session reads model/slash-command metadata, and
+ * `devin auth status` plus `credentials.toml` carry auth.
  *
  * @module provider-devin/server/status
  */
@@ -116,10 +108,8 @@ function devinModelsFromSettings(
   return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
 }
 
-export function buildInitialDevinProviderSnapshot(
-  devinSettings: DevinSettings,
-): Effect.Effect<ServerProviderDraft> {
-  return Effect.gen(function* () {
+export const buildInitialDevinProviderSnapshot = Effect.fn("buildInitialDevinProviderSnapshot")(
+  function* (devinSettings: DevinSettings) {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
     const models = devinModelsFromSettings(devinSettings.customModels);
 
@@ -156,8 +146,8 @@ export function buildInitialDevinProviderSnapshot(
         },
       }),
     );
-  });
-}
+  },
+);
 
 const MAX_MODEL_ID_LENGTH = 256;
 const MAX_COMMAND_NAME_LENGTH = 128;
@@ -232,17 +222,16 @@ export function devinSlashCommandsFromCommands(
  * `$XDG_DATA_HOME/devin` when set to an absolute path, else
  * `~/.local/share/devin`.
  */
-export const devinDataDirPath = (
+export const devinDataDirPath = Effect.fn("devinDataDirPath")(function* (
   environment: NodeJS.ProcessEnv,
-): Effect.Effect<string, never, Path.Path> =>
-  Effect.gen(function* () {
-    const path = yield* Path.Path;
-    const dataHome = nonEmptyTrimmed(environment["XDG_DATA_HOME"]);
-    if (dataHome !== undefined && path.isAbsolute(dataHome)) {
-      return path.join(dataHome, "devin");
-    }
-    return path.join(yield* HostProcess.HomeDirectory, ".local", "share", "devin");
-  });
+) {
+  const path = yield* Path.Path;
+  const dataHome = nonEmptyTrimmed(environment["XDG_DATA_HOME"]);
+  if (dataHome !== undefined && path.isAbsolute(dataHome)) {
+    return path.join(dataHome, "devin");
+  }
+  return path.join(yield* HostProcess.HomeDirectory, ".local", "share", "devin");
+});
 
 /**
  * True when `credentials.toml` exists under the Devin data dir. The file is
@@ -250,24 +239,21 @@ export const devinDataDirPath = (
  * presence is the strongest local sign-in signal available without parsing
  * its contents.
  */
-export const devinCredentialFilePresent = (
+export const devinCredentialFilePresent = Effect.fn("devinCredentialFilePresent")(function* (
   environment: NodeJS.ProcessEnv,
-): Effect.Effect<boolean, never, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const dataDir = yield* devinDataDirPath(environment);
-    return yield* fileSystem
-      .exists(path.join(dataDir, "credentials.toml"))
-      .pipe(Effect.orElseSucceed(() => false));
-  });
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const dataDir = yield* devinDataDirPath(environment);
+  return yield* fileSystem
+    .exists(path.join(dataDir, "credentials.toml"))
+    .pipe(Effect.orElseSucceed(() => false));
+});
 
 /**
- * Credentials Devin accepts from the environment instead of the CLI store
- * (its own startup log: "fall back to env vars and stored CLI credentials").
- * `WINDSURF_API_KEY` identities a session outright — Devin's `/login` refuses
- * to run while it is set. With `ACP_BACKEND` pointed at a non-default
- * backend, `OPENAI_API_KEY` carries the credentials for it.
+ * Credentials Devin accepts from the environment ("fall back to env vars and
+ * stored CLI credentials"): `WINDSURF_API_KEY` identifies a session outright,
+ * and `OPENAI_API_KEY` covers a non-default `ACP_BACKEND`.
  */
 const devinEnvCredentialsPresent = (environment: NodeJS.ProcessEnv): boolean =>
   nonEmptyTrimmed(environment["WINDSURF_API_KEY"]) !== undefined ||
@@ -320,11 +306,10 @@ export interface DevinStatusProbeOptions {
 }
 
 /**
- * One disposable `initialize` + `session/new` round trip. `session/new` is
- * where Devin reports the `model` config option; `available_commands_update`
- * can land just after it, so the read waits out a short grace period. Auth is
- * never triggered and `session/new` succeeding says nothing about sign-in —
- * Devin creates sessions without credentials (verified live).
+ * One disposable `initialize` + `session/new` round trip: `session/new`
+ * reports the `model` config option, and a short grace period lets a late
+ * `available_commands_update` land. It proves nothing about sign-in — Devin
+ * creates sessions without credentials (verified live).
  */
 const discoverDevinMetadataViaAcp = Effect.fn("discoverDevinMetadataViaAcp")(function* (
   devinSettings: DevinSettings,

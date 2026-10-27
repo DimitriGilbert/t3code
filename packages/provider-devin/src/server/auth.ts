@@ -1,11 +1,7 @@
 /**
- * Devin's `ProviderAuthController`. Credentials live in `credentials.toml`
- * under the XDG data dir (`~/.local/share/devin` by default), never in T3,
- * so sign-in offers two methods: the `devin-browser` agent method the ACP
- * server advertises, and a terminal method that runs `devin auth login`
- * interactively when a PTY is available on this environment. `devin auth
- * logout` is a real sign-out, so logout runs it rather than guiding the
- * user elsewhere.
+ * Devin's `ProviderAuthController`: credentials live in `credentials.toml`
+ * under the XDG data dir, so sign-in offers the `devin-browser` agent method
+ * plus a terminal `devin auth login`, and logout runs `devin auth logout`.
  *
  * @module provider-devin/server/auth
  */
@@ -22,7 +18,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
-import * as Scope from "effect/Scope";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
@@ -175,69 +170,68 @@ export const makeDevinAuth = Effect.fn("makeDevinAuth")(function* (options: {
     Effect.provideService(Path.Path, path),
   );
 
-  const authenticate = (
+  const authenticate = Effect.fn("authenticate")(function* (
     methodId: string,
     context: ProviderAuthFlow.ProviderAuthFlowContext,
-  ): Effect.Effect<void, ProviderSetupError, Scope.Scope> =>
-    Effect.gen(function* () {
-      if (!options.settings.enabled) {
-        return yield* failure("start", "Enable this provider before signing in.");
-      }
-      if (methodId === DEVIN_LOGIN_METHOD_ID) {
-        yield* runLoginTerminal(context).pipe(Effect.scoped);
-        yield* context.verifying;
-        // `devin auth login` writes credentials.toml itself; the file is the proof.
-        if (!(yield* credentialCheck)) {
-          return yield* failure(
-            "verify",
-            "`devin auth login` finished but no Devin credentials were found.",
-          );
-        }
-      } else {
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const runtime = yield* makeRuntime();
-            const initialized = yield* runtime
-              .initialize()
-              .pipe(
-                Effect.mapError((cause) =>
-                  failure("start", "Could not initialize the Devin ACP server.", cause),
-                ),
-              );
-            const method = initialized.authMethods?.find((entry) => entry.id === methodId);
-            if (!method) {
-              return yield* failure(
-                "start",
-                "The Devin ACP server did not advertise its browser sign-in method.",
-              );
-            }
-            yield* (runtime.authenticate ?? (() => Effect.void))(methodId).pipe(
-              Effect.mapError((cause) =>
-                failure("start", "Devin could not complete the browser sign-in.", cause),
-              ),
-            );
-            yield* context.verifying;
-            // `session/new` succeeds without credentials, so it cannot be
-            // the sign-in proof — the credentials file the browser flow just
-            // wrote is.
-            if (!(yield* credentialCheck)) {
-              return yield* failure(
-                "verify",
-                "The Devin sign-in finished but no credentials were found.",
-              );
-            }
-            yield* runtime
-              .start()
-              .pipe(
-                Effect.mapError((cause) =>
-                  failure("verify", "Devin could not create a session after sign-in.", cause),
-                ),
-              );
-          }),
+  ) {
+    if (!options.settings.enabled) {
+      return yield* failure("start", "Enable this provider before signing in.");
+    }
+    if (methodId === DEVIN_LOGIN_METHOD_ID) {
+      yield* runLoginTerminal(context).pipe(Effect.scoped);
+      yield* context.verifying;
+      // `devin auth login` writes credentials.toml itself; the file is the proof.
+      if (!(yield* credentialCheck)) {
+        return yield* failure(
+          "verify",
+          "`devin auth login` finished but no Devin credentials were found.",
         );
       }
-      yield* options.onChanged(true);
-    });
+    } else {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* makeRuntime();
+          const initialized = yield* runtime
+            .initialize()
+            .pipe(
+              Effect.mapError((cause) =>
+                failure("start", "Could not initialize the Devin ACP server.", cause),
+              ),
+            );
+          const method = initialized.authMethods?.find((entry) => entry.id === methodId);
+          if (!method) {
+            return yield* failure(
+              "start",
+              "The Devin ACP server did not advertise its browser sign-in method.",
+            );
+          }
+          yield* (runtime.authenticate ?? (() => Effect.void))(methodId).pipe(
+            Effect.mapError((cause) =>
+              failure("start", "Devin could not complete the browser sign-in.", cause),
+            ),
+          );
+          yield* context.verifying;
+          // `session/new` succeeds without credentials, so it cannot be
+          // the sign-in proof — the credentials file the browser flow just
+          // wrote is.
+          if (!(yield* credentialCheck)) {
+            return yield* failure(
+              "verify",
+              "The Devin sign-in finished but no credentials were found.",
+            );
+          }
+          yield* runtime
+            .start()
+            .pipe(
+              Effect.mapError((cause) =>
+                failure("verify", "Devin could not create a session after sign-in.", cause),
+              ),
+            );
+        }),
+      );
+    }
+    yield* options.onChanged(true);
+  });
 
   const devinDataDir = yield* devinDataDirPath(options.environment).pipe(
     Effect.provideService(Path.Path, path),

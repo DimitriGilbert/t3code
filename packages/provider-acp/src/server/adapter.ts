@@ -1006,12 +1006,9 @@ function elicitationContent(
 }
 
 /**
- * Choice list of one elicitation form field. A flat `enum` is the common
- * shape; the titled variants (`oneOf`/`anyOf` of `{const, title}`, or string
- * literals) are the spec's labelled-choice encoding — the label renders
- * `title` while `const` stays the wire value so sentinel picks (e.g. ZCode's
- * `__skip__` "Skip this question") reach the provider unchanged. Array fields
- * (multi-select) carry the same shapes under `items`.
+ * Choice list of one elicitation form field: a flat `enum`, or the spec's
+ * labelled-choice `oneOf`/`anyOf` of `{const, title}` where `const` stays the
+ * wire value. Array (multi-select) fields carry the same shapes under `items`.
  */
 function acpElicitationFieldChoices(
   field: Record<string, unknown> | undefined,
@@ -1043,10 +1040,9 @@ function acpElicitationFieldChoices(
 
 /**
  * Maps a form-mode `elicitation/create` requestedSchema onto user-input
- * questions: one per property, with enum/oneOf/anyOf options, `multiSelect`
- * for array-typed fields, and the boolean fallback for bare `type: "boolean"`.
- * Devin's ask-user form is the verified `oneOf` sender (title + const per
- * option).
+ * questions: enum/oneOf/anyOf options, `multiSelect` for array fields, and a
+ * boolean fallback for bare `type: "boolean"` (Devin's ask-user is the
+ * verified `oneOf` sender).
  */
 export function acpElicitationFormQuestions(input: {
   readonly requestedSchema: unknown;

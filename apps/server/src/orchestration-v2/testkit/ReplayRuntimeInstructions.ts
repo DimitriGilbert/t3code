@@ -17,7 +17,7 @@ export function materializeReplayTranscriptRuntimeInstructions(
             ? "Devin"
             : runtime.driver === "fx"
               ? "fx"
-            : undefined;
+              : undefined;
   if (harness === undefined) return transcript;
   const instructions = buildRuntimeInstructions({ harness, model: runtime.model });
 

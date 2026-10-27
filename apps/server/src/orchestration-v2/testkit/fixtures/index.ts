@@ -207,9 +207,6 @@ import { turnInterruptMidToolInput } from "./turn_interrupt_mid_tool/input.ts";
 import { assertTurnInterruptMidToolPiOutput } from "./turn_interrupt_mid_tool/pi_output.ts";
 import { assertTurnInterruptRestartClaudeOutput } from "./turn_interrupt_restart/claude_output.ts";
 import { turnInterruptRestartInput } from "./turn_interrupt_restart/input.ts";
-import { assertClaudeWebSearchOutput } from "./web_search/claude_output.ts";
-import { assertWebSearchOutput } from "./web_search/codex_output.ts";
-import { webSearchInput } from "./web_search/input.ts";
 import { zcodeAskUserInput } from "./zcode_ask_user/input.ts";
 import { assertZcodeAskUserOutput } from "./zcode_ask_user/output.ts";
 import { zcodeBasicTurnInput } from "./zcode_basic_turn/input.ts";
@@ -220,6 +217,9 @@ import { zcodePermissionInput } from "./zcode_permission/input.ts";
 import { assertZcodePermissionOutput } from "./zcode_permission/output.ts";
 import { zcodePromptErrorInput } from "./zcode_prompt_error/input.ts";
 import { assertZcodePromptErrorOutput } from "./zcode_prompt_error/output.ts";
+import { assertClaudeWebSearchOutput } from "./web_search/claude_output.ts";
+import { assertWebSearchOutput } from "./web_search/codex_output.ts";
+import { webSearchInput } from "./web_search/input.ts";
 import {
   ACP_REGISTRY_MODEL_SELECTION,
   CLAUDE_MODEL_SELECTION,
@@ -231,8 +231,8 @@ import {
   OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
   PI_MODEL_SELECTION,
-  ZCODE_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
+  ZCODE_MODEL_SELECTION,
   READ_ONLY_ON_REQUEST_POLICY,
   RESTRICTED_GRANULAR_POLICY,
   type OrchestratorReplayFixture,

@@ -10,10 +10,9 @@ import {
 import { ZCODE_PERMISSION_APPROVED_COMMAND, ZCODE_PERMISSION_DECLINED_COMMAND } from "./input.ts";
 
 /**
- * Approval-required maps onto ZCode's `build` session mode, so both commands
- * surface as permission asks the user must answer. The approved one runs; the
- * declined one resolves the native response with the reject option and its tool
- * call fails without running.
+ * Both commands surface as `pendingInteractions` permissions resolved through
+ * `v4/command resolveInteraction`: the approved one runs; the declined one
+ * resolves with the deny option and its tool call fails without running.
  */
 export function assertZcodePermissionOutput(
   result: OrchestratorV2ScenarioResult,
@@ -39,32 +38,31 @@ export function assertZcodePermissionOutput(
     ],
   );
 
-  // Both decisions reach the bridge as the option id of the matching kind.
+  // Both decisions reach the app-server as the matching option's id.
   const decisions = transcript.entries.flatMap((entry) =>
     entry.type === "expect_outbound" &&
     typeof entry.frame === "object" &&
     entry.frame !== null &&
-    Reflect.get(entry.frame, "method") === "session/request_permission"
+    Reflect.get(entry.frame, "method") === "v4/command" &&
+    Reflect.get(Reflect.get(entry.frame, "params") as object, "type") === "resolveInteraction"
       ? [
           Reflect.get(
-            Reflect.get(Reflect.get(entry.frame, "result") as object, "outcome") as object,
-            "optionId",
+            Reflect.get(Reflect.get(entry.frame, "params") as object, "payload") as object,
+            "answer",
           ),
         ]
       : [],
   );
-  assert.deepEqual(decisions, ["allow_once", "reject_once"]);
+  assert.deepEqual(decisions, [{ optionId: "allow_once" }, { optionId: "reject_once" }]);
 
   const approvals = projection.turnItems.filter((item) => item.type === "approval_request");
   assert.deepEqual(
     approvals.map((item) => [item.status, item.type === "approval_request" ? item.prompt : null]),
     [
       ["completed", ZCODE_PERMISSION_APPROVED_COMMAND],
-      ["cancelled", ZCODE_PERMISSION_DECLINED_COMMAND],
+      ["completed", ZCODE_PERMISSION_DECLINED_COMMAND],
     ],
   );
-  // The bridge's option ids are opaque, so the item carries no curated option
-  // list; decisions are asserted on the wire above instead.
 
   const shells = projection.turnItems.filter((item) => item.type === "command_execution");
   assert.isTrue(

@@ -381,7 +381,6 @@ export const DEVIN_MODEL_SELECTION = {
   model: "default",
 } satisfies ModelSelection;
 
-/** "default" keeps the session's own model; the bridge resolves it from ~/.zcode config. */
 export const ZCODE_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("zcode"),
   model: "default",

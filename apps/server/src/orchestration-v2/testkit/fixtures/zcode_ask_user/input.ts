@@ -4,11 +4,10 @@ export const ZCODE_ASK_USER_PROMPT =
   "Ask which output style this fixture should use — concise or verbose — then answer exactly: zcode ask user fixture complete";
 
 /**
- * AskUserQuestion reaches T3 as a form-mode `elicitation/create` because the
- * bridge sees the advertised `elicitation.form` capability: one titled `oneOf`
- * dropdown field per question (`q_<i>`, with a `__skip__` sentinel) plus a
- * free-text `q_<i>_other` companion (interaction/adapter.js
- * buildAskUserElicitationForm).
+ * AskUserQuestion arrives as a `pendingInteractions` `userInput` entry whose
+ * `questions` carry the option list; the answer goes back through
+ * `resolveInteraction` with the upstream `answers` content map keyed on the
+ * question text.
  */
 export function zcodeAskUserInput(): OrchestratorFixtureInput {
   return {
@@ -16,7 +15,7 @@ export function zcodeAskUserInput(): OrchestratorFixtureInput {
       { type: "message", text: ZCODE_ASK_USER_PROMPT },
       {
         type: "answer_next_user_input_request",
-        answers: { q_0: "concise" },
+        answers: { style: "concise" },
       },
     ],
   };

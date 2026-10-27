@@ -8,20 +8,14 @@ import {
   assertUserMessagesInclude,
   projectionFor,
 } from "../shared.ts";
-import {
-  ZCODE_BACKEND_ERROR_PROMPT,
-  ZCODE_PROMPT_ERROR_PROMPT,
-  ZCODE_PROMPT_ERROR_RECOVERED,
-} from "./input.ts";
+import { ZCODE_PROMPT_ERROR_PROMPT, ZCODE_PROMPT_ERROR_RECOVERED } from "./input.ts";
 
-export const ZCODE_RATE_LIMIT_TEXT =
-  "ZCode turn failed: model request failed: HTTP 429 quota exceeded";
-export const ZCODE_BACKEND_ERROR_TEXT = "ZCode turn failed: backend session lost";
+const ZCODE_BACKEND_ERROR_TEXT = "ZCode turn failed: backend session lost";
 
 /**
- * Both bridge failures project the backend's own code; the 429 maps to a
- * usage-limit run with a Retry-After deadline, the backend loss stays a plain
- * provider error, and neither poisons the session for the follow-up.
+ * A `failed` turnHeader projects a failed run whose `control.lastError` text
+ * lands on the provider_error failure; the surviving session then takes the
+ * follow-up turn without a fresh handshake.
  */
 export function assertZcodePromptErrorOutput(
   result: OrchestratorV2ScenarioResult,
@@ -30,42 +24,40 @@ export function assertZcodePromptErrorOutput(
   assertBaseProjection({
     result,
     transcript,
-    runCount: 3,
-    runStatuses: ["failed", "failed", "completed"],
+    runCount: 2,
+    runStatuses: ["failed", "completed"],
   });
   const projection = projectionFor(result, transcript.scenario);
   assertSemanticProjectionIntegrity(projection);
-  assertUserMessagesInclude(projection, [
-    ZCODE_PROMPT_ERROR_PROMPT,
-    ZCODE_BACKEND_ERROR_PROMPT,
-    ZCODE_PROMPT_ERROR_RECOVERED,
-  ]);
+  assertUserMessagesInclude(projection, [ZCODE_PROMPT_ERROR_PROMPT, ZCODE_PROMPT_ERROR_RECOVERED]);
 
-  const runFailure = (ordinal: number) => {
-    const run = projection.runs.find((candidate) => candidate.ordinal === ordinal);
-    const item = projection.turnItems.find(
-      (candidate) => candidate.runId === run?.id && candidate.type === "error",
-    );
-    if (item?.type !== "error") throw new Error(`expected an error item on run ${ordinal}`);
-    return item.failure;
-  };
+  const failedRun = projection.runs.find((candidate) => candidate.ordinal === 1);
+  const failureItem = projection.turnItems.find(
+    (candidate) => candidate.runId === failedRun?.id && candidate.type === "error",
+  );
+  if (failureItem?.type !== "error") throw new Error("expected an error item on run 1");
+  assert.equal(failureItem.failure.message, ZCODE_BACKEND_ERROR_TEXT);
+  assert.equal(failureItem.failure.class, "provider_error");
 
-  const rateLimited = runFailure(1);
-  assert.equal(rateLimited.message, ZCODE_RATE_LIMIT_TEXT);
-  assert.equal(rateLimited.class, "usage_limit");
-  assert.equal(rateLimited.code, "rate_limit");
-  // retryAfterMs resolved against wall-clock now into an ISO deadline.
-  assert.isString(rateLimited.resetAt);
-  assert.isTrue(Number.isFinite(Date.parse(rateLimited.resetAt!)));
-
-  const backendLost = runFailure(2);
-  assert.equal(backendLost.message, ZCODE_BACKEND_ERROR_TEXT);
-  assert.equal(backendLost.class, "provider_error");
-  assert.equal(backendLost.code, "backend_lost");
-  assert.isUndefined(backendLost.resetAt);
+  // No fresh createSession: the follow-up reuses conversation s1 (one
+  // createSession + one sendText per run only).
+  const commands = transcript.entries.flatMap((entry) => {
+    if (entry.type !== "expect_outbound") return [];
+    const frame = entry.frame;
+    if (
+      typeof frame !== "object" ||
+      frame === null ||
+      Reflect.get(frame, "method") !== "v4/command"
+    ) {
+      return [];
+    }
+    return [(Reflect.get(frame, "params") as Record<string, unknown>).type];
+  });
+  assert.deepEqual(commands.filter((type) => type === "createSession").length, 1);
+  assert.deepEqual(commands.filter((type) => type === "sendText").length, 2);
 
   const recoveredTexts = projection.turnItems.flatMap((item) =>
-    item.runId === projection.runs[2]?.id && item.type === "assistant_message" ? [item.text] : [],
+    item.runId === projection.runs[1]?.id && item.type === "assistant_message" ? [item.text] : [],
   );
   assert.deepEqual(recoveredTexts, ["zcode prompt error fixture recovered"]);
 }

@@ -4,11 +4,10 @@ export const ZCODE_PERMISSION_APPROVED_COMMAND = "touch zcode-approved.txt";
 export const ZCODE_PERMISSION_DECLINED_COMMAND = "touch zcode-declined.txt";
 
 /**
- * Approval-required maps onto ZCode's `build` session mode, whose permission
- * asks the user must answer. The first command is approved and runs; the
- * second is declined, so its call reports failed. (The guarded/auto
- * escalation is covered by the zcodePermissionDisposition unit tests — it
- * only engages when the policy carries no approval/sandbox override.)
+ * Approval-required maps onto ZCode's `build` submission mode, whose
+ * `pendingInteractions` permissions the user must answer via
+ * `resolveInteraction`. The first command is approved and runs; the second is
+ * declined, so its tool call reports failed.
  */
 export function zcodePermissionInput(): OrchestratorFixtureInput {
   return {

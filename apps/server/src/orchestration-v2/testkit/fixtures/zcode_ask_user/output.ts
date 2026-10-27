@@ -14,7 +14,7 @@ import {
 } from "../shared.ts";
 import { ZCODE_ASK_USER_PROMPT } from "./input.ts";
 
-/** The bridge's AskUserQuestion form elicitation projects a user-input card. */
+/** The pendingInteractions userInput projects a user-input card. */
 export function assertZcodeAskUserOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
@@ -28,23 +28,40 @@ export function assertZcodeAskUserOutput(
   assertUserMessagesInclude(projection, [ZCODE_ASK_USER_PROMPT]);
   assertAssistantTextIncludes(projection, "zcode ask user fixture complete");
 
-  // Question ids are the bridge's form field keys; the titled `oneOf` choice
-  // list includes its skip sentinel without breaking option extraction.
+  // Question ids are the deduped zcode headers; options come from the payload.
   const requestItem = projection.turnItems.find((item) => item.type === "user_input_request");
   assert.isDefined(requestItem);
-  assert.equal(requestItem?.questions[0]?.id, "q_0");
+  assert.equal(requestItem?.questions[0]?.id, "style");
   assert.deepEqual(
     requestItem?.questions[0]?.options.map((option) => option.label),
-    ["concise", "verbose", "Skip this question"],
+    ["concise", "verbose"],
   );
 
-  // The selected dropdown value reaches the bridge as the field's answer.
-  const elicitationResponse = transcript.entries.find(
-    (entry) =>
-      entry.type === "expect_outbound" &&
-      typeof entry.frame === "object" &&
-      entry.frame !== null &&
-      Reflect.get(entry.frame, "method") === "elicitation/create",
-  );
-  assert.isDefined(elicitationResponse);
+  // The answer reaches the app-server as a resolveInteraction content map.
+  const resolutions = transcript.entries.flatMap((entry) => {
+    if (entry.type !== "expect_outbound") return [];
+    const frame = entry.frame;
+    if (
+      typeof frame !== "object" ||
+      frame === null ||
+      Reflect.get(frame, "method") !== "v4/command"
+    ) {
+      return [];
+    }
+    const params = Reflect.get(frame, "params") as Record<string, unknown>;
+    return params.type === "resolveInteraction" ? [params.payload] : [];
+  });
+  assert.deepEqual(resolutions, [
+    {
+      interactionId: "int-1",
+      answer: {
+        action: "accept",
+        content: {
+          answer_0: "concise",
+          answer: "concise",
+          answers: { "Which output style should this fixture use?": "concise" },
+        },
+      },
+    },
+  ]);
 }

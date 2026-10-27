@@ -1,353 +1,3190 @@
 /**
- * ZCode's orchestration-v2 adapter: an `AcpAdapterV2` flavor over the
- * third-party `zcode-acp-server` bridge, plus the `ProviderAdapterDriver` the
- * server registers.
+ * ZCode's orchestration-v2 adapter: `ProviderAdapterV2` over
+ * `zcode app-server --stdio` (Protocol v4). One process per provider session;
+ * conversations multiplex via `conversation/<sessionId>` subscriptions.
  *
  * @module provider-zcode/server/adapter
  */
-import { type OrchestrationV2ProviderCapabilities } from "@t3tools/contracts";
-import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
+import {
+  type ChatAttachment,
+  type ChatImageAttachment,
+  type NodeId,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ExecutionNode,
+  type OrchestrationV2ProviderCapabilities,
+  type OrchestrationV2ProviderSession,
+  type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
+  type OrchestrationV2UserInputQuestion,
+  type ProviderApprovalDecision,
+  type ProviderApprovalOption,
+  PositiveInt,
+  type ProviderInstanceId,
+  type ProviderRequestKind,
+  type ProviderTurnId,
+  type ThreadId,
+} from "@t3tools/contracts";
+import * as ZCodeError from "@t3tools/effect-zcode-protocol/errors";
+import * as ZCodeRpc from "@t3tools/effect-zcode-protocol/rpc";
+import * as ZCodeSchema from "@t3tools/effect-zcode-protocol/schema";
+import * as ZCodeWire from "@t3tools/effect-zcode-protocol/wire";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
-import type * as Scope from "effect/Scope";
-import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import type * as EffectAcpSchema from "effect-acp/compat";
-import * as EffectAcpErrors from "effect-acp/errors";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/process";
 
-import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
-import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  isProviderNativeImageAttachment,
+  providerMessageTextWithAttachmentPaths,
+} from "@t3tools/provider-core/server/attachmentPrompt";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  makeSubagentChildThread,
+  subagentThreadTitle,
+} from "@t3tools/provider-core/server/subagentProjection";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
   type ProviderAdapterDriverCreateInput,
 } from "@t3tools/provider-core/server/adapterDriver";
-import {
-  AcpProviderCapabilitiesV2,
-  makeAcpAdapterV2,
-  type AcpAdapterV2Flavor,
-  type AcpAdapterV2RuntimeInput,
-  type AcpAdapterV2SubagentUpdate,
-} from "@t3tools/provider-acp/server/adapter";
-import {
-  acpPermissionDisposition,
-  unknownRecord,
-  type AcpPermissionDisposition,
-} from "@t3tools/provider-acp/server/clientPolicy";
-import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
-import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { ZcodeSettings } from "../settings.ts";
 import { ZCODE_PROVIDER } from "./driverKind.ts";
-import { applyZcodeAcpModelSelection, makeZcodeAcpRuntime } from "./zcodeAcp.ts";
+import {
+  buildZcodeAppServerSpawnInput,
+  openZcodeAppServerClient,
+  type ZcodeAppServerClientOpener,
+} from "./zcodeAppServer.ts";
+import {
+  installZcodeRuntimeRequestHandlers,
+  pushZcodeAccountOverlay,
+} from "./zcodeSessionSetup.ts";
+import {
+  zcodeApprovalOptions,
+  zcodeExecutionStateForRuntimePolicy,
+  zcodeHookReviewPrompt,
+  zcodeHookReviewTrustItemIds,
+  zcodeNativeItemId,
+  zcodePermissionAnswer,
+  zcodePermissionDeniedReason,
+  zcodePermissionRpcResponse,
+  zcodeProjectedQuestions,
+  zcodeProviderTurnStatus,
+  zcodeReportedModelSelection,
+  zcodeResolveModelSelection,
+  zcodeRequestKindForTool,
+  zcodeSessionModeForRuntimeMode,
+  zcodeTimelineMarkerText,
+  zcodeToolCallItemStatus,
+  zcodeToolCommandText,
+  zcodeToolFilePath,
+  zcodeToolItemKind,
+  zcodeToolOutputText,
+  zcodeTurnItemStatusForText,
+  zcodeUserInputAnswer,
+  type ZcodeProjectedQuestion,
+} from "./zcodeRows.ts";
 
 const DEFAULT_ZCODE_SETTINGS = Schema.decodeSync(ZcodeSettings)({});
-const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
+const ZCODE_CLIENT_MODE = "desktop-continuous" as const;
+/** toolName upstream stamps on synthesized MCP elicitation interactions. */
+const ZCODE_MCP_ELICITATION_TOOL_NAME = "McpElicitation";
+const INTERRUPT_GRACE = Duration.seconds(15);
+const ASSISTANT_FLUSH_MS = 50;
 
 export const ZcodeProviderCapabilitiesV2 = {
-  ...AcpProviderCapabilitiesV2,
   sessions: {
-    ...AcpProviderCapabilitiesV2.sessions,
-    // The bridge's `model` config option switches the live session's model.
+    supportsMultipleProviderThreadsPerSession: true,
     supportsModelSwitchInSession: true,
-    // Mode selection still rides configureSession's setMode on (re)open; a
-    // runtime-mode change detaches and reopens the session instead.
-    supportsRuntimeModeSwitchInSession: false,
+    supportsProviderSwitchingViaHandoff: false,
+    supportsRuntimeModeSwitchInSession: true,
+    pendingRequestsSurviveRestart: false,
   },
   threads: {
-    ...AcpProviderCapabilitiesV2.threads,
+    canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
+    canRollbackThread: true,
+    canForkThread: true,
+    canForkFromTurn: true,
+    canForkFromSubagentThread: true,
+    exposesNativeThreadId: true,
+  },
+  turns: {
+    exposesNativeTurnId: true,
+    emitsTurnStarted: true,
+    emitsTurnCompleted: true,
+    supportsInterrupt: true,
+    supportsActiveSteering: true,
+    supportsSteeringByInterruptRestart: false,
+    supportsQueuedMessages: true,
+    terminalStatusQuality: "strong",
+  },
+  streaming: {
+    streamsAssistantText: true,
+    streamsReasoning: true,
+    streamsToolOutput: true,
+    streamsPlanText: false,
+    emitsMessageCompleted: true,
   },
   tools: {
-    ...AcpProviderCapabilitiesV2.tools,
-    supportsMcpTools: true,
+    exposesToolItemIds: true,
+    emitsToolStarted: true,
+    emitsToolCompleted: true,
+    emitsToolOutput: true,
+    supportsMcpTools: false,
+    supportsDynamicToolCallbacks: false,
+  },
+  approvals: {
+    supportsCommandApproval: true,
+    supportsFileReadApproval: true,
+    supportsFileChangeApproval: true,
+    supportsApplyPatchApproval: true,
+    approvalsHaveNativeRequestIds: true,
+    approvalCallbacksAreLiveOnly: true,
+    approvalsCanOriginateFromSubagents: false,
   },
   planning: {
-    ...AcpProviderCapabilitiesV2.planning,
-    // ExitPlanMode arrives as a `switch_mode` tool call whose rawInput carries
-    // the plan markdown; extractProposedPlanMarkdown turns it into the card.
-    emitsProposedPlan: true,
+    emitsPlanUpdated: false,
+    emitsTodoList: false,
+    emitsProposedPlan: false,
+    supportsStructuredQuestions: true,
+    planDeltasHaveItemIds: false,
   },
   subagents: {
-    ...AcpProviderCapabilitiesV2.subagents,
-    // Foreground `Agent`/`Task` tool calls surface as subagent rows; the
-    // bridge never emits child-session traffic, so there is no child thread
-    // id to expose.
     supportsSubagents: true,
+    exposesSubagentThreadIds: true,
     emitsSubagentLifecycle: true,
+    canWaitForSubagents: false,
+    canCloseSubagents: false,
+    canForkSubagentThread: false,
+  },
+  context: {
+    acceptsSystemContext: false,
+    acceptsDeveloperContext: false,
+    acceptsSyntheticUserContext: false,
+    canGenerateSummaries: false,
+    canConsumeHandoffSummaries: false,
+    supportsDeltaHandoff: false,
+    supportsFullThreadHandoff: false,
+    maxRecommendedHandoffChars: null,
   },
   checkpointing: {
-    ...AcpProviderCapabilitiesV2.checkpointing,
+    appCanCheckpointFilesystem: true,
+    supportsNestedCheckpointScopes: false,
+    providerCanRollbackConversation: true,
+    providerRollbackReturnsSnapshot: false,
     providerCanReadConversationSnapshot: true,
   },
+  identity: {
+    nativeThreadIds: "strong",
+    nativeTurnIds: "strong",
+    nativeItemIds: "strong",
+    nativeRequestIds: "strong",
+  },
+  runtimePolicy: { enforcement: "native" },
 } satisfies OrchestrationV2ProviderCapabilities;
 
-export interface ZcodeAdapterV2Options {
-  readonly instanceId: Parameters<typeof makeAcpAdapterV2>[0]["instanceId"];
-  readonly settings: ZcodeSettings;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly selfInvocation: SelfInvocation;
-  readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
-  readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
-  readonly testHooks?: Parameters<typeof makeAcpAdapterV2>[0]["testHooks"];
-  readonly makeRuntime?: (
-    input: AcpAdapterV2RuntimeInput,
-  ) => Effect.Effect<
-    AcpSessionRuntime.AcpSessionRuntime["Service"],
-    EffectAcpErrors.AcpError,
-    ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
-  >;
-  readonly assertComplete?: Effect.Effect<void, EffectAcpErrors.AcpError>;
-}
-
-/**
- * T3 runtime modes onto the ZCode session modes the bridge advertises from
- * `buildModes` (plan/build/edit/guarded/yolo): `build` keeps the backend's own
- * permission prompts, `edit` auto-accepts file edits, `guarded` runs
- * autonomously but still gates the operations ZCode flags dangerous, and
- * `yolo` runs unguarded.
- *
- * `interactionMode: "plan"` deliberately maps through the runtime mode here;
- * the adapter's generic plan/build machinery switches the session to the
- * advertised `plan` mode itself after recording the pre-plan mode it must
- * restore. Returning "plan" from this hook would record `plan` as that
- * restore point.
- */
-export function zcodeSessionModeForPolicy(
-  policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-): string {
-  switch (policy.runtimeMode) {
-    case "full-access":
-      return "yolo";
-    case "auto":
-      return "guarded";
-    case "auto-accept-edits":
-      return "edit";
-    case "approval-required":
-      return "build";
-  }
-}
-
-/**
- * The bridge's structured turn-failure payload (`data.type ===
- * "zcode_turn_failed"`, produced by `turnFailureRequestError`) carries the
- * backend's own code, HTTP status and retry hints through the ACP request
- * error's `data` field.
- */
-const ZcodeTurnFailureData = Schema.Struct({
-  type: Schema.optional(Schema.String),
-  code: Schema.optional(Schema.String),
-  statusCode: Schema.optional(Schema.Number),
-  retryable: Schema.optional(Schema.Boolean),
-  retryAfterMs: Schema.optional(Schema.Number),
-});
-const decodeZcodeTurnFailureData = Schema.decodeUnknownOption(ZcodeTurnFailureData);
-
-/** Retry-After arrives as a duration; resolve it against wall-clock now for the failure's ISO resetAt. */
-const zcodeResetAtFromRetryAfterMs = (retryAfterMs: number): string =>
-  DateTime.formatIso(
-    // @effect-diagnostics-next-line globalDate:off - promptFailure is a synchronous flavor hook, so the duration has to resolve against wall-clock now without a Clock service.
-    DateTime.makeUnsafe(new Date(Date.now() + retryAfterMs)),
-  );
-
-export function zcodePromptFailure(cause: unknown) {
-  if (!isAcpRequestError(cause)) {
-    return makeProviderFailure({ cause, class: "provider_error" });
-  }
-  const detail =
-    cause.data === undefined
-      ? undefined
-      : Option.getOrUndefined(decodeZcodeTurnFailureData(cause.data));
-  return makeProviderFailure({
-    cause,
-    message: cause.errorMessage,
-    code: detail?.code ?? String(cause.code),
-    class: detail?.statusCode === 429 ? "usage_limit" : "provider_error",
-    retryable: detail?.retryable ?? null,
-    // The bridge reports Retry-After as a duration; makeProviderFailure only
-    // projects resetAt onto usage_limit failures.
-    ...(detail?.retryAfterMs !== undefined && Number.isFinite(detail.retryAfterMs)
-      ? { resetAt: zcodeResetAtFromRetryAfterMs(detail.retryAfterMs) }
-      : {}),
+function protocolError(
+  detail: string,
+  payload?: unknown,
+): ProviderAdapter.ProviderAdapterProtocolError {
+  return new ProviderAdapter.ProviderAdapterProtocolError({
+    driver: ZCODE_PROVIDER,
+    detail,
+    ...(payload === undefined ? {} : { payload }),
   });
 }
 
-const zcodeToolName = (toolCall: AcpToolCallState): string | undefined => {
-  const toolName = unknownRecord(unknownRecord(toolCall.data.meta)?.claudeCode)?.toolName;
-  return typeof toolName === "string" ? toolName : undefined;
+const isProtocolError = Schema.is(ProviderAdapter.ProviderAdapterProtocolError);
+const isRuntimeRequestResponseError = Schema.is(
+  ProviderAdapter.ProviderAdapterRuntimeRequestResponseError,
+);
+const isOpenSessionError = Schema.is(ProviderAdapter.ProviderAdapterOpenSessionError);
+
+interface ActiveZcodeTurn {
+  readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  readonly nativeTurnId: string;
+  readonly providerTurnId: ProviderTurnId;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly providerTurnOrdinal: number;
+  readonly projectionThreadId: ThreadId;
+  readonly projectionRunId: ProviderAdapter.ProviderAdapterV2TurnInput["runId"];
+  readonly rootNodeId: NodeId;
+  readonly startedAt: DateTime.Utc;
+  readonly settled: Deferred.Deferred<void>;
+  itemPositions: Map<string, number>;
+  nextOrdinal: number;
+  terminalEmitted: boolean;
+  interrupted: boolean;
+}
+
+interface PendingInteractionRecord {
+  readonly requestId: OrchestrationV2RuntimeRequest["id"];
+  readonly nativeItemId: string;
+  readonly turn: ActiveZcodeTurn | undefined;
+  readonly createdAt: DateTime.Utc;
+  interaction: ZCodeSchema.PendingInteraction;
+  questions: ReadonlyArray<ZcodeProjectedQuestion> | undefined;
+  /** Locally resolved; kept until upstream drops it so resyncs don't re-emit. */
+  settled: boolean;
+}
+
+interface HeldInteractionLeg {
+  readonly deferred: Deferred.Deferred<unknown>;
+}
+
+/** Bounded so an abandoned interaction can't grow it without limit. */
+const SETTLED_RESPONSE_CACHE_LIMIT = 256;
+
+interface ZcodeConversation {
+  readonly sessionId: string;
+  readonly topic: string;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  subscriptionId: string | null;
+  logEpoch: string | null;
+  revision: number;
+  rows: Map<number, ZCodeSchema.ConversationRow>;
+  control: ZCodeSchema.SessionControl | null;
+  config: ZCodeSchema.SessionConfigState | null;
+  inputRouting: ZCodeSchema.InputRouting | null;
+  queue: ZCodeSchema.QueueState | null;
+  usage: ZCodeSchema.SessionUsageState | null;
+  rowsTotalCount: number;
+  rowsFirstRowId: number | null;
+  pendingInteractions: ReadonlyArray<ZCodeSchema.PendingInteraction>;
+  backgroundWorks: ReadonlyArray<ZCodeSchema.BackgroundWorkSummary>;
+  subagents: ZCodeSchema.SubagentProjectionState | undefined;
+  goal: ZCodeSchema.GoalState | null;
+  readonly firstSnapshot: Deferred.Deferred<void, ProviderAdapter.ProviderAdapterV2Error>;
+  readonly turns: Map<string, ActiveZcodeTurn>;
+  readonly pendingInputs: Map<string, ProviderAdapter.ProviderAdapterV2TurnInput>;
+  readonly pendingRows: Map<string, Array<ZCodeSchema.ConversationRow>>;
+  readonly interactions: Map<string, PendingInteractionRecord>;
+  // sendText guide commands whose ACK admitted "queue" are ambiguous: the
+  // queue patch that follows says whether it guided (admitted:"guide") or
+  // fell back to the deferred FIFO (admitted:"queue", retracted below).
+  readonly steerDeliveryWatch: Map<string, ActiveZcodeTurn>;
+  // A guide admitted "startNow" means the session went idle mid-flight and a
+  // turn we cannot attach to a T3 run started; it is cancelled on sight.
+  readonly foreignStartCancels: Set<string>;
+  // turnHeader(failed) can arrive before the state.updated patch carrying
+  // control.lastError; failure finalization is deferred to end of frame.
+  readonly deferredFailures: Array<{ turn: ActiveZcodeTurn; completedAt: DateTime.Utc }>;
+}
+
+const conversationRef = (sessionId: string) => ({
+  driver: ZCODE_PROVIDER,
+  nativeId: sessionId,
+  strength: "strong" as const,
+});
+
+// Work the session will still produce without input: live background works
+// (resultPending = done, continuation turn already queued), running
+// subagents, and the goal loop's running statuses — upstream's own "active"
+// set. A merely live, idle session is not pending work.
+const zcodeConversationHasPendingWork = (conversation: ZcodeConversation): boolean =>
+  conversation.backgroundWorks.some(
+    (work) => work.status === "running" || work.status === "resultPending",
+  ) ||
+  (conversation.subagents?.running.length ?? 0) > 0 ||
+  (conversation.goal !== null &&
+    (conversation.goal.status === "active" ||
+      conversation.goal.status === "verifying" ||
+      conversation.goal.status === "notSatisfied"));
+
+const rowStatusToNodeStatus = (
+  status: OrchestrationV2TurnItem["status"],
+): OrchestrationV2ExecutionNode["status"] => (status === "waiting" ? "waiting" : status);
+
+/**
+ * Latest assistant row eligible as a fork boundary (`actions.canFork` is the
+ * projection's own authority for "last assistant segment of its turn"). With
+ * `nativeTurnId` the search is scoped to that turn.
+ */
+const findZcodeForkBoundaryRow = (
+  conversation: ZcodeConversation,
+  nativeTurnId?: string,
+): ZCodeSchema.AssistantTextRow | undefined => {
+  let boundary: ZCodeSchema.AssistantTextRow | undefined;
+  for (const row of conversation.rows.values()) {
+    if (
+      row.kind === "assistantText" &&
+      row.entityId !== undefined &&
+      row.actions?.canFork === true &&
+      (nativeTurnId === undefined || row.turnId === nativeTurnId) &&
+      (boundary === undefined || row.rowId > boundary.rowId)
+    ) {
+      boundary = row;
+    }
+  }
+  return boundary;
 };
 
-const nonEmptyString = (value: unknown): string | undefined =>
-  typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-
-/**
- * In ZCode's `guarded` session mode (the T3 `auto` runtime mode) the backend
- * runs autonomously and only raises `session/request_permission` for the
- * operations its own gate refused — AST-flagged dangerous commands, and the
- * ExitPlanMode plan approval the plan-mode flow depends on. The generic
- * disposition would auto-allow every one of those asks (kind `other` + no
- * sandbox → allow), collapsing guarded into yolo and letting plan exits
- * bypass review entirely. Escalate them to the user instead, the same way
- * Grok's Auto mode is handled. Explicit approval/sandbox overrides keep the
- * generic policy answer so an operator who opted out of prompts is not
- * re-asked.
- */
-export function zcodePermissionDisposition(
-  policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-  request: EffectAcpSchema.RequestPermissionRequest,
-): AcpPermissionDisposition {
-  if (
-    policy.runtimeMode === "auto" &&
-    policy.approvalPolicy === undefined &&
-    policy.sandboxPolicy === undefined
-  ) {
-    return "ask";
-  }
-  return acpPermissionDisposition(policy, request);
-}
-
-/**
- * Strips the `agentId:` / `<usage>` trailer the Agent result appends for the
- * model (bridge `formatAgentOutputForModel`) — noise on the user-facing row.
- */
-const ZCODE_SUBAGENT_RESULT_MARKERS =
-  /\n?\s*agentId:\s*agent_[A-Za-z0-9-]+[^\n]*|\s*<usage>[\s\S]*?<\/usage>/g;
-
-/**
- * ZCode dispatches subagents through its `Agent` (legacy `Task`) tool; the
- * bridge tags those calls `_meta.subagent` and always carries
- * `_meta.claudeCode.toolName`. Only the launch card is extracted — the bridge
- * never produces child-session frames (background agents report through a
- * separate `bg_*` task card and a notification-turn text summary), so the
- * subagent row owns the full lifecycle of a foreground call.
- *
- * `run_in_background` launches are left as ordinary tool calls: their tool
- * result is just the launch acknowledgement while the real task keeps
- * running, and the post-settle `bg_*` card is the honest lifecycle surface.
- * A result frame that arrives without launch fields (mid-flight first
- * sighting) keeps the normal tool card too, rather than minting a
- * prompt-less phantom subagent.
- */
-export function extractZcodeSubagentUpdate(
-  toolCall: AcpToolCallState,
-): AcpAdapterV2SubagentUpdate | undefined {
-  const toolName = zcodeToolName(toolCall);
-  if (toolName !== "Agent" && toolName !== "Task") return undefined;
-  const input = unknownRecord(toolCall.data.rawInput);
-  if (input?.run_in_background === true) return undefined;
-  const prompt = nonEmptyString(input?.prompt) ?? "";
-  const title = nonEmptyString(input?.description) ?? null;
-  if (prompt === "" && title === null) return undefined;
-  const rawResult = toolCall.data.rawOutput;
-  const result =
-    typeof rawResult === "string"
-      ? rawResult.replaceAll(ZCODE_SUBAGENT_RESULT_MARKERS, "").trim()
-      : "";
-  return {
-    nativeTaskId: toolCall.toolCallId,
-    prompt,
-    title,
-    model: nonEmptyString(input?.model) ?? nonEmptyString(input?.subagent_type) ?? null,
-    status:
-      toolCall.status === "failed"
-        ? "failed"
-        : toolCall.status === "completed"
-          ? "completed"
-          : "running",
-    childSessionId: null,
-    result: result.length > 0 ? result : null,
-  };
-}
-
-/**
- * ZCode's ExitPlanMode reaches non-TUI clients as a `switch_mode` tool call
- * followed by `session/request_permission`; the bridge puts the plan markdown
- * in `rawInput.plan` (and `content`). Surfacing it gives the approval card a
- * proposed-plan to review instead of a bare approve/reject prompt.
- */
-export function extractZcodeProposedPlanMarkdown(toolCall: AcpToolCallState): string | undefined {
-  if (zcodeToolName(toolCall) !== "ExitPlanMode") return undefined;
-  const plan = unknownRecord(toolCall.data.rawInput)?.plan;
-  return typeof plan === "string" && plan.trim().length > 0 ? plan : undefined;
-}
-
-export function makeZcodeAcpAdapterFlavor(options: ZcodeAdapterV2Options): AcpAdapterV2Flavor {
-  return {
-    driver: ZCODE_PROVIDER,
-    runtimeHarness: "ZCode",
-    capabilities: ZcodeProviderCapabilitiesV2,
-    // The bridge advertises sessionCapabilities.list/resume; resume restores
-    // the backend session without replaying the full history.
-    preferResumeSession: true,
-    // The bridge already advertises promptCapabilities.image: true; the flag
-    // keeps image blocks allowed even if a future build under-reports it.
-    supportsImagePrompts: true,
-    // The bridge exposes ZCode's /compact and reports the real outcome.
-    supportsCompaction: true,
-    sessionModeForPolicy: zcodeSessionModeForPolicy,
-    // Guarded-mode asks are escalations, not routine prompts — see the
-    // function's doc. Approval options stay default: the bridge already
-    // normalizes every zcode option kind to the four canonical ACP kinds
-    // (allow_once/allow_always/reject_once/reject_always, including its
-    // injected "allowSession" session grant), so generic kind-based selection
-    // answers them correctly. AskUserQuestion never reaches permission
-    // requests on T3 — the bridge sees elicitation.form and sends
-    // `elicitation/create` — so no extractPermissionQuestion is needed.
-    permissionDisposition: zcodePermissionDisposition,
-    extractSubagentUpdate: extractZcodeSubagentUpdate,
-    extractProposedPlanMarkdown: extractZcodeProposedPlanMarkdown,
-    // The bridge's session-scoped BackgroundTaskListener forwards post-settle
-    // root traffic (bg_* task cards, terminal exits, and the
-    // `inputSource:"background_task"` notification turn's result text) as
-    // ordinary session/updates. Buffering them for a continuation run is the
-    // designed path; deferFinalizeForBackgroundWork /
-    // isProviderWakeNotification stay unset because the bridge owns the
-    // background lifecycle — a held-open turn would only duplicate its own
-    // bookkeeping with ids that never correlate back to in-turn frames.
-    enablePostSettleContinuation: true,
-    applyModelSelection: ({ runtime, modelSelection }) =>
-      applyZcodeAcpModelSelection({
-        runtime,
-        requestedModelId: modelSelection.model,
-        mapError: (cause) => cause,
-      }),
-    promptFailure: zcodePromptFailure,
-    makeRuntime:
-      options.makeRuntime ??
-      ((input) =>
-        makeZcodeAcpRuntime({
-          ...input,
-          settings: options.settings,
-          environment: options.environment,
-        })),
-    ...(options.assertComplete === undefined ? {} : { assertComplete: options.assertComplete }),
-  };
+export interface ZcodeAdapterV2Options {
+  readonly instanceId: ProviderInstanceId;
+  readonly settings: ZcodeSettings;
+  readonly environment: NodeJS.ProcessEnv;
+  /** Test seam: replaces the spawned `zcode app-server --stdio` process. */
+  readonly openClient?: ZcodeAppServerClientOpener;
+  /**
+   * Receives the live `workspace-config/<workspaceId>` catalog (mode options
+   * + slash commands) once a session in this process seeds it. The driver
+   * caches it per cwd for `snapshotForCwd`.
+   */
+  readonly onWorkspaceConfig?: (
+    workspaceId: string,
+    state: ZCodeSchema.WorkspaceConfigState,
+  ) => Effect.Effect<void>;
+  /** Resolves a chat attachment to its stored path (ProviderHost seam). */
+  readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
+  readonly resolveExtractedTextPath?:
+    | ((path: string) => Effect.Effect<string | undefined>)
+    | undefined;
 }
 
 export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
-  options: ZcodeAdapterV2Options,
+  adapterOptions: ZcodeAdapterV2Options,
 ) {
-  return yield* makeAcpAdapterV2({
-    instanceId: options.instanceId,
-    flavor: makeZcodeAcpAdapterFlavor(options),
-    selfInvocation: options.selfInvocation,
-    ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
-    ...(options.continuationRequests === undefined
-      ? {}
-      : { continuationRequests: options.continuationRequests }),
-    ...(options.testHooks === undefined ? {} : { testHooks: options.testHooks }),
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const crypto = yield* Crypto.Crypto;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const settings = adapterOptions.settings;
+
+  const openClient: ZcodeAppServerClientOpener =
+    adapterOptions.openClient ?? openZcodeAppServerClient;
+
+  return ProviderAdapter.ProviderAdapterV2.of({
+    instanceId: adapterOptions.instanceId,
+    driver: ZCODE_PROVIDER,
+    getCapabilities: Effect.fn("ProviderAdapter.ProviderAdapterV2.getCapabilities")(() =>
+      Effect.succeed(ZcodeProviderCapabilitiesV2),
+    ),
+    planSelectionTransition: Effect.fn("ProviderAdapter.ProviderAdapterV2.planSelectionTransition")(
+      () => Effect.succeed(turnScopedSelectionTransition()),
+    ),
+    openSession: Effect.fn("ZcodeAdapterV2.openSession")(
+      function* (input) {
+        const scope = yield* Scope.Scope;
+        const hostCwd = yield* HostProcess.WorkingDirectory;
+        const workspaceId = input.runtimePolicy.cwd ?? hostCwd;
+        const spawnInput = buildZcodeAppServerSpawnInput(
+          settings,
+          workspaceId,
+          adapterOptions.environment,
+        );
+        const client = yield* openClient({
+          command: spawnInput.command,
+          args: spawnInput.args,
+          cwd: spawnInput.cwd,
+          env: spawnInput.env,
+        }).pipe(
+          Effect.provideService(Scope.Scope, scope),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const clientId = `t3-${input.providerSessionId}`;
+
+        // The CLI races each permission/userInput's legacy reverse request
+        // against our resolveInteraction; an error response kills the race, so
+        // hold each leg on a Deferred until the interaction settles.
+        const heldInteractionLegs = new Map<string, Array<HeldInteractionLeg>>();
+        const settledInteractionResponses = new Map<string, unknown>();
+        const rememberSettledResponse = (interactionId: string, response: unknown) => {
+          if (settledInteractionResponses.size >= SETTLED_RESPONSE_CACHE_LIMIT) {
+            const oldest = settledInteractionResponses.keys().next().value;
+            if (oldest !== undefined) settledInteractionResponses.delete(oldest);
+          }
+          settledInteractionResponses.set(interactionId, response);
+        };
+        const settleInteractionLegs = Effect.fnUntraced(function* (
+          interactionId: string,
+          response: unknown,
+        ) {
+          rememberSettledResponse(interactionId, response);
+          const legs = heldInteractionLegs.get(interactionId) ?? [];
+          heldInteractionLegs.delete(interactionId);
+          for (const leg of legs) yield* Deferred.succeed(leg.deferred, response);
+        });
+        const holdInteractionLeg = Effect.fnUntraced(function* <A>(interactionId: string) {
+          const settled = settledInteractionResponses.get(interactionId) as A | undefined;
+          if (settled !== undefined) return settled;
+          const deferred = yield* Deferred.make<unknown>();
+          const legs = heldInteractionLegs.get(interactionId) ?? [];
+          legs.push({ deferred });
+          heldInteractionLegs.set(interactionId, legs);
+          return (yield* Deferred.await(deferred)) as A;
+        });
+        // params.requestId is the pending interaction's interactionId.
+        yield* client.handleServerRequest(
+          ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestPermission,
+          (params) => holdInteractionLeg<ZCodeSchema.ZCodePermissionResponse>(params.requestId),
+        );
+        yield* client.handleServerRequest(
+          ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestUserInput,
+          (params) => holdInteractionLeg<ZCodeSchema.ZCodeUserInputResponse>(params.requestId),
+        );
+
+        yield* installZcodeRuntimeRequestHandlers(client, {
+          environment: adapterOptions.environment,
+          fileSystem,
+          path,
+        });
+        // Without the account overlay the registry publishes zero executable
+        // models and every sendText fails modelUnavailable. Push once per
+        // process; requests self-gate on storage-ready.
+        yield* pushZcodeAccountOverlay(client, {
+          environment: adapterOptions.environment,
+          fileSystem,
+          path,
+          revision: `t3-${input.providerSessionId}`,
+          refreshReason: "t3-session-open",
+        });
+        const now = yield* DateTime.now;
+        const providerSession: OrchestrationV2ProviderSession = {
+          id: input.providerSessionId,
+          driver: ZCODE_PROVIDER,
+          providerInstanceId: adapterOptions.instanceId,
+          status: "ready",
+          cwd: workspaceId,
+          model: input.modelSelection.model,
+          capabilities: ZcodeProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        };
+        const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
+          Queue.offer(events, event).pipe(Effect.asVoid);
+        const conversations = new Map<string, ZcodeConversation>();
+        // childSessionIds already given a T3 thread/provider thread pair.
+        const projectedChildSessions = new Set<string>();
+        const wire = new ZCodeWire.TopicWireFrameAssembler<unknown>(Schema.Unknown);
+        // workspace-config seeds its publisher from a live session on first
+        // subscribe, so subscribe only after a conversation exists — an early
+        // subscribe would pin the empty catalog for the process lifetime.
+        let workspaceConfigSubscribed = false;
+        const ensureWorkspaceConfigSubscription = Effect.fnUntraced(function* () {
+          if (adapterOptions.onWorkspaceConfig === undefined || workspaceConfigSubscribed) return;
+          workspaceConfigSubscribed = true;
+          yield* client
+            .request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
+              topic: ZCodeSchema.workspaceConfigTopic(workspaceId),
+              connectionId: clientId,
+              clientMode: ZCODE_CLIENT_MODE,
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode workspace-config subscribe failed", { cause }),
+              ),
+            );
+        });
+
+        const sendCommand = Effect.fn("ZcodeAdapterV2.sendCommand")(function* <
+          T extends ZCodeSchema.CommandType,
+        >(input: {
+          readonly sessionId: string | null;
+          readonly type: T;
+          readonly payload: ZCodeSchema.CommandPayloadFor<T>;
+        }): Effect.fn.Return<
+          {
+            readonly ack: ZCodeSchema.CommandAck;
+            readonly envelope: ZCodeSchema.CommandEnvelopeFor<T>;
+          },
+          ZCodeError.ZCodeAppServerError | Schema.SchemaError
+        > {
+          const conversation =
+            input.sessionId === null ? undefined : conversations.get(input.sessionId);
+          const envelope = ZCodeSchema.makeCommandEnvelope({
+            commandId: yield* Effect.orDie(crypto.randomUUIDv7()),
+            clientId,
+            sessionId: input.sessionId,
+            ...(conversation !== undefined &&
+            ZCodeSchema.COMMANDS_REQUIRING_BASE_REVISION.has(input.type)
+              ? { baseRevision: conversation.revision }
+              : {}),
+            ...(conversation?.logEpoch != null && ZCodeSchema.ROW_TARGETING_COMMANDS.has(input.type)
+              ? { baseLogEpoch: conversation.logEpoch }
+              : {}),
+            issuedAt: DateTime.toEpochMillis(yield* DateTime.now),
+            type: input.type,
+            payload: input.payload,
+          } as ZCodeSchema.CommandEnvelopeFor<T>);
+          const ack = yield* client.request(
+            ZCodeRpc.V4_METHODS.command,
+            envelope as ZCodeSchema.CommandEnvelope,
+          );
+          return { ack, envelope };
+        });
+
+        const itemOrdinal = (turn: ActiveZcodeTurn, nativeItemId: string) => {
+          const existing = turn.itemPositions.get(nativeItemId);
+          if (existing !== undefined) return existing;
+          const ordinal = turn.nextOrdinal++;
+          turn.itemPositions.set(nativeItemId, ordinal);
+          return ordinal;
+        };
+
+        const nodeFor = (
+          turn: ActiveZcodeTurn,
+          nativeItemId: string,
+          kind: OrchestrationV2ExecutionNode["kind"],
+          status: OrchestrationV2ExecutionNode["status"],
+          completedAt: DateTime.Utc | null,
+          runtimeRequestId?: OrchestrationV2RuntimeRequest["id"],
+        ): OrchestrationV2ExecutionNode => ({
+          id: idAllocator.derive.nodeFromProviderItem({
+            driver: ZCODE_PROVIDER,
+            nativeItemId,
+          }),
+          threadId: turn.projectionThreadId,
+          runId: turn.projectionRunId,
+          parentNodeId: turn.rootNodeId,
+          rootNodeId: turn.rootNodeId,
+          kind,
+          status,
+          countsForRun: false,
+          providerThreadId: turn.providerThread.id,
+          providerTurnId: turn.providerTurnId,
+          nativeItemRef: conversationRef(nativeItemId),
+          runtimeRequestId: runtimeRequestId ?? null,
+          checkpointScopeId: null,
+          startedAt: turn.startedAt,
+          completedAt,
+        });
+
+        const flushTextRow = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          row: ZCodeSchema.AssistantTextRow | ZCodeSchema.ReasoningRow,
+        ) {
+          const turn = conversation.turns.get(row.turnId);
+          if (turn === undefined) return;
+          const status = zcodeTurnItemStatusForText(row.state);
+          const completed = status !== "running";
+          const at = yield* DateTime.now;
+          const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
+          const node = nodeFor(
+            turn,
+            zcodeNativeItemId(row.turnId, row.rowId),
+            row.kind === "reasoning" ? "reasoning" : "assistant_message",
+            rowStatusToNodeStatus(status),
+            completed ? at : null,
+          );
+          const messageId = idAllocator.derive.messageFromProviderItem({
+            driver: ZCODE_PROVIDER,
+            nativeItemId,
+          });
+          const turnItemId = idAllocator.derive.turnItemFromProviderItem({
+            driver: ZCODE_PROVIDER,
+            nativeItemId,
+          });
+          yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+          if (row.kind === "assistantText") {
+            const message: OrchestrationV2ConversationMessage = {
+              createdBy: "agent",
+              creationSource: "provider",
+              id: messageId,
+              threadId: turn.projectionThreadId,
+              runId: turn.projectionRunId,
+              nodeId: node.id,
+              role: "assistant",
+              text: row.text,
+              attachments: [],
+              streaming: !completed,
+              createdAt: turn.startedAt,
+              updatedAt: at,
+            };
+            yield* emit({ type: "message.updated", driver: ZCODE_PROVIDER, message });
+          }
+          const turnItem: OrchestrationV2TurnItem =
+            row.kind === "reasoning"
+              ? {
+                  id: turnItemId,
+                  threadId: turn.projectionThreadId,
+                  runId: turn.projectionRunId,
+                  nodeId: node.id,
+                  providerThreadId: turn.providerThread.id,
+                  providerTurnId: turn.providerTurnId,
+                  nativeItemRef: node.nativeItemRef,
+                  parentItemId: null,
+                  ordinal: itemOrdinal(turn, nativeItemId),
+                  status,
+                  title: null,
+                  startedAt: turn.startedAt,
+                  completedAt: completed ? at : null,
+                  updatedAt: at,
+                  type: "reasoning",
+                  text: row.text,
+                  streaming: !completed,
+                }
+              : {
+                  id: turnItemId,
+                  threadId: turn.projectionThreadId,
+                  runId: turn.projectionRunId,
+                  nodeId: node.id,
+                  providerThreadId: turn.providerThread.id,
+                  providerTurnId: turn.providerTurnId,
+                  nativeItemRef: node.nativeItemRef,
+                  parentItemId: null,
+                  ordinal: itemOrdinal(turn, nativeItemId),
+                  status,
+                  title: null,
+                  startedAt: turn.startedAt,
+                  completedAt: completed ? at : null,
+                  updatedAt: at,
+                  type: "assistant_message",
+                  messageId,
+                  text: row.text,
+                  streaming: !completed,
+                };
+          yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+        });
+
+        // Buffered text flushes: row.delta mutates the model immediately;
+        // turn_item.updated republishes on the codex cadence.
+        const textFlushScheduled = new Set<string>();
+        const scheduleTextFlush = (
+          conversation: ZcodeConversation,
+          rowId: number,
+        ): Effect.Effect<void> => {
+          const key = `${conversation.sessionId}:${rowId}`;
+          if (textFlushScheduled.has(key)) return Effect.void;
+          textFlushScheduled.add(key);
+          return Effect.sleep(Duration.millis(ASSISTANT_FLUSH_MS)).pipe(
+            Effect.andThen(
+              Effect.gen(function* () {
+                textFlushScheduled.delete(key);
+                const row = conversation.rows.get(rowId);
+                if (row?.kind === "assistantText" || row?.kind === "reasoning") {
+                  yield* flushTextRow(conversation, row);
+                }
+              }),
+            ),
+            Effect.forkIn(scope),
+            Effect.asVoid,
+          );
+        };
+
+        const emitProviderTurn = Effect.fnUntraced(function* (
+          turn: ActiveZcodeTurn,
+          status: OrchestrationV2ProviderTurn["status"],
+          completedAt: DateTime.Utc | null,
+        ) {
+          yield* emit({
+            type: "provider_turn.updated",
+            driver: ZCODE_PROVIDER,
+            threadId: turn.projectionThreadId,
+            providerTurn: {
+              id: turn.providerTurnId,
+              providerThreadId: turn.providerThread.id,
+              nodeId: turn.rootNodeId,
+              runAttemptId: turn.input.attemptId,
+              nativeTurnRef: {
+                driver: ZCODE_PROVIDER,
+                nativeId: turn.nativeTurnId,
+                strength: "strong",
+              },
+              ordinal: turn.providerTurnOrdinal,
+              status,
+              startedAt: turn.startedAt,
+              completedAt,
+            },
+          });
+        });
+
+        const finalizeInterruptedTurn = Effect.fn("ZcodeAdapterV2.finalizeInterruptedTurn")(
+          function* (conversation: ZcodeConversation, turn: ActiveZcodeTurn) {
+            const at = yield* DateTime.now;
+            yield* finalizeTurn(conversation, turn, "interrupted", at);
+          },
+        );
+
+        const finalizeTurn = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          turn: ActiveZcodeTurn,
+          status: "completed" | "interrupted" | "failed",
+          completedAt: DateTime.Utc,
+          failureDetail?: string,
+        ) {
+          if (turn.terminalEmitted) return;
+          turn.terminalEmitted = true;
+          for (const row of conversation.rows.values()) {
+            if (
+              row.turnId === turn.nativeTurnId &&
+              (row.kind === "assistantText" || row.kind === "reasoning")
+            ) {
+              yield* flushTextRow(conversation, row);
+            }
+          }
+          yield* emitProviderTurn(turn, status, completedAt);
+          if (status === "failed") {
+            yield* emit({
+              type: "turn.terminal",
+              driver: ZCODE_PROVIDER,
+              providerThreadId: turn.providerThread.id,
+              providerTurnId: turn.providerTurnId,
+              runOrdinal: turn.input.runOrdinal,
+              failureItemOrdinal: itemOrdinal(turn, `terminal-failure:${turn.providerTurnId}`),
+              status: "failed",
+              failure: makeProviderFailure({
+                message: failureDetail ?? "ZCode turn failed.",
+                class: "provider_error",
+              }),
+              threadDisposition: "reusable",
+            });
+          } else {
+            yield* emit({
+              type: "turn.terminal",
+              driver: ZCODE_PROVIDER,
+              providerThreadId: turn.providerThread.id,
+              providerTurnId: turn.providerTurnId,
+              runOrdinal: turn.input.runOrdinal,
+              status: turn.interrupted ? "interrupted" : status,
+              failure: null,
+              threadDisposition: "reusable",
+            });
+          }
+          yield* Deferred.succeed(turn.settled, undefined);
+        });
+
+        const adoptTurn = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+          nativeTurnId: string,
+          startedAt: DateTime.Utc,
+        ) {
+          const existing = conversation.turns.get(nativeTurnId);
+          if (existing !== undefined) return existing;
+          const turn: ActiveZcodeTurn = {
+            input: turnInput,
+            nativeTurnId,
+            providerTurnId: idAllocator.derive.providerTurn({
+              driver: ZCODE_PROVIDER,
+              nativeTurnId,
+            }),
+            providerThread: turnInput.providerThread,
+            providerTurnOrdinal: turnInput.providerTurnOrdinal,
+            projectionThreadId: turnInput.threadId,
+            projectionRunId: turnInput.runId,
+            rootNodeId: turnInput.rootNodeId,
+            startedAt,
+            settled: yield* Deferred.make<void>(),
+            itemPositions: new Map(),
+            nextOrdinal: 0,
+            terminalEmitted: false,
+            interrupted: false,
+          };
+          conversation.turns.set(nativeTurnId, turn);
+          yield* emitProviderTurn(turn, "running", null);
+          const queued = conversation.pendingRows.get(nativeTurnId) ?? [];
+          conversation.pendingRows.delete(nativeTurnId);
+          for (const row of queued) yield* projectRow(conversation, row);
+          return turn;
+        });
+
+        const queuePendingRow = (
+          conversation: ZcodeConversation,
+          row: ZCodeSchema.ConversationRow,
+        ) => {
+          // Bounded: rows for a turnId that never gets adopted must not grow
+          // without limit across a long-lived subscription.
+          if (!conversation.pendingRows.has(row.turnId) && conversation.pendingRows.size >= 64) {
+            const oldest = conversation.pendingRows.keys().next().value;
+            if (oldest !== undefined) conversation.pendingRows.delete(oldest);
+          }
+          const pending = conversation.pendingRows.get(row.turnId) ?? [];
+          if (pending.length === 0) conversation.pendingRows.set(row.turnId, pending);
+          pending.push(row);
+        };
+
+        const applyToolCallRow = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          row: ZCodeSchema.ToolCallRow,
+        ) {
+          const turn = conversation.turns.get(row.turnId);
+          if (turn === undefined) {
+            queuePendingRow(conversation, row);
+            return;
+          }
+          const at = yield* DateTime.now;
+          const status = zcodeToolCallItemStatus(row.status);
+          const completed = status !== "running" && status !== "waiting";
+          const itemKind = zcodeToolItemKind(row.toolName);
+          const approvalRequestId =
+            row.approvalInteractionId === undefined
+              ? undefined
+              : conversation.interactions.get(row.approvalInteractionId)?.requestId;
+          const node = nodeFor(
+            turn,
+            zcodeNativeItemId(row.turnId, row.rowId),
+            "tool_call",
+            rowStatusToNodeStatus(status),
+            completed ? at : null,
+            ...(approvalRequestId === undefined ? [] : [approvalRequestId]),
+          );
+          const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
+          const turnItemId = idAllocator.derive.turnItemFromProviderItem({
+            driver: ZCODE_PROVIDER,
+            nativeItemId,
+          });
+          const base = {
+            id: turnItemId,
+            threadId: turn.projectionThreadId,
+            runId: turn.projectionRunId,
+            nodeId: node.id,
+            providerThreadId: turn.providerThread.id,
+            providerTurnId: turn.providerTurnId,
+            nativeItemRef: node.nativeItemRef,
+            parentItemId: null,
+            ordinal: itemOrdinal(turn, nativeItemId),
+            status,
+            title: row.toolName,
+            startedAt: turn.startedAt,
+            completedAt: completed ? at : null,
+            updatedAt: at,
+          } as const;
+          const turnItem: OrchestrationV2TurnItem =
+            itemKind === "command_execution"
+              ? {
+                  ...base,
+                  type: "command_execution",
+                  input: zcodeToolCommandText(row),
+                  ...(zcodeToolOutputText(row) === undefined
+                    ? {}
+                    : { output: zcodeToolOutputText(row) }),
+                  ...(row.error === undefined ? {} : { outputIndicatesFailure: true }),
+                }
+              : itemKind === "file_change"
+                ? {
+                    ...base,
+                    type: "file_change",
+                    fileName: zcodeToolFilePath(row),
+                  }
+                : {
+                    ...base,
+                    type: "dynamic_tool",
+                    toolName: row.toolName,
+                    input: row.input ?? row.inputText,
+                    ...(row.output === undefined ? {} : { output: row.output }),
+                  };
+          yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+          yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+        });
+
+        const emitSystemNoticeForItem = Effect.fnUntraced(function* (
+          turn: ActiveZcodeTurn,
+          nativeItemId: string,
+          text: string,
+        ) {
+          const at = yield* DateTime.now;
+          const node = nodeFor(turn, nativeItemId, "system", "completed", at);
+          const turnItem: OrchestrationV2TurnItem = {
+            id: idAllocator.derive.turnItemFromProviderItem({
+              driver: ZCODE_PROVIDER,
+              nativeItemId,
+            }),
+            threadId: turn.projectionThreadId,
+            runId: turn.projectionRunId,
+            nodeId: node.id,
+            providerThreadId: turn.providerThread.id,
+            providerTurnId: turn.providerTurnId,
+            nativeItemRef: node.nativeItemRef,
+            parentItemId: null,
+            ordinal: itemOrdinal(turn, nativeItemId),
+            status: "completed",
+            title: null,
+            startedAt: at,
+            completedAt: at,
+            updatedAt: at,
+            type: "system_notice",
+            message: text,
+          };
+          yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+          yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+        });
+
+        const emitSystemNotice = (
+          turn: ActiveZcodeTurn,
+          row: ZCodeSchema.ConversationRow,
+          text: string,
+        ) => emitSystemNoticeForItem(turn, zcodeNativeItemId(row.turnId, row.rowId), text);
+
+        const projectSubagentRow = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          row: ZCodeSchema.SubagentRow,
+        ) {
+          const turn = conversation.turns.get(row.turnId);
+          if (turn === undefined) {
+            queuePendingRow(conversation, row);
+            return;
+          }
+          const at = yield* DateTime.now;
+          const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
+          const subagentNodeId = idAllocator.derive.nodeFromProviderItem({
+            driver: ZCODE_PROVIDER,
+            nativeItemId,
+          });
+          const status =
+            row.status === "running"
+              ? "running"
+              : row.status === "success"
+                ? "completed"
+                : row.status === "failed"
+                  ? "failed"
+                  : "cancelled";
+          const completed = status !== "running";
+          const childSessionId = row.childSessionId;
+          const childThreadId =
+            childSessionId === undefined
+              ? null
+              : idAllocator.derive.threadFromProviderThread({
+                  driver: ZCODE_PROVIDER,
+                  nativeThreadId: childSessionId,
+                  providerInstanceId: adapterOptions.instanceId,
+                });
+          const childProviderThreadId =
+            childSessionId === undefined
+              ? null
+              : idAllocator.derive.providerThread({
+                  driver: ZCODE_PROVIDER,
+                  nativeThreadId: childSessionId,
+                  providerInstanceId: adapterOptions.instanceId,
+                });
+          // A ZCode subagent is a real session: give it a T3 thread + provider
+          // thread once, and subscribe while it runs so its status stays live.
+          // Ended children stay lazy — resume/read subscribes on demand.
+          let childProviderThread: OrchestrationV2ProviderThread | undefined;
+          if (
+            childSessionId !== undefined &&
+            childThreadId !== null &&
+            childProviderThreadId !== null &&
+            !projectedChildSessions.has(childSessionId)
+          ) {
+            projectedChildSessions.add(childSessionId);
+            childProviderThread = {
+              id: childProviderThreadId,
+              driver: ZCODE_PROVIDER,
+              providerInstanceId: adapterOptions.instanceId,
+              providerSessionId: input.providerSessionId,
+              appThreadId: childThreadId,
+              ownerNodeId: subagentNodeId,
+              nativeThreadRef: conversationRef(childSessionId),
+              nativeConversationHeadRef: null,
+              status: status === "running" ? "active" : "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: {
+                providerThreadId: turn.providerThread.id,
+                providerTurnId: turn.providerTurnId,
+              },
+              pendingBackgroundTasks: [],
+              contextUsage: null,
+              nativeMetadata: null,
+              goal: null,
+              createdAt: at,
+              updatedAt: at,
+            };
+            yield* emit({
+              type: "app_thread.created",
+              driver: ZCODE_PROVIDER,
+              appThread: makeSubagentChildThread({
+                parentThread: turn.input.appThread,
+                childThreadId,
+                parentNodeId: subagentNodeId,
+                activeProviderThreadId: childProviderThread.id,
+                providerInstanceId: adapterOptions.instanceId,
+                modelSelection: turn.input.modelSelection,
+                title: subagentThreadTitle({
+                  parentTitle: turn.input.appThread.title,
+                  title: row.subagentType,
+                  prompt: "",
+                  ordinal: turn.providerTurnOrdinal,
+                }),
+                now: at,
+                createdBy: "agent",
+                creationSource: "provider",
+              }),
+            });
+            yield* emit({
+              type: "provider_thread.updated",
+              driver: ZCODE_PROVIDER,
+              providerThread: childProviderThread,
+            });
+            if (row.status === "running") {
+              yield* ensureConversation(childSessionId, childProviderThread).pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("ZCode child session subscribe failed", {
+                    cause,
+                    sessionId: childSessionId,
+                  }),
+                ),
+              );
+            }
+          }
+          const subagent: OrchestrationV2Subagent = {
+            id: subagentNodeId,
+            threadId: turn.projectionThreadId,
+            runId: turn.projectionRunId,
+            parentNodeId: turn.rootNodeId,
+            origin: "provider_native",
+            createdBy: "agent",
+            driver: ZCODE_PROVIDER,
+            providerInstanceId: adapterOptions.instanceId,
+            providerThreadId: childProviderThreadId ?? turn.providerThread.id,
+            childThreadId,
+            nativeTaskRef: conversationRef(nativeItemId),
+            prompt: "",
+            title: row.subagentType,
+            model: null,
+            status,
+            result: row.summaryText.length > 0 ? row.summaryText : null,
+            startedAt: turn.startedAt,
+            completedAt: completed ? at : null,
+            updatedAt: at,
+          };
+          yield* emit({ type: "subagent.updated", driver: ZCODE_PROVIDER, subagent });
+          const node = nodeFor(
+            turn,
+            zcodeNativeItemId(row.turnId, row.rowId),
+            "subagent",
+            rowStatusToNodeStatus(status),
+            completed ? at : null,
+          );
+          const turnItem: OrchestrationV2TurnItem = {
+            id: idAllocator.derive.turnItemFromProviderItem({
+              driver: ZCODE_PROVIDER,
+              nativeItemId,
+            }),
+            threadId: turn.projectionThreadId,
+            runId: turn.projectionRunId,
+            nodeId: node.id,
+            providerThreadId: turn.providerThread.id,
+            providerTurnId: turn.providerTurnId,
+            nativeItemRef: node.nativeItemRef,
+            parentItemId: null,
+            ordinal: itemOrdinal(turn, nativeItemId),
+            status,
+            title: row.subagentType,
+            startedAt: turn.startedAt,
+            completedAt: completed ? at : null,
+            updatedAt: at,
+            type: "subagent",
+            subagentId: subagentNodeId,
+            origin: "provider_native",
+            driver: ZCODE_PROVIDER,
+            providerInstanceId: adapterOptions.instanceId,
+            childThreadId,
+            prompt: "",
+            result: row.summaryText.length > 0 ? row.summaryText : null,
+          };
+          yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+          yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+        });
+
+        const projectRow = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          row: ZCodeSchema.ConversationRow,
+        ): Effect.fn.Return<void> {
+          if (row.kind === "turnHeader") {
+            const status = zcodeProviderTurnStatus(row.state);
+            const sourceCommandId = row.sourceCommandId;
+            const pending =
+              sourceCommandId === undefined || sourceCommandId === null
+                ? undefined
+                : conversation.pendingInputs.get(sourceCommandId);
+            let turn = conversation.turns.get(row.turnId);
+            if (turn === undefined && pending !== undefined && sourceCommandId != null) {
+              conversation.pendingInputs.delete(sourceCommandId);
+              turn = yield* adoptTurn(
+                conversation,
+                pending,
+                row.turnId,
+                DateTime.makeUnsafe(row.startedAt),
+              );
+            }
+            if (turn === undefined) return;
+            if (status === "running") {
+              yield* emitProviderTurn(turn, "running", null);
+              return;
+            }
+            const completedAt = DateTime.makeUnsafe(row.endedAt ?? row.startedAt);
+            // control.lastError lands in a state.updated patch that can follow
+            // the failed turnHeader in the same frame; defer so the failure
+            // text is read after the whole payload applied.
+            if (status === "failed") {
+              conversation.deferredFailures.push({ turn, completedAt });
+              return;
+            }
+            yield* finalizeTurn(conversation, turn, status, completedAt);
+            return;
+          }
+
+          if (row.kind === "assistantText" || row.kind === "reasoning") {
+            yield* flushTextRow(conversation, row);
+            return;
+          }
+          if (row.kind === "toolCall") {
+            yield* applyToolCallRow(conversation, row);
+            return;
+          }
+          if (row.kind === "subagent") {
+            yield* projectSubagentRow(conversation, row);
+            return;
+          }
+
+          const turn = conversation.turns.get(row.turnId);
+          if (row.kind === "userInput") {
+            // T3-owned inputs already live in the transcript; foreign-origin
+            // inputs (background results, goals, mailbox) project as notices.
+            const ours =
+              row.clientId === clientId ||
+              (row.sourceCommandId !== undefined &&
+                conversation.pendingInputs.has(row.sourceCommandId));
+            if (ours || turn === undefined) return;
+            yield* emitSystemNotice(turn, row, row.text);
+            return;
+          }
+          if (row.kind === "timelineMarker") {
+            if (turn === undefined || row.marker.type === "compact") {
+              if (turn === undefined) return;
+            }
+            if (row.marker.type === "compact") {
+              const at = yield* DateTime.now;
+              const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
+              const status =
+                row.marker.status === "running"
+                  ? ("running" as const)
+                  : row.marker.status === "failed" || row.marker.status === "cancelled"
+                    ? ("failed" as const)
+                    : ("completed" as const);
+              const node = nodeFor(
+                turn,
+                zcodeNativeItemId(row.turnId, row.rowId),
+                "system",
+                status === "running" ? "running" : status === "completed" ? "completed" : "failed",
+                status === "running" ? null : at,
+              );
+              const turnItem: OrchestrationV2TurnItem = {
+                id: idAllocator.derive.turnItemFromProviderItem({
+                  driver: ZCODE_PROVIDER,
+                  nativeItemId,
+                }),
+                threadId: turn.projectionThreadId,
+                runId: turn.projectionRunId,
+                nodeId: node.id,
+                providerThreadId: turn.providerThread.id,
+                providerTurnId: turn.providerTurnId,
+                nativeItemRef: node.nativeItemRef,
+                parentItemId: null,
+                ordinal: itemOrdinal(turn, nativeItemId),
+                status,
+                title: "Compaction",
+                startedAt: turn.startedAt,
+                completedAt: status === "running" ? null : at,
+                updatedAt: at,
+                type: "compaction",
+                driver: ZCODE_PROVIDER,
+                ...(row.marker.tokensBefore === undefined
+                  ? {}
+                  : { beforeTokenCount: row.marker.tokensBefore }),
+                ...(row.marker.tokensAfter === undefined
+                  ? {}
+                  : { afterTokenCount: row.marker.tokensAfter }),
+              };
+              yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+              yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+              return;
+            }
+            yield* emitSystemNotice(turn, row, zcodeTimelineMarkerText(row.marker));
+            return;
+          }
+          if (row.kind === "hookInvocation") {
+            if (turn === undefined) return;
+            const at = yield* DateTime.now;
+            const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
+            const status =
+              row.state === "running" ? "running" : row.state === "failed" ? "failed" : "completed";
+            const node = nodeFor(
+              turn,
+              zcodeNativeItemId(row.turnId, row.rowId),
+              "hook",
+              status,
+              status === "running" ? null : at,
+            );
+            const turnItem: OrchestrationV2TurnItem = {
+              id: idAllocator.derive.turnItemFromProviderItem({
+                driver: ZCODE_PROVIDER,
+                nativeItemId,
+              }),
+              threadId: turn.projectionThreadId,
+              runId: turn.projectionRunId,
+              nodeId: node.id,
+              providerThreadId: turn.providerThread.id,
+              providerTurnId: turn.providerTurnId,
+              nativeItemRef: node.nativeItemRef,
+              parentItemId: null,
+              ordinal: itemOrdinal(turn, nativeItemId),
+              status,
+              title: `Hook ${row.hookEventName}`,
+              startedAt: turn.startedAt,
+              completedAt: status === "running" ? null : at,
+              updatedAt: at,
+              type: "dynamic_tool",
+              toolName: `hook:${row.hookEventName}`,
+              input: { executions: row.executions.length },
+            };
+            yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+            yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+            return;
+          }
+          if (row.kind === "artifact" && turn !== undefined) {
+            yield* emitSystemNotice(turn, row, `Created artifact ${row.displayName}.`);
+          }
+        });
+
+        const requestKindForInteraction = (
+          interaction: ZCodeSchema.PendingInteraction,
+        ): OrchestrationV2RuntimeRequest["kind"] =>
+          interaction.kind === "userInput"
+            ? interaction.payload.kind === "userInput" &&
+              interaction.payload.toolName === ZCODE_MCP_ELICITATION_TOOL_NAME
+              ? "mcp-elicitation"
+              : "user_input"
+            : interaction.payload.kind === "permission"
+              ? zcodeRequestKindForTool(interaction.payload.toolName)
+              : "permission";
+
+        const interactionThreadId = (
+          conversation: ZcodeConversation,
+          turn: ActiveZcodeTurn | undefined,
+        ) => turn?.projectionThreadId ?? conversation.providerThread.appThreadId;
+
+        const userInputItemQuestions = (
+          payload: ZCodeSchema.UserInputRequestPayload,
+          projected: ReadonlyArray<ZcodeProjectedQuestion>,
+        ): ReadonlyArray<OrchestrationV2UserInputQuestion> =>
+          payload.questions !== undefined && payload.questions.length > 0
+            ? payload.questions.map((question, index) => {
+                const draft =
+                  payload.answerDrafts?.[`answer_${index}`] ??
+                  payload.answerDrafts?.[String(index)];
+                return {
+                  id: projected[index]?.id ?? `question-${index + 1}`,
+                  header: question.header || `Question ${index + 1}`,
+                  question: question.question,
+                  options: question.options.map((option, optionIndex) => ({
+                    label: option.label || `Option ${optionIndex + 1}`,
+                    description: option.description ?? option.label,
+                    value: option.value,
+                    ...(option.preview === undefined ? {} : { preview: option.preview }),
+                  })),
+                  ...(question.multiSelect === undefined
+                    ? {}
+                    : { multiSelect: question.multiSelect }),
+                  allowCustomAnswer: payload.freeText,
+                  ...(draft !== undefined && draft.length > 0
+                    ? { initialAnswer: draft.join(", ") }
+                    : {}),
+                };
+              })
+            : [
+                {
+                  id: "answer",
+                  header: payload.toolName ?? "Input",
+                  question: payload.prompt,
+                  options: (payload.options ?? []).map((option) => ({
+                    label: option.label,
+                    description: option.label,
+                    value: option.optionId,
+                  })),
+                  allowCustomAnswer: payload.freeText,
+                },
+              ];
+
+        const interactionTurnItem = (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          turn: ActiveZcodeTurn,
+          status: OrchestrationV2TurnItem["status"],
+          at: DateTime.Utc,
+        ): OrchestrationV2TurnItem => {
+          const interaction = record.interaction;
+          const base = {
+            id: idAllocator.derive.approvalTurnItem({ requestId: record.requestId }),
+            threadId: turn.projectionThreadId,
+            runId: turn.projectionRunId,
+            nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+            providerThreadId: turn.providerThread.id,
+            providerTurnId: turn.providerTurnId,
+            nativeItemRef: conversationRef(record.nativeItemId),
+            parentItemId: null,
+            ordinal: itemOrdinal(turn, record.nativeItemId),
+            status,
+            title: null,
+            startedAt: record.createdAt,
+            completedAt: status === "waiting" ? null : at,
+            updatedAt: at,
+          } as const;
+          if (interaction.kind === "userInput" && interaction.payload.kind === "userInput") {
+            return {
+              ...base,
+              type: "user_input_request",
+              requestId: record.requestId,
+              questions: [...userInputItemQuestions(interaction.payload, record.questions ?? [])],
+            };
+          }
+          const prompt =
+            interaction.payload.kind === "permission"
+              ? interaction.payload.summary
+              : interaction.payload.kind === "workspaceHookReview"
+                ? zcodeHookReviewPrompt(interaction.payload)
+                : "ZCode requests approval.";
+          const options: Array<ProviderApprovalOption> =
+            interaction.payload.kind === "permission"
+              ? [...zcodeApprovalOptions(interaction.payload)]
+              : [
+                  { decision: "accept", label: "Trust hooks" },
+                  { decision: "decline", label: "Not now" },
+                ];
+          const requestKind: ProviderRequestKind =
+            interaction.payload.kind === "permission"
+              ? zcodeRequestKindForTool(interaction.payload.toolName)
+              : "permission";
+          return {
+            ...base,
+            type: "approval_request",
+            requestId: record.requestId,
+            requestKind,
+            prompt,
+            options,
+            // The wire can still surface a prompt in yolo (ask rules, provider
+            // checks); flag it rather than pretending the mode asked.
+            ...(conversation.config?.mode === "yolo"
+              ? { fullAccessOverride: "provider_check" as const }
+              : {}),
+          };
+        };
+
+        const interactionNode = (
+          record: PendingInteractionRecord,
+          turn: ActiveZcodeTurn,
+          status: OrchestrationV2ExecutionNode["status"],
+          completedAt: DateTime.Utc | null,
+        ): OrchestrationV2ExecutionNode => ({
+          id: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+          threadId: turn.projectionThreadId,
+          runId: turn.projectionRunId,
+          parentNodeId: turn.rootNodeId,
+          rootNodeId: turn.rootNodeId,
+          kind: record.interaction.kind === "userInput" ? "user_input_request" : "approval_request",
+          status,
+          countsForRun: false,
+          providerThreadId: turn.providerThread.id,
+          providerTurnId: turn.providerTurnId,
+          nativeItemRef: conversationRef(record.nativeItemId),
+          runtimeRequestId: record.requestId,
+          checkpointScopeId: null,
+          startedAt: record.createdAt,
+          completedAt,
+        });
+
+        const emitInteractionItems = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          turn: ActiveZcodeTurn,
+          status: "waiting" | "completed",
+          at: DateTime.Utc,
+        ) {
+          yield* emit({
+            type: "node.updated",
+            driver: ZCODE_PROVIDER,
+            node: interactionNode(record, turn, status, status === "waiting" ? null : at),
+          });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: ZCODE_PROVIDER,
+            turnItem: interactionTurnItem(conversation, record, turn, status, at),
+          });
+        });
+
+        const emitInteractionRequest = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          status: "pending" | "resolved",
+          at: DateTime.Utc,
+          extras?: {
+            readonly decision?: ProviderApprovalDecision;
+            readonly answers?: Record<string, unknown>;
+          },
+        ) {
+          const threadId = interactionThreadId(conversation, record.turn);
+          yield* emit({
+            type: "runtime_request.updated",
+            driver: ZCODE_PROVIDER,
+            ...(threadId === null ? {} : { threadId }),
+            runtimeRequest: {
+              id: record.requestId,
+              nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+              providerTurnId: record.turn?.providerTurnId ?? null,
+              nativeRequestRef: {
+                driver: ZCODE_PROVIDER,
+                nativeId: record.interaction.interactionId,
+                strength: "strong",
+              },
+              kind: requestKindForInteraction(record.interaction),
+              status,
+              responseCapability:
+                status === "pending"
+                  ? {
+                      type: "live",
+                      providerSessionId: input.providerSessionId,
+                      ...(record.interaction.payload.kind === "permission" &&
+                      record.interaction.payload.freeText === true
+                        ? { supportsFeedback: true }
+                        : {}),
+                    }
+                  : { type: "not_resumable", reason: "Resolved." },
+              createdAt: record.createdAt,
+              resolvedAt: status === "pending" ? null : at,
+              ...(extras?.decision === undefined ? {} : { decision: extras.decision }),
+              ...(extras?.answers === undefined ? {} : { answers: extras.answers }),
+            },
+          });
+        });
+
+        // Held legacy legs of an interaction that vanished upstream get a
+        // decline-equivalent response; the CLI already settled the request and
+        // drops the late frame, so this only frees our handler fibers.
+        const interactionExpiredResponse = (
+          interaction: ZCodeSchema.PendingInteraction,
+        ): unknown =>
+          interaction.payload.kind === "permission"
+            ? { decision: "deny", reason: zcodePermissionDeniedReason() }
+            : { action: "decline" };
+
+        const settleInteraction = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          record: PendingInteractionRecord,
+          response: unknown,
+          extras?: {
+            readonly decision?: ProviderApprovalDecision;
+            readonly answers?: Record<string, unknown>;
+          },
+        ) {
+          if (record.settled) return;
+          record.settled = true;
+          yield* settleInteractionLegs(record.interaction.interactionId, response);
+          const at = yield* DateTime.now;
+          if (record.turn !== undefined) {
+            yield* emitInteractionItems(conversation, record, record.turn, "completed", at);
+          }
+          yield* emitInteractionRequest(
+            conversation,
+            record,
+            "resolved",
+            at,
+            ...(extras === undefined ? [] : [extras]),
+          );
+        });
+
+        const syncInteractions = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          next: ReadonlyArray<ZCodeSchema.PendingInteraction>,
+        ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
+          const previous = new Set(conversation.interactions.keys());
+          conversation.pendingInteractions = next;
+          for (const interaction of next) {
+            previous.delete(interaction.interactionId);
+            const existing = conversation.interactions.get(interaction.interactionId);
+            if (existing !== undefined) {
+              // Whole-array patches rebuild entries only on change; a payload
+              // change (hook generations, answer drafts) refreshes the card.
+              if (existing.interaction.payload !== interaction.payload) {
+                existing.interaction = interaction;
+                existing.questions =
+                  interaction.payload.kind === "userInput"
+                    ? zcodeProjectedQuestions(interaction.payload)
+                    : undefined;
+                if (!existing.settled && existing.turn !== undefined) {
+                  const at = yield* DateTime.now;
+                  yield* emitInteractionItems(conversation, existing, existing.turn, "waiting", at);
+                }
+              } else {
+                existing.interaction = interaction;
+              }
+              continue;
+            }
+            // Sessions can raise interactions outside any turn (hook reviews at
+            // session start); those still need a T3 card, just no turn items.
+            const anchorTurn =
+              interaction.anchorRowId === null
+                ? undefined
+                : (conversation.rows.get(interaction.anchorRowId)?.turnId ?? undefined);
+            const turn =
+              anchorTurn === undefined
+                ? [...conversation.turns.values()].at(-1)
+                : conversation.turns.get(anchorTurn);
+            const requestId = yield* idAllocator.allocate.runtimeRequest({
+              driver: ZCODE_PROVIDER,
+              ...(turn === undefined ? {} : { providerTurnId: turn.providerTurnId }),
+              nativeRequestId: interaction.interactionId,
+            });
+            const record: PendingInteractionRecord = {
+              requestId,
+              nativeItemId: `interaction:${interaction.interactionId}`,
+              turn,
+              interaction,
+              questions:
+                interaction.payload.kind === "userInput"
+                  ? zcodeProjectedQuestions(interaction.payload)
+                  : undefined,
+              settled: false,
+              createdAt: yield* DateTime.now,
+            };
+            conversation.interactions.set(interaction.interactionId, record);
+            if (turn !== undefined) {
+              yield* emitInteractionItems(conversation, record, turn, "waiting", record.createdAt);
+            }
+            yield* emitInteractionRequest(conversation, record, "pending", record.createdAt);
+          }
+          // Interactions that left the pending set resolved or expired upstream
+          // (another client answered, auto-resolution fired, the flow ended).
+          for (const gone of previous) {
+            const record = conversation.interactions.get(gone);
+            if (record === undefined) continue;
+            conversation.interactions.delete(gone);
+            yield* settleInteraction(
+              conversation,
+              record,
+              interactionExpiredResponse(record.interaction),
+            );
+          }
+        });
+
+        const emitProviderThread = Effect.fnUntraced(function* (conversation: ZcodeConversation) {
+          const control = conversation.control;
+          const status: OrchestrationV2ProviderThread["status"] =
+            control === null || control.sessionEnded
+              ? "idle"
+              : control.phase === "error"
+                ? "error"
+                : control.phase === "running" || control.phase === "prewarming"
+                  ? "active"
+                  : "idle";
+          const usage = conversation.usage;
+          const reportedModel = zcodeReportedModelSelection({
+            config: conversation.config,
+            instanceId: adapterOptions.instanceId,
+          });
+          const updatedAt = yield* DateTime.now;
+          yield* emit({
+            type: "provider_thread.updated",
+            driver: ZCODE_PROVIDER,
+            providerThread: {
+              ...conversation.providerThread,
+              status,
+              updatedAt,
+              ...(reportedModel === undefined
+                ? {}
+                : {
+                    nativeMetadata: {
+                      ...conversation.providerThread.nativeMetadata,
+                      modelSelection: reportedModel,
+                    },
+                  }),
+              ...(usage === null
+                ? {}
+                : {
+                    contextUsage: {
+                      usedTokens: usage.contextWindow?.usedTokens ?? 0,
+                      ...(usage.contextWindow === null
+                        ? {}
+                        : { maxTokens: usage.contextWindow.maxTokens }),
+                      inputTokens: usage.cumulative.inputTokens,
+                      outputTokens: usage.cumulative.outputTokens,
+                      cachedInputTokens: usage.cumulative.cacheReadTokens,
+                    },
+                  }),
+            },
+          });
+        });
+
+        // A guide that fell back to the deferred FIFO runs as a new turn T3
+        // cannot attach to a run; retract it and say so on the steered turn.
+        const inspectQueueForSteerFallback = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          queue: ZCodeSchema.QueueState,
+        ) {
+          conversation.queue = queue;
+          if (conversation.steerDeliveryWatch.size === 0) return;
+          for (const item of queue.items) {
+            const turn = conversation.steerDeliveryWatch.get(item.sourceCommandId);
+            if (turn === undefined || item.delivery.admitted !== "queue") continue;
+            conversation.steerDeliveryWatch.delete(item.sourceCommandId);
+            yield* sendCommand({
+              sessionId: conversation.sessionId,
+              type: "deleteQueueItem",
+              payload: { queueItemId: item.queueItemId },
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode queue retract after steer fallback failed", { cause }),
+              ),
+            );
+            yield* emitSystemNoticeForItem(
+              turn,
+              `${turn.nativeTurnId}:queue:${item.queueItemId}`,
+              "Steering input fell back to the queue and was removed; resend it as a new message.",
+            );
+          }
+        });
+
+        // A guide admitted startNow began a turn T3 cannot attach; cancel the
+        // foreign execution once its activeWorks entry publishes the id.
+        const inspectActiveWorksForForeignStart = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          control: ZCodeSchema.SessionControl,
+        ) {
+          conversation.control = control;
+          if (conversation.foreignStartCancels.size === 0) return;
+          for (const work of control.activeWorks) {
+            const commandId = work.sourceCommandId;
+            const executionId = work.foregroundExecutionId;
+            if (
+              commandId === undefined ||
+              executionId === undefined ||
+              !conversation.foreignStartCancels.has(commandId)
+            )
+              continue;
+            conversation.foreignStartCancels.delete(commandId);
+            yield* sendCommand({
+              sessionId: conversation.sessionId,
+              type: "stop",
+              payload: { expectedForegroundExecutionId: executionId },
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode foreign-turn stop after late steer failed", { cause }),
+              ),
+            );
+          }
+        });
+
+        const applySnapshot = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          snapshot: ZCodeSchema.ConversationSnapshot,
+        ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
+          conversation.revision = snapshot.revision;
+          conversation.logEpoch = snapshot.logEpoch;
+          conversation.control = snapshot.control;
+          conversation.config = snapshot.config;
+          conversation.inputRouting = snapshot.inputRouting;
+          conversation.usage = snapshot.usage;
+          conversation.rowsTotalCount = snapshot.rows.totalCount;
+          conversation.rowsFirstRowId = snapshot.rows.firstRowId;
+          conversation.backgroundWorks = snapshot.backgroundWorks;
+          conversation.subagents = snapshot.subagents;
+          conversation.goal = snapshot.goal;
+          for (const row of snapshot.rows.window) {
+            conversation.rows.set(row.rowId, row);
+          }
+          yield* inspectQueueForSteerFallback(conversation, snapshot.queue);
+          yield* inspectActiveWorksForForeignStart(conversation, snapshot.control);
+          yield* syncInteractions(conversation, snapshot.pendingInteractions);
+          for (const row of snapshot.rows.window) yield* projectRow(conversation, row);
+          yield* emitProviderThread(conversation);
+          yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
+        });
+
+        const applyDelta = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          delta: ZCodeSchema.ConversationDelta,
+        ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
+          if (delta.op === "row.appended" || delta.op === "row.upserted") {
+            conversation.rows.set(delta.row.rowId, delta.row);
+            yield* projectRow(conversation, delta.row);
+            return;
+          }
+          if (delta.op === "row.removed") {
+            let removedTurnBoundary = false;
+            for (const [rowId, row] of conversation.rows) {
+              if (rowId >= delta.fromRowId) {
+                if (row.kind === "turnHeader") removedTurnBoundary = true;
+                conversation.rows.delete(rowId);
+              }
+            }
+            // Upstream only truncates on a committed conversation rewind
+            // (edit/retry/fork-cut); report the surviving turn ids so T3
+            // retires the rewound runs (rollBackRewoundRuns).
+            if (removedTurnBoundary && conversation.providerThread.appThreadId !== null) {
+              const retainedNativeTurnIds = [...conversation.rows.values()]
+                .filter((row) => row.kind === "turnHeader")
+                .map((row) => row.turnId);
+              yield* emit({
+                type: "provider_thread.updated",
+                driver: ZCODE_PROVIDER,
+                providerThread: {
+                  ...conversation.providerThread,
+                  updatedAt: yield* DateTime.now,
+                },
+                retainedNativeTurnIds,
+              });
+            }
+            return;
+          }
+          if (delta.op === "row.delta") {
+            const row = conversation.rows.get(delta.rowId);
+            if (row === undefined) return;
+            if (
+              delta.path === "text" &&
+              (row.kind === "assistantText" || row.kind === "reasoning")
+            ) {
+              conversation.rows.set(delta.rowId, { ...row, text: row.text + delta.append });
+              yield* scheduleTextFlush(conversation, delta.rowId);
+            } else if (delta.path === "inputText" && row.kind === "toolCall") {
+              conversation.rows.set(delta.rowId, {
+                ...row,
+                inputText: row.inputText + delta.append,
+              });
+            } else if (delta.path === "output.text" && row.kind === "toolCall") {
+              const output = row.output ?? { text: "" };
+              conversation.rows.set(delta.rowId, {
+                ...row,
+                output: { ...output, text: output.text + delta.append },
+              });
+              const turn = conversation.turns.get(row.turnId);
+              if (turn !== undefined) {
+                yield* emit({
+                  type: "command_output.delta",
+                  driver: ZCODE_PROVIDER,
+                  threadId: turn.projectionThreadId,
+                  itemId: idAllocator.derive.turnItemFromProviderItem({
+                    driver: ZCODE_PROVIDER,
+                    nativeItemId: zcodeNativeItemId(row.turnId, row.rowId),
+                  }),
+                  chunk: delta.append,
+                });
+              }
+            }
+            return;
+          }
+          if (delta.op === "state.updated") {
+            const patch = delta.patch;
+            if (patch.revision !== undefined) conversation.revision = patch.revision;
+            if (patch.control !== undefined) {
+              yield* inspectActiveWorksForForeignStart(conversation, patch.control);
+              if (patch.control.sessionEnded) {
+                for (const turn of conversation.turns.values()) {
+                  if (!turn.terminalEmitted) {
+                    const at = yield* DateTime.now;
+                    yield* finalizeTurn(conversation, turn, "completed", at);
+                  }
+                }
+              }
+            }
+            if (patch.inputRouting !== undefined) conversation.inputRouting = patch.inputRouting;
+            if (patch.queue !== undefined) {
+              yield* inspectQueueForSteerFallback(conversation, patch.queue);
+            }
+            if (patch.config !== undefined) conversation.config = patch.config;
+            if (patch.usage !== undefined) conversation.usage = patch.usage;
+            if (patch.backgroundWorks !== undefined) {
+              conversation.backgroundWorks = patch.backgroundWorks;
+            }
+            if (patch.subagents !== undefined) {
+              conversation.subagents = patch.subagents;
+            }
+            if (patch.goal !== undefined) {
+              conversation.goal = patch.goal;
+            }
+            if (
+              patch.control !== undefined ||
+              patch.usage !== undefined ||
+              patch.config !== undefined
+            ) {
+              yield* emitProviderThread(conversation);
+            }
+            if (patch.pendingInteractions !== undefined) {
+              yield* syncInteractions(conversation, patch.pendingInteractions);
+            }
+          }
+        });
+
+        const routeFrame = Effect.fnUntraced(function* (
+          frame: unknown,
+          deliveryKind: unknown,
+        ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
+          const topic = (frame as { topic?: unknown }).topic;
+          if (typeof topic !== "string") return;
+          if (topic.startsWith("conversation/")) {
+            const conversation = conversations.get(topic.slice("conversation/".length));
+            if (conversation === undefined) return;
+            const decoded = yield* Schema.decodeUnknownEffect(conversationFrameCodec)(frame).pipe(
+              Effect.option,
+            );
+            if (Option.isNone(decoded)) {
+              yield* Effect.logWarning("ZCode conversation frame failed to decode", {
+                sessionId: conversation.sessionId,
+                deliveryKind,
+              });
+              return;
+            }
+            if (decoded.value.payload.kind === "snapshot") {
+              yield* applySnapshot(conversation, decoded.value.payload.snapshot);
+            } else {
+              for (const delta of decoded.value.payload.deltas) {
+                yield* applyDelta(conversation, delta);
+              }
+            }
+            const deferred = conversation.deferredFailures.splice(0);
+            for (const { turn, completedAt } of deferred) {
+              yield* finalizeTurn(
+                conversation,
+                turn,
+                "failed",
+                completedAt,
+                ...(conversation.control?.lastError === null ||
+                conversation.control?.lastError === undefined
+                  ? []
+                  : [conversation.control.lastError.message]),
+              );
+            }
+            return;
+          }
+          if (topic.startsWith("workspace-config/")) {
+            const decoded = yield* Schema.decodeUnknownEffect(workspaceConfigFrameCodec)(
+              frame,
+            ).pipe(Effect.option);
+            if (Option.isNone(decoded)) {
+              yield* Effect.logWarning("ZCode workspace-config frame failed to decode", {
+                deliveryKind,
+              });
+              return;
+            }
+            const payload = decoded.value.payload;
+            const config =
+              payload.kind === "snapshot"
+                ? payload.snapshot.config
+                : payload.deltas[payload.deltas.length - 1]?.config;
+            if (config === undefined || adapterOptions.onWorkspaceConfig === undefined) return;
+            yield* adapterOptions.onWorkspaceConfig(
+              topic.slice("workspace-config/".length),
+              config,
+            );
+            return;
+          }
+          // sessions-index frames land here in later phases.
+        });
+
+        // DecodingServices is `unknown` for schemas containing Unknown fields;
+        // it is a phantom for these decodes (no service is actually required).
+        const wireCandidateCodec = ZCodeWire.TopicWireFrameCandidate as unknown as Schema.Codec<
+          ZCodeWire.TopicWireFrameCandidate,
+          unknown,
+          never,
+          never
+        >;
+        const conversationFrameCodec =
+          ZCodeSchema.ConversationTopicFrame as unknown as Schema.Codec<
+            ZCodeSchema.ConversationTopicFrame,
+            unknown,
+            never,
+            never
+          >;
+        const workspaceConfigFrameCodec =
+          ZCodeSchema.WorkspaceConfigTopicFrame as unknown as Schema.Codec<
+            ZCodeSchema.WorkspaceConfigTopicFrame,
+            unknown,
+            never,
+            never
+          >;
+        const decodeWireCandidate = Schema.decodeUnknownEffect(wireCandidateCodec);
+
+        yield* client.handleServerNotification(
+          ZCodeRpc.SERVER_NOTIFICATION_METHODS.conversationFrame,
+          (params: unknown) =>
+            Effect.gen(function* () {
+              const candidate = yield* decodeWireCandidate(params).pipe(Effect.option);
+              if (Option.isNone(candidate)) return;
+              const at = DateTime.toEpochMillis(yield* DateTime.now);
+              for (const event of wire.accept(candidate.value, at)) {
+                if (event.kind === "fault") {
+                  yield* Effect.logWarning("ZCode wire frame assembly fault", {
+                    reasonCode: event.fault.reasonCode,
+                    topic: event.fault.topic,
+                  });
+                  continue;
+                }
+                yield* routeFrame(event.frame, event.deliveryKind);
+              }
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode conversation frame handling failed", { cause }),
+              ),
+            ),
+        );
+
+        // §2.6: unknown reverse requests must never hang the caller.
+        yield* client.handleUnknownServerRequest((method: string) =>
+          Effect.fail(ZCodeError.ZCodeAppServerRequestError.methodNotFound(method)),
+        );
+
+        const ensureConversation = Effect.fn("ZcodeAdapterV2.ensureConversation")(function* (
+          sessionId: string,
+          providerThread: OrchestrationV2ProviderThread,
+        ) {
+          const existing = conversations.get(sessionId);
+          if (existing !== undefined) return existing;
+          const conversation: ZcodeConversation = {
+            sessionId,
+            topic: ZCodeSchema.conversationTopic(sessionId),
+            providerThread,
+            subscriptionId: null,
+            logEpoch: null,
+            revision: 0,
+            rows: new Map(),
+            control: null,
+            config: null,
+            usage: null,
+            rowsTotalCount: 0,
+            rowsFirstRowId: null,
+            inputRouting: null,
+            queue: null,
+            pendingInteractions: [],
+            backgroundWorks: [],
+            subagents: undefined,
+            goal: null,
+            steerDeliveryWatch: new Map(),
+            foreignStartCancels: new Set(),
+            firstSnapshot: yield* Deferred.make<void, ProviderAdapter.ProviderAdapterV2Error>(),
+            turns: new Map(),
+            pendingInputs: new Map(),
+            pendingRows: new Map(),
+            interactions: new Map(),
+            deferredFailures: [],
+          };
+          conversations.set(sessionId, conversation);
+          const subscribed = yield* client
+            .request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
+              topic: conversation.topic,
+              connectionId: clientId,
+              clientMode: ZCODE_CLIENT_MODE,
+            })
+            .pipe(
+              // A half-initialized entry would wedge every later call path;
+              // failed subscribes must leave no conversation behind.
+              Effect.tapError(() => Effect.sync(() => conversations.delete(sessionId))),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: ZCODE_PROVIDER,
+                    detail: `Failed to subscribe ${conversation.topic}.`,
+                    cause,
+                  }),
+              ),
+            );
+          conversation.subscriptionId = subscribed.ack.subscriptionId;
+          conversation.logEpoch = subscribed.ack.logEpoch;
+          // The session is live now; the workspace-config publisher can seed
+          // a real catalog (slash commands + mode options) for this workspace.
+          yield* ensureWorkspaceConfigSubscription();
+          return conversation;
+        });
+
+        // Release our subscription + evict the resident runtime; the durable
+        // session record stays (session/close is not deleteSession).
+        const releaseConversation = Effect.fnUntraced(function* (conversation: ZcodeConversation) {
+          if (conversation.subscriptionId !== null) {
+            yield* client
+              .request(ZCodeRpc.V4_METHODS.conversationUnsubscribe, {
+                topic: conversation.topic,
+                subscriptionId: conversation.subscriptionId,
+                connectionId: clientId,
+              })
+              .pipe(Effect.ignore);
+          }
+          conversations.delete(conversation.sessionId);
+          yield* client
+            .request(ZCodeRpc.LEGACY_METHODS.sessionClose, {
+              sessionId: conversation.sessionId,
+            })
+            .pipe(Effect.ignore);
+        });
+
+        const nativeSessionId = (
+          providerThread: OrchestrationV2ProviderThread,
+        ): Effect.Effect<string, ProviderAdapter.ProviderAdapterProtocolError> => {
+          const nativeId = providerThread.nativeThreadRef?.nativeId;
+          return nativeId === undefined || nativeId === null || nativeId === ""
+            ? Effect.fail(
+                protocolError(`Provider thread ${providerThread.id} has no ZCode session id.`),
+              )
+            : Effect.succeed(nativeId);
+        };
+
+        const zcodeModelSelectionPayload = (
+          resolved: ReturnType<typeof zcodeResolveModelSelection>,
+        ) =>
+          resolved === undefined
+            ? {}
+            : {
+                modelSelection: {
+                  providerId: resolved.providerId,
+                  modelId: resolved.modelId,
+                  options: { reasoningLevel: resolved.reasoningLevel },
+                },
+              };
+
+        const ackRejectedDetail = (ack: ZCodeSchema.CommandAck) =>
+          `${ack.status}${ack.reasonCode === undefined ? "" : ` ${ack.reasonCode}`}${ack.message === undefined ? "" : ` (${ack.message})`}`;
+
+        const isAckOk = (ack: ZCodeSchema.CommandAck) =>
+          ack.status === "accepted" || ack.status === "duplicate";
+
+        const ZCODE_ATTACHMENT_CHUNK_BYTES = 512 * 1024;
+        /** Upload one saved image through the v4 attachment transaction. */
+        const uploadZcodeAttachment = Effect.fnUntraced(function* (
+          sessionId: string,
+          attachment: ChatImageAttachment,
+        ) {
+          const resolvePath = adapterOptions.resolveAttachmentPath;
+          const filePath = resolvePath === undefined ? null : resolvePath(attachment);
+          if (filePath === null) {
+            return yield* protocolError(`Invalid attachment id '${attachment.id}'.`);
+          }
+          const bytes = yield* fileSystem
+            .readFile(filePath)
+            .pipe(
+              Effect.mapError((cause) =>
+                protocolError(`Failed to read attachment '${attachment.id}'.`, cause),
+              ),
+            );
+          const uploadId = yield* Effect.orDie(crypto.randomUUIDv7());
+          const digest = yield* crypto
+            .digest("SHA-256", bytes)
+            .pipe(
+              Effect.mapError((cause) =>
+                protocolError(`Failed to checksum attachment '${attachment.id}'.`, cause),
+              ),
+            );
+          const upload = {
+            connectionId: clientId,
+            uploadId,
+            sessionId,
+          } as const;
+          const totalChunks = Math.ceil(bytes.length / ZCODE_ATTACHMENT_CHUNK_BYTES);
+          const transfer = Effect.gen(function* () {
+            const begun = yield* client.request(ZCodeRpc.V4_METHODS.attachmentBegin, {
+              ...upload,
+              fileName: attachment.name,
+              mime: attachment.mimeType,
+              totalBytes: bytes.length,
+              totalChunks,
+              checksum: `sha256:${Buffer.from(digest).toString("hex")}`,
+            });
+            // begin replays an interrupted upload: "committed" resumes with its ref.
+            if (begun.state === "committed") {
+              return begun.ref;
+            }
+            for (let chunkIndex = begun.nextChunkIndex; chunkIndex < totalChunks; chunkIndex += 1) {
+              const chunk = bytes.subarray(
+                chunkIndex * ZCODE_ATTACHMENT_CHUNK_BYTES,
+                (chunkIndex + 1) * ZCODE_ATTACHMENT_CHUNK_BYTES,
+              );
+              yield* client.request(ZCodeRpc.V4_METHODS.attachmentChunk, {
+                ...upload,
+                chunkIndex,
+                dataBase64: Buffer.from(chunk).toString("base64"),
+              });
+            }
+            const committed = yield* client.request(ZCodeRpc.V4_METHODS.attachmentCommit, upload);
+            return committed.ref;
+          });
+          const ref = yield* transfer.pipe(
+            // A half-finished transaction must not stage forever on the CLI.
+            Effect.onError(() =>
+              client.request(ZCodeRpc.V4_METHODS.attachmentAbort, upload).pipe(Effect.ignore),
+            ),
+          );
+          return {
+            ref,
+            fileName: attachment.name,
+            mime: attachment.mimeType,
+            bytes: bytes.length,
+          } satisfies ZCodeSchema.AttachmentRef;
+        });
+
+        // Text attachments always fold into the prompt as saved paths; images
+        // additionally upload through the attachment transaction for the
+        // model's native image input.
+        const prepareSendTextInput = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          message: ProviderAdapter.ProviderAdapterV2TurnMessage,
+        ) {
+          if (message.attachments.length === 0) {
+            return { text: message.text, attachments: [] };
+          }
+          const text = yield* providerMessageTextWithAttachmentPaths({
+            text: message.text,
+            attachments: message.attachments,
+            resolveAttachmentPath: adapterOptions.resolveAttachmentPath ?? (() => null),
+            ...(adapterOptions.resolveExtractedTextPath === undefined
+              ? {}
+              : { resolveExtractedTextPath: adapterOptions.resolveExtractedTextPath }),
+          });
+          const attachments = yield* Effect.forEach(
+            message.attachments.filter((attachment): attachment is ChatImageAttachment =>
+              isProviderNativeImageAttachment(attachment),
+            ),
+            (attachment) => uploadZcodeAttachment(conversation.sessionId, attachment),
+            { concurrency: 1 },
+          );
+          return { text, attachments };
+        });
+
+        const sendTextCommand = Effect.fn("ZcodeAdapterV2.sendTextCommand")(function* (
+          conversation: ZcodeConversation,
+          options: {
+            readonly text: string;
+            readonly attachments?: ReadonlyArray<ZCodeSchema.AttachmentRef>;
+            readonly requestedDelivery: "startNow" | "queue" | "guide";
+            readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+            readonly resolved?: ReturnType<typeof zcodeResolveModelSelection>;
+            readonly heldQueueDisposition?: "clearQueueAndSend" | "keepQueueAndSend";
+          },
+        ) {
+          const execution =
+            options.runtimePolicy === undefined
+              ? {}
+              : zcodeExecutionStateForRuntimePolicy(options.runtimePolicy);
+          const { ack, envelope } = yield* sendCommand({
+            sessionId: conversation.sessionId,
+            type: "sendText",
+            payload: {
+              text: options.text,
+              ...(options.attachments === undefined || options.attachments.length === 0
+                ? {}
+                : { attachments: options.attachments }),
+              requestedDelivery: options.requestedDelivery,
+              ...(options.heldQueueDisposition === undefined
+                ? {}
+                : { heldQueueDisposition: options.heldQueueDisposition }),
+              ...execution,
+              ...zcodeModelSelectionPayload(options.resolved),
+            },
+          });
+          return { ack, envelope };
+        });
+
+        // Session-resident config converges at turn boundaries so the
+        // projection (config → reported model/mode) and queue-item fallbacks
+        // see T3's current selection; per-input intent pins each turn anyway.
+        // noop/stale ACKs are benign: concurrent frames refresh the config.
+        const syncSessionConfig = Effect.fn("ZcodeAdapterV2.syncSessionConfig")(function* (
+          conversation: ZcodeConversation,
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+          resolved: ReturnType<typeof zcodeResolveModelSelection>,
+        ) {
+          const config = conversation.config;
+          if (config === null) return;
+          const desired = zcodeExecutionStateForRuntimePolicy(runtimePolicy);
+          const modeDrifted = config.mode !== desired.mode;
+          const planDrifted = (config.planEnabled ?? false) !== desired.planEnabled;
+          if (modeDrifted || (!desired.planEnabled && planDrifted)) {
+            // A permission-mode switch also clears planEnabled; the plan leg
+            // below re-enables it when needed.
+            const { ack } = yield* sendCommand({
+              sessionId: conversation.sessionId,
+              type: "switchCollaborationMode",
+              payload: { mode: desired.mode },
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode switchCollaborationMode failed", { cause }).pipe(
+                  Effect.as({ ack: undefined }),
+                ),
+              ),
+            );
+            if (
+              ack !== undefined &&
+              !isAckOk(ack) &&
+              ack.status !== "noop" &&
+              ack.status !== "stale"
+            ) {
+              yield* Effect.logWarning("ZCode switchCollaborationMode not applied", {
+                status: ack.status,
+                reasonCode: ack.reasonCode,
+              });
+            }
+          }
+          if (desired.planEnabled && (modeDrifted || planDrifted)) {
+            const { ack } = yield* sendCommand({
+              sessionId: conversation.sessionId,
+              type: "switchCollaborationMode",
+              payload: { mode: "plan" },
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode plan-mode switch failed", { cause }).pipe(
+                  Effect.as({ ack: undefined }),
+                ),
+              ),
+            );
+            if (
+              ack !== undefined &&
+              !isAckOk(ack) &&
+              ack.status !== "noop" &&
+              ack.status !== "stale"
+            ) {
+              yield* Effect.logWarning("ZCode plan-mode switch not applied", {
+                status: ack.status,
+                reasonCode: ack.reasonCode,
+              });
+            }
+          }
+          if (
+            resolved !== undefined &&
+            (resolved.providerId !== config.provider ||
+              resolved.modelId !== config.model ||
+              (config.thought !== "" && resolved.reasoningLevel !== config.thought))
+          ) {
+            const { ack } = yield* sendCommand({
+              sessionId: conversation.sessionId,
+              type: "switchModelConfig",
+              payload: {
+                provider: resolved.providerId,
+                model: resolved.modelId,
+                thought: resolved.reasoningLevel,
+              },
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("ZCode switchModelConfig failed", { cause }).pipe(
+                  Effect.as({ ack: undefined }),
+                ),
+              ),
+            );
+            if (
+              ack !== undefined &&
+              !isAckOk(ack) &&
+              ack.status !== "noop" &&
+              ack.status !== "stale"
+            ) {
+              yield* Effect.logWarning("ZCode switchModelConfig not applied", {
+                status: ack.status,
+                reasonCode: ack.reasonCode,
+              });
+            }
+          }
+        });
+
+        // CAS commands need the current revision/logEpoch; wait for the first
+        // snapshot rather than issuing a stale baseRevision upstream rejects.
+        const awaitSnapshotBaseline = Effect.fn("ZcodeAdapterV2.awaitSnapshotBaseline")(function* (
+          conversation: ZcodeConversation,
+        ) {
+          const ready = yield* Deferred.await(conversation.firstSnapshot).pipe(
+            Effect.timeoutOption("10 seconds"),
+          );
+          if (ready._tag === "None") {
+            return yield* protocolError(
+              `ZCode session ${conversation.sessionId} did not publish a snapshot within 10s; cannot issue a revision-checked command.`,
+            );
+          }
+        });
+
+        // ZCode's only truncate-without-resend: the forked session carries
+        // history through the boundary message; the source keeps everything.
+        const forkSessionAtBoundary = Effect.fn("ZcodeAdapterV2.forkSessionAtBoundary")(function* (
+          conversation: ZcodeConversation,
+          nativeTurnId: string | undefined,
+        ) {
+          yield* awaitSnapshotBaseline(conversation);
+          const boundary = findZcodeForkBoundaryRow(conversation, nativeTurnId);
+          if (boundary === undefined || boundary.entityId === undefined) {
+            return yield* protocolError(
+              nativeTurnId === undefined
+                ? `ZCode session ${conversation.sessionId} has no forkable turn boundary.`
+                : `ZCode turn ${nativeTurnId} on session ${conversation.sessionId} has no forkable assistant boundary.`,
+            );
+          }
+          const { ack } = yield* sendCommand({
+            sessionId: conversation.sessionId,
+            type: "forkAssistant",
+            payload: { target: { rowId: boundary.rowId, entityId: boundary.entityId } },
+          });
+          if (!isAckOk(ack)) {
+            return yield* protocolError(`ZCode rejected forkAssistant: ${ackRejectedDetail(ack)}`);
+          }
+          const result = ack.result;
+          if (result === undefined || result.type !== "forkAssistant") {
+            return yield* protocolError("ZCode forkAssistant returned no session id.");
+          }
+          return result.sessionId;
+        });
+
+        const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+          instanceId: adapterOptions.instanceId,
+          driver: ZCODE_PROVIDER,
+          providerSessionId: input.providerSessionId,
+          providerSession,
+          events: Stream.fromEffectRepeat(Queue.take(events)),
+          hasPendingBackgroundWork: Effect.sync(() =>
+            [...conversations.values()].some(zcodeConversationHasPendingWork),
+          ),
+          hasPendingBackgroundWorkForThread: Effect.fn(
+            "ZcodeAdapterV2.hasPendingBackgroundWorkForThread",
+          )((providerThread) => {
+            const nativeId = providerThread.nativeThreadRef?.nativeId;
+            if (nativeId === undefined || nativeId === null) return Effect.succeed(false);
+            const conversation = conversations.get(nativeId);
+            return Effect.succeed(
+              conversation !== undefined && zcodeConversationHasPendingWork(conversation),
+            );
+          }),
+          ensureThread: Effect.fn("ZcodeAdapterV2.ensureThread")(function* (threadInput) {
+            // No conversation exists yet: resolve the selection against the
+            // T3 slug alone; the session snapshot carries it from then on.
+            const resolved = zcodeResolveModelSelection({
+              model: threadInput.modelSelection.model,
+              reasoningEffort: threadInput.runtimePolicy.reasoningEffort,
+              config: null,
+            });
+            const { ack } = yield* sendCommand({
+              sessionId: null,
+              type: "createSession",
+              payload: {
+                workspaceId,
+                config: {
+                  mode: zcodeSessionModeForRuntimeMode(threadInput.runtimePolicy.runtimeMode),
+                  planEnabled: threadInput.runtimePolicy.interactionMode === "plan",
+                  ...(resolved === undefined
+                    ? {}
+                    : {
+                        provider: resolved.providerId,
+                        model: resolved.modelId,
+                        thought: resolved.reasoningLevel,
+                        ...zcodeModelSelectionPayload(resolved),
+                      }),
+                },
+              },
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                    driver: ZCODE_PROVIDER,
+                    threadId: threadInput.threadId,
+                    cause,
+                  }),
+              ),
+            );
+            if (ack.status !== "accepted" && ack.status !== "duplicate") {
+              return yield* new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                driver: ZCODE_PROVIDER,
+                threadId: threadInput.threadId,
+                cause: `ZCode rejected createSession: ${ack.status}`,
+              });
+            }
+            const result = ack.result;
+            if (result === undefined || result.type !== "createSession") {
+              return yield* new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                driver: ZCODE_PROVIDER,
+                threadId: threadInput.threadId,
+                cause: "ZCode createSession returned no session id.",
+              });
+            }
+            const sessionId = result.sessionId;
+            const createdAt = yield* DateTime.now;
+            const providerThread: OrchestrationV2ProviderThread = {
+              id: idAllocator.derive.providerThread({
+                driver: ZCODE_PROVIDER,
+                nativeThreadId: sessionId,
+                providerInstanceId: adapterOptions.instanceId,
+              }),
+              driver: ZCODE_PROVIDER,
+              providerInstanceId: adapterOptions.instanceId,
+              providerSessionId: input.providerSessionId,
+              appThreadId: threadInput.threadId,
+              ownerNodeId: null,
+              nativeThreadRef: conversationRef(sessionId),
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              pendingBackgroundTasks: [],
+              contextUsage: null,
+              nativeMetadata: null,
+              goal: null,
+              createdAt,
+              updatedAt: createdAt,
+            };
+            yield* ensureConversation(sessionId, providerThread).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                    driver: ZCODE_PROVIDER,
+                    threadId: threadInput.threadId,
+                    cause,
+                  }),
+              ),
+            );
+            return providerThread;
+          }),
+          resumeThread: Effect.fn("ZcodeAdapterV2.resumeThread")(
+            function* (threadInput) {
+              const sessionId = yield* nativeSessionId(threadInput.providerThread);
+              yield* ensureConversation(sessionId, threadInput.providerThread);
+              const updatedAt = yield* DateTime.now;
+              return {
+                ...threadInput.providerThread,
+                providerSessionId: input.providerSessionId,
+                providerInstanceId: adapterOptions.instanceId,
+                status: "idle" as const,
+                updatedAt,
+              };
+            },
+            (effect, threadInput) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterResumeThreadError({
+                      driver: ZCODE_PROVIDER,
+                      providerSessionId: input.providerSessionId,
+                      providerThreadId: threadInput.providerThread.id,
+                      cause,
+                    }),
+                ),
+              ),
+          ),
+          startTurn: Effect.fn("ZcodeAdapterV2.startTurn")(
+            function* (turnInput) {
+              const sessionId = yield* nativeSessionId(turnInput.providerThread);
+              const conversation = yield* ensureConversation(sessionId, turnInput.providerThread);
+              const commandId = yield* Effect.orDie(crypto.randomUUIDv7());
+              if (conversation.pendingInputs.size >= 256) {
+                const oldest = conversation.pendingInputs.keys().next().value;
+                if (oldest !== undefined) conversation.pendingInputs.delete(oldest);
+              }
+              conversation.pendingInputs.set(commandId, turnInput);
+              // sendText.modelSelection requires options.reasoningLevel — an
+              // accepted command without it still fails invalid_model_request.
+              const resolved = zcodeResolveModelSelection({
+                model: turnInput.modelSelection.model,
+                reasoningEffort: turnInput.runtimePolicy.reasoningEffort,
+                config: conversation.config,
+              });
+              yield* syncSessionConfig(conversation, turnInput.runtimePolicy, resolved);
+              const prepared = yield* prepareSendTextInput(conversation, turnInput.message);
+              const execution = zcodeExecutionStateForRuntimePolicy(turnInput.runtimePolicy);
+              const envelope = ZCodeSchema.makeCommandEnvelope({
+                commandId,
+                clientId,
+                sessionId,
+                issuedAt: DateTime.toEpochMillis(yield* DateTime.now),
+                type: "sendText" as const,
+                payload: {
+                  text: prepared.text,
+                  ...(prepared.attachments.length === 0
+                    ? {}
+                    : { attachments: prepared.attachments }),
+                  requestedDelivery: "startNow" as const,
+                  // A paused (held) queue would reject a bare startNow; keep
+                  // foreign queue items instead of clearing them.
+                  heldQueueDisposition: "keepQueueAndSend" as const,
+                  ...execution,
+                  ...zcodeModelSelectionPayload(resolved),
+                },
+              });
+              const ack = yield* client.request(ZCodeRpc.V4_METHODS.command, envelope).pipe(
+                Effect.onError(() =>
+                  Effect.sync(() => {
+                    conversation.pendingInputs.delete(commandId);
+                  }),
+                ),
+              );
+              if (ack.status !== "accepted" && ack.status !== "duplicate") {
+                conversation.pendingInputs.delete(commandId);
+                return yield* protocolError(
+                  `ZCode rejected sendText: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
+                );
+              }
+            },
+            (effect, turnInput) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isProtocolError(cause)
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterTurnStartError({
+                        driver: ZCODE_PROVIDER,
+                        threadId: turnInput.threadId,
+                        providerThreadId: turnInput.providerThread.id,
+                        runId: turnInput.runId,
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+          steerTurn: Effect.fn("ZcodeAdapterV2.steerTurn")(
+            function* (steerInput) {
+              const sessionId = yield* nativeSessionId(steerInput.providerThread);
+              const conversation = yield* ensureConversation(sessionId, steerInput.providerThread);
+              const target = [...conversation.turns.values()].find(
+                (candidate) =>
+                  candidate.providerTurnId === steerInput.providerTurnId &&
+                  !candidate.terminalEmitted,
+              );
+              if (target === undefined) {
+                return yield* protocolError(
+                  `Provider turn ${steerInput.providerTurnId} is not active on ZCode session ${sessionId} and cannot be steered.`,
+                );
+              }
+              const prepared = yield* prepareSendTextInput(conversation, steerInput.message);
+              const { ack, envelope } = yield* sendTextCommand(conversation, {
+                text: prepared.text,
+                attachments: prepared.attachments,
+                requestedDelivery: "guide",
+              });
+              if (!isAckOk(ack)) {
+                return yield* protocolError(`ZCode rejected steer: ${ackRejectedDetail(ack)}`);
+              }
+              // ACK delivery:"queue" is ambiguous (guide lane and deferred
+              // FIFO both report it); the queue patch disambiguates and a
+              // fell-back item is retracted in inspectQueueForSteerFallback.
+              const delivery =
+                ack.result !== undefined && "delivery" in ack.result
+                  ? ack.result.delivery
+                  : undefined;
+              if (delivery === "queue") {
+                conversation.steerDeliveryWatch.set(envelope.commandId, target);
+                // The queue patch can land before the ACK returns.
+                if (conversation.queue !== null) {
+                  yield* inspectQueueForSteerFallback(conversation, conversation.queue);
+                }
+              } else if (delivery === "startNow") {
+                conversation.foreignStartCancels.add(envelope.commandId);
+                if (conversation.control !== null) {
+                  yield* inspectActiveWorksForForeignStart(conversation, conversation.control);
+                }
+                return yield* protocolError(
+                  `ZCode session ${sessionId} went idle before the steer arrived; the turn could not be guided.`,
+                );
+              }
+            },
+            (effect, steerInput) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isProtocolError(cause)
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterSteerRunError({
+                        driver: ZCODE_PROVIDER,
+                        providerThreadId: steerInput.providerThread.id,
+                        providerTurnId: steerInput.providerTurnId,
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+          compactThread: Effect.fn("ZcodeAdapterV2.compactThread")(
+            function* (compactInput) {
+              const sessionId = yield* nativeSessionId(compactInput.providerThread);
+              yield* ensureConversation(sessionId, compactInput.providerThread);
+              // compact is an input-type maintenance command: idle → immediate
+              // compact turn, busy/held → queued FIFO (dedup'd by the CLI).
+              const { ack } = yield* sendCommand({
+                sessionId,
+                type: "compact",
+                payload: {},
+              });
+              if (!isAckOk(ack) && ack.status !== "noop") {
+                return yield* protocolError(`ZCode rejected compact: ${ackRejectedDetail(ack)}`);
+              }
+            },
+            (effect, compactInput) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isProtocolError(cause)
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterTurnStartError({
+                        driver: ZCODE_PROVIDER,
+                        threadId: compactInput.threadId,
+                        providerThreadId: compactInput.providerThread.id,
+                        runId: compactInput.runId,
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+          unloadThread: Effect.fn("ZcodeAdapterV2.unloadThread")(
+            function* (unloadInput) {
+              const sessionId = yield* nativeSessionId(unloadInput.providerThread);
+              const conversation = conversations.get(sessionId);
+              if (conversation !== undefined) {
+                yield* releaseConversation(conversation);
+              }
+            },
+            (effect, unloadInput) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isProtocolError(cause)
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: ZCODE_PROVIDER,
+                        detail: `Failed to unload ZCode thread for provider thread ${unloadInput.providerThread.id}`,
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+          interruptTurn: Effect.fn("ZcodeAdapterV2.interruptTurn")(
+            function* (interruptInput) {
+              const sessionId = yield* nativeSessionId(interruptInput.providerThread);
+              const conversation = conversations.get(sessionId);
+              if (conversation === undefined) {
+                return yield* protocolError(
+                  `ZCode session ${sessionId} is not subscribed on this provider session.`,
+                );
+              }
+              const turn = [...conversation.turns.values()].find(
+                (candidate) => candidate.providerTurnId === interruptInput.providerTurnId,
+              );
+              if (turn === undefined) {
+                return yield* protocolError(
+                  `Provider turn ${interruptInput.providerTurnId} is not active on ZCode session ${sessionId}.`,
+                );
+              }
+              const { ack } = yield* sendCommand({ sessionId, type: "stop", payload: {} });
+              if (ack.status !== "accepted" && ack.status !== "duplicate") {
+                return yield* protocolError(
+                  `ZCode rejected stop: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
+                );
+              }
+              turn.interrupted = true;
+              yield* Deferred.await(turn.settled).pipe(
+                Effect.timeoutOrElse({
+                  duration: INTERRUPT_GRACE,
+                  orElse: () => finalizeInterruptedTurn(conversation, turn),
+                }),
+              );
+            },
+            (effect, interruptInput) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isProtocolError(cause)
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterInterruptError({
+                        driver: ZCODE_PROVIDER,
+                        providerThreadId: interruptInput.providerThread.id,
+                        providerTurnId: interruptInput.providerTurnId,
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+          respondToRuntimeRequest: Effect.fn("ZcodeAdapterV2.respondToRuntimeRequest")(
+            function* (requestInput) {
+              for (const conversation of conversations.values()) {
+                const record = [...conversation.interactions.values()].find(
+                  (entry) => entry.requestId === requestInput.requestId,
+                );
+                if (record === undefined) continue;
+                // A duplicate answer is an upstream no-op; keep it idempotent.
+                if (record.settled) return;
+                const interaction = record.interaction;
+                const interactionId = interaction.interactionId;
+                const responseError = (cause: string) =>
+                  new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                    driver: ZCODE_PROVIDER,
+                    requestId: requestInput.requestId,
+                    cause,
+                  });
+                let answer: ReturnType<typeof zcodePermissionAnswer>;
+                let legResponse: unknown = { action: "decline" };
+                let grantReview = false;
+                if (interaction.payload.kind === "permission") {
+                  if (requestInput.decision === undefined) {
+                    return yield* responseError(
+                      "ZCode permission requests require an approval decision.",
+                    );
+                  }
+                  answer = zcodePermissionAnswer({
+                    payload: interaction.payload,
+                    decision: requestInput.decision,
+                    ...(requestInput.feedback === undefined
+                      ? {}
+                      : { feedback: requestInput.feedback }),
+                  });
+                  legResponse = zcodePermissionRpcResponse({
+                    payload: interaction.payload,
+                    decision: requestInput.decision,
+                    ...(requestInput.feedback === undefined
+                      ? {}
+                      : { feedback: requestInput.feedback }),
+                  });
+                } else if (interaction.payload.kind === "userInput") {
+                  if (requestInput.answers === undefined && requestInput.decision === undefined) {
+                    return yield* responseError(
+                      "ZCode user-input requests require answers or a decision.",
+                    );
+                  }
+                  answer = zcodeUserInputAnswer({
+                    questions: record.questions ?? zcodeProjectedQuestions(interaction.payload),
+                    ...(requestInput.decision === undefined
+                      ? {}
+                      : { decision: requestInput.decision }),
+                    ...(requestInput.answers === undefined
+                      ? {}
+                      : { answers: requestInput.answers }),
+                  });
+                  legResponse = answer;
+                } else {
+                  grantReview =
+                    requestInput.decision === "accept" ||
+                    requestInput.decision === "acceptAlways" ||
+                    requestInput.decision === "acceptForSession";
+                  // The review flow honors only trust_selected; a decline is a
+                  // no-op upstream, so the card dismisses while the review
+                  // stays pending until its deadline.
+                  answer = { action: grantReview ? "accept" : "decline" };
+                }
+                const hookReview =
+                  interaction.payload.kind === "workspaceHookReview" && grantReview
+                    ? interaction.payload
+                    : undefined;
+                const reviewItemIds =
+                  hookReview === undefined ? [] : [...zcodeHookReviewTrustItemIds(hookReview)];
+                // Hook trust goes through the dedicated review command; when
+                // nothing is trustable the review settles locally instead.
+                const ack =
+                  hookReview === undefined || reviewItemIds.length === 0
+                    ? hookReview === undefined
+                      ? (yield* sendCommand({
+                          sessionId: conversation.sessionId,
+                          type: "resolveInteraction",
+                          payload: { interactionId, answer },
+                        })).ack
+                      : undefined
+                    : (yield* sendCommand({
+                        sessionId: conversation.sessionId,
+                        type: "respondWorkspaceHookReview",
+                        payload: {
+                          sessionId: hookReview.sessionId,
+                          taskId: hookReview.taskId,
+                          runId: hookReview.runId,
+                          workspaceIdentity: hookReview.workspaceIdentity,
+                          bundleDigest: hookReview.bundleDigest,
+                          reviewFlowId: hookReview.reviewFlowId,
+                          generation: hookReview.generation,
+                          interactionId: hookReview.interactionId,
+                          ...(hookReview.remoteSessionId === undefined
+                            ? {}
+                            : { remoteSessionId: hookReview.remoteSessionId }),
+                          decision: {
+                            action: "trust_selected" as const,
+                            reviewItemIds,
+                          },
+                        },
+                      })).ack;
+                if (ack !== undefined && !isAckOk(ack) && ack.status !== "noop") {
+                  return yield* protocolError(
+                    `ZCode rejected interaction resolution: ${ackRejectedDetail(ack)}`,
+                  );
+                }
+                yield* settleInteraction(conversation, record, legResponse, {
+                  ...(requestInput.decision === undefined
+                    ? {}
+                    : { decision: requestInput.decision }),
+                  ...(requestInput.answers === undefined ? {} : { answers: requestInput.answers }),
+                });
+                return;
+              }
+              return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                driver: ZCODE_PROVIDER,
+                requestId: requestInput.requestId,
+                cause: protocolError(`No pending ZCode runtime request ${requestInput.requestId}.`),
+              });
+            },
+            (effect, requestInput) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isRuntimeRequestResponseError(cause)
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                        driver: ZCODE_PROVIDER,
+                        requestId: requestInput.requestId,
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+          readThreadSnapshot: Effect.fn("ZcodeAdapterV2.readThreadSnapshot")(
+            function* (snapshotInput) {
+              const sessionId = yield* nativeSessionId(snapshotInput.providerThread);
+              const conversation = yield* ensureConversation(
+                sessionId,
+                snapshotInput.providerThread,
+              );
+              const snapshotReady = yield* Deferred.await(conversation.firstSnapshot).pipe(
+                Effect.timeoutOption("10 seconds"),
+              );
+              if (snapshotReady._tag === "None") {
+                // Best-effort: project whatever has arrived so far rather than
+                // failing the read on a slow cold restore.
+                yield* Effect.logWarning(
+                  "ZCode conversation snapshot did not arrive within 10s; reading partial rows.",
+                  { sessionId },
+                );
+              }
+              // The snapshot only carries the recent rows window; page
+              // rowsRange backwards for earlier history.
+              const allRows = new Map(conversation.rows);
+              let beforeRowId = conversation.rowsFirstRowId ?? undefined;
+              while (
+                beforeRowId !== undefined &&
+                allRows.size < conversation.rowsTotalCount &&
+                allRows.size < 10_000
+              ) {
+                const page = yield* client
+                  .request(ZCodeRpc.V4_METHODS.conversationRowsRange, {
+                    sessionId,
+                    clientMode: ZCODE_CLIENT_MODE,
+                    beforeRowId,
+                    limit: 500,
+                  })
+                  .pipe(
+                    Effect.catch((cause) =>
+                      Effect.logWarning("ZCode rowsRange paging failed", { cause, sessionId }).pipe(
+                        Effect.as(undefined),
+                      ),
+                    ),
+                  );
+                if (page === undefined || page.rows.length === 0) break;
+                let oldest = beforeRowId;
+                for (const row of page.rows) {
+                  allRows.set(row.rowId, row);
+                  if (row.rowId < oldest) oldest = row.rowId;
+                }
+                if (!page.hasMore || oldest >= beforeRowId) break;
+                beforeRowId = oldest;
+              }
+              const projectedRows = [...allRows.values()].sort(
+                (left, right) => left.rowId - right.rowId,
+              );
+              const turns: Array<OrchestrationV2ProviderTurn> = [];
+              const messages: Array<OrchestrationV2ConversationMessage> = [];
+              const runtimeRequests: Array<OrchestrationV2RuntimeRequest> = [];
+              const threadId = snapshotInput.providerThread.appThreadId;
+              for (const row of projectedRows) {
+                if (row.kind === "turnHeader") {
+                  const ordinal = turns.length + 1;
+                  turns.push({
+                    id: idAllocator.derive.providerTurn({
+                      driver: ZCODE_PROVIDER,
+                      nativeTurnId: row.turnId,
+                    }),
+                    providerThreadId: snapshotInput.providerThread.id,
+                    nodeId: idAllocator.derive.nodeFromProviderItem({
+                      driver: ZCODE_PROVIDER,
+                      nativeItemId: `${sessionId}:turn:${row.turnId}`,
+                    }),
+                    runAttemptId: null,
+                    nativeTurnRef: {
+                      driver: ZCODE_PROVIDER,
+                      nativeId: row.turnId,
+                      strength: "strong",
+                    },
+                    ordinal: PositiveInt.make(ordinal),
+                    status: zcodeProviderTurnStatus(row.state),
+                    startedAt: DateTime.makeUnsafe(row.startedAt),
+                    completedAt:
+                      row.endedAt === undefined ? null : DateTime.makeUnsafe(row.endedAt),
+                  });
+                } else if (
+                  threadId !== null &&
+                  (row.kind === "userInput" || row.kind === "assistantText")
+                ) {
+                  const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
+                  const at = DateTime.makeUnsafe(row.createdAt);
+                  messages.push({
+                    createdBy: row.kind === "userInput" ? "user" : "agent",
+                    creationSource: "provider",
+                    id: idAllocator.derive.messageFromProviderItem({
+                      driver: ZCODE_PROVIDER,
+                      nativeItemId,
+                    }),
+                    threadId,
+                    runId: null,
+                    nodeId: idAllocator.derive.nodeFromProviderItem({
+                      driver: ZCODE_PROVIDER,
+                      nativeItemId,
+                    }),
+                    role: row.kind === "userInput" ? "user" : "assistant",
+                    text: row.text,
+                    attachments: [],
+                    streaming: row.kind === "assistantText" && row.state === "streaming",
+                    createdAt: at,
+                    updatedAt: at,
+                  });
+                }
+              }
+              for (const record of conversation.interactions.values()) {
+                if (record.settled) continue;
+                runtimeRequests.push({
+                  id: record.requestId,
+                  nodeId: idAllocator.derive.approvalNode({ requestId: record.requestId }),
+                  providerTurnId: record.turn?.providerTurnId ?? null,
+                  nativeRequestRef: {
+                    driver: ZCODE_PROVIDER,
+                    nativeId: record.interaction.interactionId,
+                    strength: "strong",
+                  },
+                  kind: requestKindForInteraction(record.interaction),
+                  status: "pending",
+                  responseCapability: {
+                    type: "live",
+                    providerSessionId: input.providerSessionId,
+                  },
+                  createdAt: record.createdAt,
+                  resolvedAt: null,
+                });
+              }
+              return {
+                providerThread: {
+                  ...snapshotInput.providerThread,
+                  providerSessionId: input.providerSessionId,
+                  nativeThreadRef: conversationRef(sessionId),
+                  updatedAt: yield* DateTime.now,
+                },
+                providerTurns: turns,
+                messages,
+                runtimeRequests,
+              };
+            },
+            (effect, snapshotInput) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
+                      driver: ZCODE_PROVIDER,
+                      providerThreadId: snapshotInput.providerThread.id,
+                      cause,
+                    }),
+                ),
+              ),
+          ),
+          rollbackThread: Effect.fn("ZcodeAdapterV2.rollbackThread")(
+            function* (rollbackInput) {
+              const sessionId = yield* nativeSessionId(rollbackInput.providerThread);
+              const conversation = yield* ensureConversation(
+                sessionId,
+                rollbackInput.providerThread,
+              );
+              // A live execution on the source session would keep mutating the
+              // workspace after the provider thread is re-pointed; refuse.
+              for (const turn of conversation.turns.values()) {
+                if (!turn.terminalEmitted) {
+                  return yield* protocolError(
+                    `Cannot roll back ZCode session ${sessionId} while turn ${turn.nativeTurnId} is still running.`,
+                  );
+                }
+              }
+              if (
+                conversation.control !== null &&
+                (conversation.control.phase === "running" ||
+                  conversation.control.activeWorks.length > 0)
+              ) {
+                return yield* protocolError(
+                  `Cannot roll back ZCode session ${sessionId} while executions are in flight.`,
+                );
+              }
+              // ZCode never truncates in place; rollback = adopt a truncated
+              // copy (fork at the boundary turn, or a fresh session for
+              // thread_start) as the provider thread's native session. File
+              // restore stays with T3 checkpoints — applyFileRewind is not used.
+              const newSessionId =
+                rollbackInput.target.type === "thread_start"
+                  ? yield* sendCommand({
+                      sessionId: null,
+                      type: "createSession",
+                      payload: {
+                        workspaceId,
+                        ...(conversation.config === null
+                          ? {}
+                          : {
+                              config: {
+                                provider: conversation.config.provider,
+                                model: conversation.config.model,
+                                thought: conversation.config.thought,
+                                ...(conversation.config.mode === undefined
+                                  ? {}
+                                  : { mode: conversation.config.mode }),
+                                ...(conversation.config.planEnabled === undefined
+                                  ? {}
+                                  : { planEnabled: conversation.config.planEnabled }),
+                              },
+                            }),
+                      },
+                    }).pipe(
+                      Effect.flatMap(({ ack }) => {
+                        if (!isAckOk(ack)) {
+                          return Effect.fail(
+                            protocolError(
+                              `ZCode rejected createSession for rollback: ${ackRejectedDetail(ack)}`,
+                            ),
+                          );
+                        }
+                        const result = ack.result;
+                        if (result === undefined || result.type !== "createSession") {
+                          return Effect.fail(
+                            protocolError(
+                              "ZCode createSession for rollback returned no session id.",
+                            ),
+                          );
+                        }
+                        return Effect.succeed(result.sessionId);
+                      }),
+                    )
+                  : rollbackInput.target.providerTurn.nativeTurnRef?.nativeId == null
+                    ? yield* protocolError(
+                        `Provider turn ${rollbackInput.target.providerTurn.id} has no native turn reference; cannot find a ZCode rewind boundary.`,
+                      )
+                    : yield* forkSessionAtBoundary(
+                        conversation,
+                        rollbackInput.target.providerTurn.nativeTurnRef.nativeId,
+                      );
+              const updatedAt = yield* DateTime.now;
+              const providerThread: OrchestrationV2ProviderThread = {
+                ...rollbackInput.providerThread,
+                nativeThreadRef: conversationRef(newSessionId),
+                nativeConversationHeadRef:
+                  rollbackInput.target.type === "provider_turn"
+                    ? rollbackInput.target.providerTurn.nativeTurnRef
+                    : null,
+                status: "idle",
+                updatedAt,
+              };
+              // The old session keeps the rewound history; only our
+              // subscription + resident runtime are released.
+              yield* releaseConversation(conversation);
+              yield* ensureConversation(newSessionId, providerThread);
+              return {
+                providerThread,
+                providerTurns: [],
+                messages: [],
+                runtimeRequests: [],
+              };
+            },
+            (effect, rollbackInput) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                      driver: ZCODE_PROVIDER,
+                      providerThreadId: rollbackInput.providerThread.id,
+                      checkpointId: rollbackInput.target.checkpointId,
+                      cause,
+                    }),
+                ),
+              ),
+          ),
+          forkThread: Effect.fn("ZcodeAdapterV2.forkThread")(
+            function* (forkInput) {
+              const sessionId = yield* nativeSessionId(forkInput.sourceProviderThread);
+              const conversation = yield* ensureConversation(
+                sessionId,
+                forkInput.sourceProviderThread,
+              );
+              let nativeTurnId: string | undefined;
+              if (forkInput.providerTurnId !== undefined) {
+                const boundaryTurn = (forkInput.sourceProviderTurns ?? []).find(
+                  (turn) =>
+                    turn.id === forkInput.providerTurnId &&
+                    turn.providerThreadId === forkInput.sourceProviderThread.id,
+                );
+                nativeTurnId = boundaryTurn?.nativeTurnRef?.nativeId ?? undefined;
+                if (nativeTurnId === undefined) {
+                  return yield* protocolError(
+                    `Provider turn ${forkInput.providerTurnId} is not on ZCode session ${sessionId}; cannot fork from it.`,
+                  );
+                }
+              }
+              const newSessionId = yield* forkSessionAtBoundary(conversation, nativeTurnId);
+              const createdAt = yield* DateTime.now;
+              const providerThread: OrchestrationV2ProviderThread = {
+                id: idAllocator.derive.providerThread({
+                  driver: ZCODE_PROVIDER,
+                  nativeThreadId: newSessionId,
+                  providerInstanceId: adapterOptions.instanceId,
+                }),
+                driver: ZCODE_PROVIDER,
+                providerInstanceId: adapterOptions.instanceId,
+                providerSessionId: input.providerSessionId,
+                appThreadId: forkInput.targetThreadId,
+                ownerNodeId: forkInput.ownerNodeId ?? null,
+                nativeThreadRef: conversationRef(newSessionId),
+                nativeConversationHeadRef: null,
+                status: "idle",
+                firstRunOrdinal: null,
+                lastRunOrdinal: null,
+                handoffIds: [],
+                forkedFrom: {
+                  providerThreadId: forkInput.sourceProviderThread.id,
+                  ...(forkInput.providerTurnId === undefined
+                    ? {}
+                    : { providerTurnId: forkInput.providerTurnId }),
+                },
+                pendingBackgroundTasks: [],
+                contextUsage: null,
+                nativeMetadata: null,
+                goal: null,
+                createdAt,
+                updatedAt: createdAt,
+              };
+              yield* ensureConversation(newSessionId, providerThread);
+              return providerThread;
+            },
+            (effect, forkInput) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterForkThreadError({
+                      driver: ZCODE_PROVIDER,
+                      providerThreadId: forkInput.sourceProviderThread.id,
+                      cause,
+                    }),
+                ),
+              ),
+          ),
+        };
+        return runtime;
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isOpenSessionError(cause)
+              ? cause
+              : new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: ZCODE_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+          ),
+        ),
+    ),
   });
 });
 
@@ -356,10 +3193,7 @@ export type ZcodeAdapterV2DriverEnv =
   | Crypto.Crypto
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
-  | Path.Path
-  | McpProviderSessions.McpProviderSessions
-  | ProviderEventLoggers.ProviderEventLoggers
-  | ProviderHost.ProviderHost;
+  | Path.Path;
 
 export const ZcodeAdapterV2Driver: ProviderAdapterDriver<ZcodeSettings, ZcodeAdapterV2DriverEnv> = {
   driverKind: ZCODE_PROVIDER,
@@ -368,22 +3202,10 @@ export const ZcodeAdapterV2Driver: ProviderAdapterDriver<ZcodeSettings, ZcodeAda
   create: Effect.fn("ZcodeAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<ZcodeSettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
-      const selfInvocation = yield* resolveSelfInvocation();
-      const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
-      const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
-      const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
       return yield* makeZcodeAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
-        selfInvocation,
-        continuationRequests,
-        nativeLogging: (threadId) =>
-          makeNativeLogger({
-            nativeEventLogger: providerEventLoggers.native,
-            provider: ZCODE_PROVIDER,
-            threadId,
-          }),
       });
     },
     (effect, input) =>
@@ -393,7 +3215,7 @@ export const ZcodeAdapterV2Driver: ProviderAdapterDriver<ZcodeSettings, ZcodeAda
             new ProviderAdapterDriverCreateError({
               driver: ZCODE_PROVIDER,
               instanceId: input.instanceId,
-              detail: "Failed to create ZCode ACP adapter.",
+              detail: "Failed to create the ZCode adapter.",
               cause,
             }),
         ),

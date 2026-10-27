@@ -9,12 +9,12 @@ import {
   assertUserMessagesInclude,
   projectionFor,
 } from "../shared.ts";
-import { ZCODE_MODEL_SWITCH_PROMPT, ZCODE_MODEL_SWITCH_TARGET } from "./input.ts";
+import { ZCODE_MODEL_SWITCH_PROMPT } from "./input.ts";
 
 /**
- * The model picker's selection reaches the bridge as `session/set_config_option`
- * on the `model` option before the mode set and the first prompt. The replay
- * agent's strict expect_outbound matching is what proves the switch was sent.
+ * The session snapshot still reports GLM-5.3 while the run selected
+ * GLM-5.3-Turbo, so the adapter converges config via `switchModelConfig`
+ * before `sendText`, which also pins the per-input modelSelection.
  */
 export function assertZcodeModelSwitchOutput(
   result: OrchestratorV2ScenarioResult,
@@ -26,21 +26,30 @@ export function assertZcodeModelSwitchOutput(
   assertUserMessagesInclude(projection, [ZCODE_MODEL_SWITCH_PROMPT]);
   assertAssistantTextIncludes(projection, "zcode model switch fixture");
 
-  const configSets = transcript.entries.flatMap((entry) => {
+  const commands = transcript.entries.flatMap((entry) => {
     if (entry.type !== "expect_outbound") return [];
     const frame = entry.frame;
     if (
       typeof frame !== "object" ||
       frame === null ||
-      Reflect.get(frame, "method") !== "session/set_config_option"
+      Reflect.get(frame, "method") !== "v4/command"
     ) {
       return [];
     }
     const params = Reflect.get(frame, "params") as Record<string, unknown>;
-    return [[params.configId, params.value] as const];
+    return [[params.type, params.payload] as const];
   });
-  assert.deepEqual(configSets, [
-    ["model", ZCODE_MODEL_SWITCH_TARGET],
-    ["mode", "yolo"],
-  ]);
+  const switchCommand = commands.find(([type]) => type === "switchModelConfig");
+  assert.deepEqual(switchCommand?.[1], {
+    provider: "account:zai-individual-coding-plan",
+    model: "GLM-5.3-Turbo",
+    thought: "max",
+  });
+  const sendText = commands.find(([type]) => type === "sendText");
+  assert.isDefined(sendText);
+  assert.deepEqual((sendText?.[1] as Record<string, unknown> | undefined)?.modelSelection, {
+    providerId: "account:zai-individual-coding-plan",
+    modelId: "GLM-5.3-Turbo",
+    options: { reasoningLevel: "max" },
+  });
 }

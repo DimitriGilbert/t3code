@@ -77,10 +77,7 @@ export function StartClankerRunDialog({
 
   // The workflow file belongs to the page project; switching projects unlocks
   // the workflow field for the new project instead of locking the picker.
-  const project =
-    (pickedProjectKey === null
-      ? null
-      : (projects.find((candidate) => candidate.key === pickedProjectKey) ?? null)) ?? pageProject;
+  const project = projects.find((candidate) => candidate.key === pickedProjectKey) ?? pageProject;
   const workflowLocked = workflowPath !== null && project.key === pageProject.key;
   const effectiveWorkflowPath = workflowLocked ? workflowPath : null;
   const environmentId = project.ref.environmentId;

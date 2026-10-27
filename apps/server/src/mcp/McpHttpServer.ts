@@ -1069,7 +1069,7 @@ export const layerPullRequestsToolkit = toolkitRegistration(
   PullRequestsHandlers.layer,
 );
 
-const layerClankerToolkit = toolkitRegistration(ClankerToolkit, ClankerHandlers.layer);
+export const layerClankerToolkit = toolkitRegistration(ClankerToolkit, ClankerHandlers.layer);
 
 const layerDeviceStandardToolkitRegistration = toolkitRegistration(
   DeviceStandardToolkit,

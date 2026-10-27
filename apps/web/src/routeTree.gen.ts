@@ -22,6 +22,7 @@ import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatClankerRouteImport } from './routes/_chat.clanker'
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
 import { Route as ChatSettingsThreadsRouteImport } from './routes/_chat.settings.threads'
 import { Route as ChatSettingsStorageRouteImport } from './routes/_chat.settings.storage'
@@ -112,6 +113,11 @@ const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
 const ChatNewRoute = ChatNewRouteImport.update({
   id: '/new',
   path: '/new',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatClankerRoute = ChatClankerRouteImport.update({
+  id: '/clanker',
+  path: '/clanker',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatSettingsWorktreesRoute = ChatSettingsWorktreesRouteImport.update({
@@ -263,6 +269,7 @@ export interface FileRoutesByFullPath {
   '/pair': typeof PairRoute
   '/watch': typeof WatchRoute
   '/welcome': typeof WelcomeRoute
+  '/clanker': typeof ChatClankerRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
@@ -303,6 +310,7 @@ export interface FileRoutesByTo {
   '/pair': typeof PairRoute
   '/watch': typeof WatchRoute
   '/welcome': typeof WelcomeRoute
+  '/clanker': typeof ChatClankerRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
@@ -346,6 +354,7 @@ export interface FileRoutesById {
   '/pair': typeof PairRoute
   '/watch': typeof WatchRoute
   '/welcome': typeof WelcomeRoute
+  '/_chat/clanker': typeof ChatClankerRoute
   '/_chat/new': typeof ChatNewRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/settings': typeof ChatSettingsRouteWithChildren
@@ -390,6 +399,7 @@ export interface FileRouteTypes {
     | '/pair'
     | '/watch'
     | '/welcome'
+    | '/clanker'
     | '/new'
     | '/pull-requests'
     | '/settings'
@@ -430,6 +440,7 @@ export interface FileRouteTypes {
     | '/pair'
     | '/watch'
     | '/welcome'
+    | '/clanker'
     | '/new'
     | '/pull-requests'
     | '/settings'
@@ -472,6 +483,7 @@ export interface FileRouteTypes {
     | '/pair'
     | '/watch'
     | '/welcome'
+    | '/_chat/clanker'
     | '/_chat/new'
     | '/_chat/pull-requests'
     | '/_chat/settings'
@@ -609,6 +621,13 @@ declare module '@tanstack/react-router' {
       path: '/new'
       fullPath: '/new'
       preLoaderRoute: typeof ChatNewRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/clanker': {
+      id: '/_chat/clanker'
+      path: '/clanker'
+      fullPath: '/clanker'
+      preLoaderRoute: typeof ChatClankerRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/settings/worktrees': {
@@ -864,6 +883,7 @@ const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
 )
 
 interface ChatRouteChildren {
+  ChatClankerRoute: typeof ChatClankerRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatSettingsRoute: typeof ChatSettingsRouteWithChildren
@@ -874,6 +894,7 @@ interface ChatRouteChildren {
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatClankerRoute: ChatClankerRoute,
   ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatSettingsRoute: ChatSettingsRouteWithChildren,

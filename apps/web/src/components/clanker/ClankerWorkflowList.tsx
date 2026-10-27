@@ -1,33 +1,40 @@
 import { useAtomValue } from "@effect/atom-react";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 import type {
+  ClankerWorkflowListResult,
   ClankerWorkflowPath,
   ClankerWorkflowSummary,
   EnvironmentId,
   ProjectId,
-  ScopedProjectRef,
 } from "@t3tools/contracts";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import * as Option from "effect/Option";
-import { AsyncResult } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import {
   FileCode2Icon,
   MoreHorizontalIcon,
   PencilIcon,
-  PlayIcon,
   PlusIcon,
   Trash2Icon,
   WorkflowIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
+import { isElectron } from "~/env";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { clankerEnvironment } from "~/state/clanker";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { RelativeTime } from "../RelativeTime";
+import {
+  WorkspaceBreadcrumb,
+  WorkspaceBreadcrumbItem,
+  WorkspaceBreadcrumbSeparator,
+} from "../WorkspaceBreadcrumb";
+import { WorkspacePageContainer } from "../WorkspacePageContainer";
+import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -40,8 +47,16 @@ import {
   EmptyTitle,
 } from "../ui/empty";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { NewClankerWorkflowDialog } from "./NewClankerWorkflowDialog";
+import type { ClankerProjectOption } from "./clankerView";
+
+const EMPTY_LIST_RESULT_ATOM = Atom.make(
+  AsyncResult.initial<ClankerWorkflowListResult, never>(false),
+).pipe(Atom.withLabel("clanker-workflow-list:empty"));
+const DENIED_ATOM = Atom.make(false).pipe(Atom.withLabel("clanker-permission:denied"));
 
 function WorkflowListSkeleton() {
   return (
@@ -68,17 +83,13 @@ function WorkflowRow({
   projectId,
   workflow,
   canWrite,
-  canRun,
   onEdit,
-  onRun,
 }: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
   readonly workflow: ClankerWorkflowSummary;
   readonly canWrite: boolean;
-  readonly canRun: boolean;
   readonly onEdit: () => void;
-  readonly onRun: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const deleteWorkflow = useAtomCommand(clankerEnvironment.deleteWorkflow, {
@@ -163,10 +174,6 @@ function WorkflowRow({
           <MoreHorizontalIcon className="size-4" />
         </MenuTrigger>
         <MenuPopup align="end">
-          <MenuItem disabled={!canRun} onClick={onRun}>
-            <PlayIcon />
-            Run
-          </MenuItem>
           <MenuItem onClick={onEdit}>
             <PencilIcon />
             Edit
@@ -183,72 +190,167 @@ function WorkflowRow({
 }
 
 export function ClankerWorkflowList({
-  project,
-  canWrite,
-  canRun,
+  options,
+  selected,
+  environmentLabel,
+  onSelectProject,
   onOpenFile,
-  onRunWorkflow,
-  onNewWorkflow,
 }: {
-  readonly project: ScopedProjectRef;
-  readonly canWrite: boolean;
-  readonly canRun: boolean;
-  readonly onOpenFile: (path: ClankerWorkflowPath) => void;
-  readonly onRunWorkflow: (path: ClankerWorkflowPath) => void;
-  readonly onNewWorkflow: () => void;
+  readonly options: ReadonlyArray<ClankerProjectOption>;
+  readonly selected: ClankerProjectOption | null;
+  readonly environmentLabel: (environmentId: EnvironmentId) => string | null;
+  readonly onSelectProject: (key: string) => void;
+  readonly onOpenFile: (path: ClankerWorkflowPath | undefined) => void;
 }) {
+  const [newDialogOpen, setNewDialogOpen] = useState(false);
   const listResult = useAtomValue(
-    clankerEnvironment.workflowsLive({
-      environmentId: project.environmentId,
-      input: { projectId: project.projectId },
-    }),
+    selected === null
+      ? EMPTY_LIST_RESULT_ATOM
+      : clankerEnvironment.workflowsLive({
+          environmentId: selected.ref.environmentId,
+          input: { projectId: selected.ref.projectId },
+        }),
+  );
+  const canWrite = useAtomValue(
+    selected === null
+      ? DENIED_ATOM
+      : clankerEnvironment.updateWorkflow.permissionAtom(selected.ref.environmentId),
   );
   const workflows = Option.getOrNull(AsyncResult.value(listResult))?.workflows ?? null;
+  const loadError =
+    listResult._tag === "Failure" ? "Could not load clanker workflows for this project." : null;
+  const loading = workflows === null && loadError === null;
 
-  if (listResult._tag === "Failure" && workflows === null) {
-    return (
-      <Alert variant="error">
-        <AlertDescription>Could not load clanker workflows for this project.</AlertDescription>
-      </Alert>
-    );
-  }
-  if (workflows === null) return <WorkflowListSkeleton />;
-  if (workflows.length === 0) {
-    return (
-      <Empty>
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <WorkflowIcon aria-hidden />
-          </EmptyMedia>
-          <EmptyTitle>No clanker workflows yet</EmptyTitle>
-          <EmptyDescription>
-            Workflows live in <span className="font-mono">.clanker/workflows</span> and run steps as
-            parallel DAG waves.
-          </EmptyDescription>
-        </EmptyHeader>
-        <EmptyContent>
-          <Button size="sm" disabled={!canWrite} onClick={onNewWorkflow}>
+  const toolbar: ReactNode =
+    options.length > 1 ? (
+      <Select
+        value={selected?.key ?? ""}
+        onValueChange={(key) => {
+          if (key !== null) onSelectProject(key);
+        }}
+      >
+        <SelectTrigger size="compact" aria-label="Project">
+          <SelectValue>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate">{selected?.label ?? "Project"}</span>
+              {selected !== null && environmentLabel(selected.environmentId) !== null ? (
+                <span className="truncate text-muted-foreground">
+                  {environmentLabel(selected.environmentId)}
+                </span>
+              ) : null}
+            </span>
+          </SelectValue>
+        </SelectTrigger>
+        <SelectPopup>
+          {options.map((option) => (
+            <SelectItem key={option.key} value={option.key} label={option.label}>
+              <span className="flex min-w-0 items-baseline gap-2">
+                <span className="truncate">{option.label}</span>
+                {environmentLabel(option.environmentId) !== null ? (
+                  <span className="truncate text-xs text-muted-foreground">
+                    {environmentLabel(option.environmentId)}
+                  </span>
+                ) : null}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+    ) : selected !== null ? (
+      <span className="truncate text-sm text-muted-foreground">{selected.label}</span>
+    ) : null;
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+      <WorkspacePageHeader electron={isElectron} className="relative bg-background">
+        <WorkspaceBreadcrumb ariaLabel="Clanker workflows breadcrumb">
+          <WorkspaceBreadcrumbItem current>
+            <h1 className="truncate">Clanker</h1>
+          </WorkspaceBreadcrumbItem>
+          {toolbar !== null ? (
+            <>
+              <WorkspaceBreadcrumbSeparator />
+              <WorkspaceBreadcrumbItem className="shrink">{toolbar}</WorkspaceBreadcrumbItem>
+            </>
+          ) : null}
+        </WorkspaceBreadcrumb>
+        <div className="min-w-0 flex-1" />
+        {selected !== null ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canWrite}
+            onClick={() => setNewDialogOpen(true)}
+          >
             <PlusIcon />
             New workflow
           </Button>
-        </EmptyContent>
-      </Empty>
-    );
-  }
-  return (
-    <div className="space-y-2">
-      {workflows.map((workflow) => (
-        <WorkflowRow
-          key={workflow.path}
-          environmentId={project.environmentId}
-          projectId={project.projectId}
-          workflow={workflow}
-          canWrite={canWrite}
-          canRun={canRun}
-          onEdit={() => onOpenFile(workflow.path)}
-          onRun={() => onRunWorkflow(workflow.path)}
+        ) : null}
+      </WorkspacePageHeader>
+
+      <div className="topbar-scroll-fade min-h-0 flex-1 overflow-y-auto">
+        <WorkspacePageContainer width="wide" className="min-h-full">
+          {selected === null ? (
+            <Empty>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <WorkflowIcon aria-hidden />
+                </EmptyMedia>
+                <EmptyTitle>No project selected</EmptyTitle>
+                <EmptyDescription>Add a project to manage its clanker workflows.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : loading ? (
+            <WorkflowListSkeleton />
+          ) : loadError !== null ? (
+            <Alert variant="error">
+              <AlertDescription>{loadError}</AlertDescription>
+            </Alert>
+          ) : workflows === null || workflows.length === 0 ? (
+            <Empty>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <WorkflowIcon aria-hidden />
+                </EmptyMedia>
+                <EmptyTitle>No clanker workflows yet</EmptyTitle>
+                <EmptyDescription>
+                  Workflows live in <span className="font-mono">.clanker/workflows</span> and run
+                  steps as parallel DAG waves.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
+                <Button size="sm" disabled={!canWrite} onClick={() => setNewDialogOpen(true)}>
+                  <PlusIcon />
+                  New workflow
+                </Button>
+              </EmptyContent>
+            </Empty>
+          ) : (
+            <div className="space-y-2">
+              {workflows.map((workflow) => (
+                <WorkflowRow
+                  key={workflow.path}
+                  environmentId={selected.ref.environmentId}
+                  projectId={selected.ref.projectId}
+                  workflow={workflow}
+                  canWrite={canWrite}
+                  onEdit={() => onOpenFile(workflow.path)}
+                />
+              ))}
+            </div>
+          )}
+        </WorkspacePageContainer>
+      </div>
+
+      {selected !== null ? (
+        <NewClankerWorkflowDialog
+          open={newDialogOpen}
+          onOpenChange={setNewDialogOpen}
+          environmentId={selected.ref.environmentId}
+          projectId={selected.ref.projectId}
+          onCreated={(path) => onOpenFile(path)}
         />
-      ))}
+      ) : null}
     </div>
   );
 }

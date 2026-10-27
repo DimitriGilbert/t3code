@@ -1,8 +1,8 @@
 /**
- * Merge a workflow's `defaults` block into each step, matching the Clanker
- * runner: step values win over defaults, `hooks`/`qa.checks` concatenate
- * step-first, and `defaults.model`/`provider` never inject into declared
- * step models.
+ * Merge a workflow's `defaults` block into each step with the Clanker runner's
+ * merge semantics (not the schema's "replaces" prose): step values win for
+ * scalars and `qa.on_fail`/`qa.escalate`; `hooks` and `qa.checks` concatenate
+ * step-first; `models` defaults apply only when the step declares none.
  */
 import type {
   ClankerDefaults,

@@ -279,11 +279,13 @@ it("renders timeline markers into user-facing text", () => {
 // ── replayed app-server lifecycle (P2 seam) ──
 
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
@@ -3339,6 +3341,568 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
           assert.isNull(st.failure, JSON.stringify(st.failure));
           assert.equal(st.cursor, transcript.entries.length);
         }),
+    );
+
+    it.effect("projects provider-started turns on the root thread as runless observed turns", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p8 observed turn on root",
+          entries: [
+            ...seededSessionEntries("t3-psA"),
+            // A turn the provider itself started (background result): no
+            // sourceCommandId, foreign clientId — nothing T3 issued.
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 10,
+                      createdAt: 1735689603000,
+                      createdAtSeq: 10,
+                      turnId: "turn-bg",
+                      kind: "turnHeader",
+                      origin: "backgroundResult",
+                      executionKind: "agent",
+                      state: "running",
+                      startedAt: 1735689603000,
+                    },
+                  },
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 11,
+                      createdAt: 1735689603000,
+                      createdAtSeq: 11,
+                      turnId: "turn-bg",
+                      kind: "userInput",
+                      origin: "backgroundResult",
+                      clientId: "zcode-desktop-9",
+                      text: "[background] deploy finished",
+                    },
+                  },
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 12,
+                      createdAt: 1735689603100,
+                      createdAtSeq: 12,
+                      turnId: "turn-bg",
+                      kind: "assistantText",
+                      text: "Background result applied.",
+                      state: "complete",
+                    },
+                  },
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 10,
+                      createdAt: 1735689603000,
+                      createdAtSeq: 13,
+                      turnId: "turn-bg",
+                      kind: "turnHeader",
+                      origin: "backgroundResult",
+                      executionKind: "agent",
+                      state: "completedSuccess",
+                      startedAt: 1735689603000,
+                      endedAt: 1735689605000,
+                    },
+                  },
+                ],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const allocator = yield* IdAllocator.IdAllocatorV2;
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psA" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        const awaitEvent = Effect.fnUntraced(function* (
+          predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+        ) {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (predicate(event)) return event;
+          }
+        });
+        yield* runtime.readThreadSnapshot({ providerThread });
+        const bgTurnId = allocator.derive.providerTurn({
+          driver: "zcode" as never,
+          nativeTurnId: "turn-bg",
+        });
+        // Historical snapshot turns are observed turns too (runAttemptId
+        // null), same parity shape as subagent children.
+        const turn1Id = allocator.derive.providerTurn({
+          driver: "zcode" as never,
+          nativeTurnId: "turn-1",
+        });
+        const t1 = yield* awaitEvent(
+          (event) => event.type === "provider_turn.updated" && event.providerTurn.id === turn1Id,
+        );
+        assert.equal(
+          t1.type === "provider_turn.updated" ? t1.providerTurn.runAttemptId : "set",
+          null,
+        );
+        // Emission order: the observed root_turn node lands before the
+        // running provider_turn, so await it first.
+        const rootNode = yield* awaitEvent(
+          (event) =>
+            event.type === "node.updated" &&
+            event.node.providerTurnId === bgTurnId &&
+            event.node.kind === "root_turn",
+        );
+        assert.equal(
+          rootNode.type === "node.updated" ? rootNode.node.threadId : undefined,
+          "thread-1",
+        );
+        assert.equal(rootNode.type === "node.updated" ? rootNode.node.runId : "set", null);
+        assert.equal(rootNode.type === "node.updated" ? rootNode.node.countsForRun : "set", false);
+        const bgRunning = yield* awaitEvent(
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.id === bgTurnId &&
+            event.providerTurn.status === "running",
+        );
+        assert.equal(
+          bgRunning.type === "provider_turn.updated"
+            ? bgRunning.providerTurn.providerThreadId
+            : undefined,
+          providerThread.id,
+        );
+        assert.equal(
+          bgRunning.type === "provider_turn.updated" ? bgRunning.providerTurn.runAttemptId : "set",
+          null,
+        );
+        // The provider-injected input projects as the turn's user message.
+        const prompt = yield* awaitEvent(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.text === "[background] deploy finished",
+        );
+        assert.equal(
+          prompt.type === "message.updated" ? prompt.message.threadId : undefined,
+          "thread-1",
+        );
+        yield* awaitEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.providerTurnId === bgTurnId &&
+            event.turnItem.type === "assistant_message",
+        );
+        const bgDone = yield* awaitEvent(
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.id === bgTurnId &&
+            event.providerTurn.status === "completed",
+        );
+        assert.equal(
+          bgDone.type === "provider_turn.updated" ? bgDone.providerTurn.runAttemptId : "set",
+          null,
+        );
+        yield* awaitEvent(
+          (event) =>
+            event.type === "node.updated" &&
+            event.node.providerTurnId === bgTurnId &&
+            event.node.kind === "root_turn" &&
+            event.node.status === "completed",
+        );
+        // Observed turns settle without a run-scoped turn.terminal.
+        const rest: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+        for (;;) {
+          const next = yield* Queue.poll(seen);
+          if (Option.isNone(next)) break;
+          rest.push(next.value);
+        }
+        assert.isFalse(
+          rest.some((event) => event.type === "turn.terminal" && event.providerTurnId === bgTurnId),
+        );
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("creates grandchild threads under a lazily-subscribed child conversation", () =>
+      Effect.gen(function* () {
+        const allocator = yield* IdAllocator.IdAllocatorV2;
+        const derivedThread = (sessionId: string) =>
+          allocator.derive.threadFromProviderThread({
+            driver: "zcode" as never,
+            nativeThreadId: sessionId,
+            providerInstanceId: "zcode-test" as never,
+          });
+        const derivedProviderThread = (sessionId: string) =>
+          allocator.derive.providerThread({
+            driver: "zcode" as never,
+            nativeThreadId: sessionId,
+            providerInstanceId: "zcode-test" as never,
+          });
+        const childThreadId = derivedThread("child-1");
+        const childProviderThreadId = derivedProviderThread("child-1");
+        const gcThreadId = derivedThread("gc-1");
+        const gcProviderThreadId = derivedProviderThread("gc-1");
+        const gcSubagentNodeId = allocator.derive.nodeFromProviderItem({
+          driver: "zcode" as never,
+          nativeItemId: "cturn-1:row:3",
+        });
+        const childSnapshot = {
+          ...snapshotFrame,
+          sessionId: "child-1",
+          logEpoch: "ec1",
+          control: { ...snapshotFrame.control, phase: "running", sessionEnded: false },
+          rows: {
+            window: [
+              {
+                rowId: 1,
+                createdAt: 1735689600200,
+                createdAtSeq: 1,
+                turnId: "cturn-1",
+                kind: "turnHeader",
+                origin: "userInput",
+                executionKind: "agent",
+                state: "running",
+                startedAt: 1735689600200,
+              },
+              {
+                rowId: 2,
+                createdAt: 1735689600200,
+                createdAtSeq: 2,
+                turnId: "cturn-1",
+                kind: "userInput",
+                origin: "mailbox",
+                text: "Review the zcode protocol package.",
+              },
+              {
+                rowId: 3,
+                createdAt: 1735689600300,
+                createdAtSeq: 3,
+                turnId: "cturn-1",
+                kind: "subagent",
+                subagentType: "Explore",
+                status: "running",
+                summaryText: "",
+                childSessionId: "gc-1",
+              },
+            ],
+            totalCount: 3,
+            firstRowId: null,
+          },
+        };
+        const gcSnapshot = {
+          ...snapshotFrame,
+          sessionId: "gc-1",
+          logEpoch: "eg1",
+          rows: {
+            window: [
+              {
+                rowId: 1,
+                createdAt: 1735689600400,
+                createdAtSeq: 1,
+                turnId: "gturn-1",
+                kind: "turnHeader",
+                origin: "userInput",
+                executionKind: "agent",
+                state: "completedSuccess",
+                startedAt: 1735689600400,
+                endedAt: 1735689600900,
+              },
+              {
+                rowId: 2,
+                createdAt: 1735689600500,
+                createdAtSeq: 2,
+                turnId: "gturn-1",
+                kind: "assistantText",
+                text: "Grandchild done",
+                state: "complete",
+              },
+            ],
+            totalCount: 2,
+            firstRowId: null,
+          },
+        };
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "p8 cold child grandchild",
+          entries: [
+            ...seededSessionEntries("t3-psG"),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psG",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "sendText",
+                  payload: {
+                    text: "hi",
+                    requestedDelivery: "startNow",
+                    heldQueueDisposition: "keepQueueAndSend",
+                    mode: "build",
+                    planEnabled: false,
+                    modelSelection: {
+                      providerId: PROVIDER_ID,
+                      modelId: MODEL_ID,
+                      options: { reasoningLevel: "low" },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 8,
+                  result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                },
+              },
+            },
+            // Cold path: the child conversation is only subscribed now, via
+            // readThreadSnapshot — no eager seed ever ran for it.
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/child-1",
+                  connectionId: "t3-psG",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: { ack: { subscriptionId: "subc1", mode: "snapshot", logEpoch: "ec1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                1,
+                { kind: "snapshot", snapshot: childSnapshot },
+                "initial",
+                "conversation/child-1",
+                "subc1",
+              ),
+            },
+            // The grandchild row inside the cold child must still create
+            // and subscribe its own conversation.
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 5,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/gc-1",
+                  connectionId: "t3-psG",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 5,
+                result: { ack: { subscriptionId: "subg1", mode: "snapshot", logEpoch: "eg1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                1,
+                { kind: "snapshot", snapshot: gcSnapshot },
+                "initial",
+                "conversation/gc-1",
+                "subg1",
+              ),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psG" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        const awaitEvent = Effect.fnUntraced(function* (
+          predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+        ) {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (predicate(event)) return event;
+          }
+        });
+        yield* runtime.readThreadSnapshot({ providerThread });
+        // A T3 turn gives the root conversation its appThread — the datum
+        // the cold child's rebuild chains from.
+        yield* runtime.startTurn({
+          appThread: {
+            id: "thread-1",
+            title: "Parent thread",
+            lineage: { rootThreadId: "thread-1" },
+            modelSelection: { instanceId: "zcode-test", model: `${PROVIDER_ID}/${MODEL_ID}` },
+          } as never,
+          threadId: "thread-1" as never,
+          runId: "run-1" as never,
+          runOrdinal: 3,
+          providerTurnOrdinal: 3,
+          attemptId: "attempt-3" as never,
+          rootNodeId: "node-3" as never,
+          providerThread,
+          message: {
+            messageId: "msg-3" as never,
+            text: "hi",
+            attachments: [],
+            createdBy: null,
+            creationSource: "web",
+          } as never,
+          modelSelection: sessionOpenInput.modelSelection,
+          runtimePolicy: sessionOpenInput.runtimePolicy,
+        });
+        const turn1ProviderTurnId = allocator.derive.providerTurn({
+          driver: "zcode" as never,
+          nativeTurnId: "turn-1",
+        });
+        // Restored child provider thread, exactly as persisted by the
+        // orchestrator: derived ids, owner node, forkedFrom chain.
+        const childProviderThread = {
+          id: childProviderThreadId,
+          driver: "zcode" as never,
+          providerInstanceId: "zcode-test" as never,
+          providerSessionId: "psG" as never,
+          appThreadId: childThreadId,
+          ownerNodeId: "owner-node-1" as never,
+          nativeThreadRef: {
+            driver: "zcode" as never,
+            nativeId: "child-1",
+            strength: "strong",
+          },
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: {
+            providerThreadId: providerThread.id,
+            providerTurnId: turn1ProviderTurnId,
+          },
+          pendingBackgroundTasks: [],
+          contextUsage: null,
+          nativeMetadata: null,
+          goal: null,
+          createdAt: DateTime.makeUnsafe(0),
+          updatedAt: DateTime.makeUnsafe(0),
+        } satisfies OrchestrationV2ProviderThread;
+        const childRead = yield* runtime.readThreadSnapshot({
+          providerThread: childProviderThread,
+        });
+        assert.equal(childRead.providerThread.nativeThreadRef?.nativeId, "child-1");
+        // The cold child got its thread record rebuilt (createOnly — the
+        // stored record wins when present) before its snapshot projected.
+        const childCreated = yield* awaitEvent(
+          (event) => event.type === "app_thread.created" && event.appThread.id === childThreadId,
+        );
+        assert.equal(
+          childCreated.type === "app_thread.created" ? childCreated.createOnly : undefined,
+          true,
+        );
+        // Grandchild thread + provider thread created from the rebuilt parent.
+        const gcCreated = yield* awaitEvent(
+          (event) => event.type === "app_thread.created" && event.appThread.id === gcThreadId,
+        );
+        assert.equal(
+          gcCreated.type === "app_thread.created"
+            ? gcCreated.appThread.lineage.parentThreadId
+            : undefined,
+          childThreadId,
+        );
+        assert.equal(
+          gcCreated.type === "app_thread.created"
+            ? gcCreated.appThread.lineage.relationshipToParent
+            : undefined,
+          "subagent",
+        );
+        const gcProviderThread = yield* awaitEvent(
+          (event) =>
+            event.type === "provider_thread.updated" &&
+            event.providerThread.nativeThreadRef?.nativeId === "gc-1",
+        );
+        assert.equal(
+          gcProviderThread.type === "provider_thread.updated"
+            ? gcProviderThread.providerThread.ownerNodeId
+            : undefined,
+          gcSubagentNodeId,
+        );
+        assert.equal(
+          gcProviderThread.type === "provider_thread.updated"
+            ? gcProviderThread.providerThread.forkedFrom?.providerThreadId
+            : undefined,
+          childProviderThreadId,
+        );
+        const subagent = yield* awaitEvent(
+          (event) =>
+            event.type === "subagent.updated" && event.subagent.childThreadId === gcThreadId,
+        );
+        assert.equal(
+          subagent.type === "subagent.updated" ? subagent.subagent.threadId : undefined,
+          childThreadId,
+        );
+        assert.equal(
+          subagent.type === "subagent.updated" ? subagent.subagent.providerThreadId : undefined,
+          gcProviderThreadId,
+        );
+        // And the grandchild's own turn projects + settles runlessly.
+        const gcDone = yield* awaitEvent(
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.providerThreadId === gcProviderThreadId &&
+            event.providerTurn.status === "completed",
+        );
+        assert.equal(
+          gcDone.type === "provider_turn.updated" ? gcDone.providerTurn.runAttemptId : "set",
+          null,
+        );
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
     );
 
     it.effect("reports retained native turns when upstream truncates the row window", () =>

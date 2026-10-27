@@ -264,12 +264,13 @@ interface ZcodeConversation {
   readonly sessionId: string;
   readonly topic: string;
   readonly providerThread: OrchestrationV2ProviderThread;
-  // Present only for subagent child conversations the adapter itself created;
-  // used as the parent when a nested `subagent` row needs its own thread.
-  readonly appThread?: OrchestrationV2AppThread | undefined;
-  // `${subagent nativeItemId}:thread-root` for eager child conversations —
+  // Known T3 thread for this conversation: seeded for eager children,
+  // stashed from T3 turn inputs, or lazily rebuilt for cold-restored
+  // children — used as the parent when a `subagent` row needs a thread.
+  appThread?: OrchestrationV2AppThread | undefined;
+  // `${subagent nativeItemId}:thread-root` for child conversations —
   // anchors the ordinal-1 observed turn's root node (Codex parity).
-  readonly observedRootNativeItemId?: string | undefined;
+  observedRootNativeItemId?: string | undefined;
   nextProviderTurnOrdinal: number;
   subscriptionId: string | null;
   logEpoch: string | null;
@@ -490,6 +491,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         const conversations = new Map<string, ZcodeConversation>();
         // childSessionIds already given a T3 thread/provider thread pair.
         const projectedChildSessions = new Set<string>();
+        // T3 threads this session has seen by id — lets cold-restored
+        // conversations recover their appThread without a new lookup.
+        const knownAppThreads = new Map<ThreadId, OrchestrationV2AppThread>();
         const wire = new ZCodeWire.TopicWireFrameAssembler<unknown>(Schema.Unknown);
         // workspace-config seeds its publisher from a live session on first
         // subscribe, so subscribe only after a conversation exists — an early
@@ -844,10 +848,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           return turn;
         });
 
-        // 修复：subagent 子会话的 turn 由上游发起，pendingInputs 无匹配，
-        // 行被静默丢弃；按 Codex 方式以 runId:null 投影到子线程。
-        // Observed turns get a root_turn node + runAttemptId-free
-        // provider_turn; ordinary items/messages project underneath.
+        // 修复：上游/其他客户端发起的 turn 在 pendingInputs 中无匹配，
+        // 行被静默丢弃；按 Codex 方式以 runId:null 投影。Observed turns
+        // get a root_turn node + runAttemptId-free provider_turn.
         const adoptObservedTurn = Effect.fnUntraced(function* (
           conversation: ZcodeConversation,
           nativeTurnId: string,
@@ -1085,7 +1088,8 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           // thread once, and subscribe while it runs so its status stays live.
           // For nested subagent rows under an observed turn there is no T3
           // input; the child's own thread + reported model stand in as parent.
-          const parentThread = turn.input?.appThread ?? conversation.appThread;
+          const parentThread =
+            turn.input?.appThread ?? (yield* resolveConversationAppThread(conversation));
           const childModelSelection =
             turn.input?.modelSelection ??
             zcodeReportedModelSelection({
@@ -1143,6 +1147,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               createdBy: "agent",
               creationSource: "provider",
             });
+            knownAppThreads.set(childThreadId, childAppThread);
             yield* emit({
               type: "app_thread.created",
               driver: ZCODE_PROVIDER,
@@ -1248,11 +1253,10 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 DateTime.makeUnsafe(row.startedAt),
               );
             }
-            if (
-              turn === undefined &&
-              conversation.providerThread.ownerNodeId !== null &&
-              conversation.providerThread.appThreadId !== null
-            ) {
+            // 修复：observed 投影同样适用于根线程 —— 上游或其他客户端
+            // 发起的 turn（后台结果、远端会话、续跑历史）原来被静默丢弃；
+            // 只要求会话已绑定 T3 线程，T3 自己的 turn 仍走 pendingInputs。
+            if (turn === undefined && conversation.providerThread.appThreadId !== null) {
               turn = yield* adoptObservedTurn(
                 conversation,
                 row.turnId,
@@ -2119,6 +2123,104 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           Effect.fail(ZCodeError.ZCodeAppServerRequestError.methodNotFound(method)),
         );
 
+        // 修复：冷恢复/懒订阅的子会话没有 appThread 种子，孙级 subagent
+        // 行无法建线程。按 providerThread.forkedFrom 找回父会话的
+        // appThread 并重建子线程（createOnly，已持久化的记录不动），
+        // 递归解析使任意深度的嵌套一致。
+        const resolveConversationAppThread = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+          seen: Set<string> = new Set(),
+        ): Effect.fn.Return<OrchestrationV2AppThread | undefined> {
+          if (conversation.appThread !== undefined) return conversation.appThread;
+          const appThreadId = conversation.providerThread.appThreadId;
+          if (appThreadId !== null) {
+            const known = knownAppThreads.get(appThreadId);
+            if (known !== undefined) {
+              conversation.appThread = known;
+              return known;
+            }
+          }
+          if (seen.has(conversation.sessionId)) return undefined;
+          seen.add(conversation.sessionId);
+          const ownerNodeId = conversation.providerThread.ownerNodeId;
+          const parentProviderThreadId = conversation.providerThread.forkedFrom?.providerThreadId;
+          const isDerivedChild =
+            appThreadId !== null &&
+            appThreadId ===
+              idAllocator.derive.threadFromProviderThread({
+                driver: ZCODE_PROVIDER,
+                nativeThreadId: conversation.sessionId,
+                providerInstanceId: adapterOptions.instanceId,
+              });
+          if (
+            appThreadId === null ||
+            ownerNodeId === null ||
+            parentProviderThreadId === undefined ||
+            !isDerivedChild
+          ) {
+            return undefined;
+          }
+          const parent = [...conversations.values()].find(
+            (candidate) => candidate.providerThread.id === parentProviderThreadId,
+          );
+          if (parent === undefined) return undefined;
+          const parentThread =
+            (yield* resolveConversationAppThread(parent, seen)) ??
+            [...parent.turns.values()]
+              .map((turn) => turn.input?.appThread)
+              .find((appThread) => appThread !== undefined);
+          if (parentThread === undefined) return undefined;
+          // The parent's subagent row names this child and anchors its
+          // first observed turn's root node — same ids as the warm path.
+          let subagentTitle: string | null = null;
+          for (const parentRow of parent.rows.values()) {
+            if (
+              parentRow.kind === "subagent" &&
+              parentRow.childSessionId === conversation.sessionId
+            ) {
+              subagentTitle = parentRow.subagentType;
+              conversation.observedRootNativeItemId ??= `${zcodeNativeItemId(parentRow.turnId, parentRow.rowId)}:thread-root`;
+              break;
+            }
+          }
+          const parentTurnOrdinal =
+            [...parent.turns.values()].find(
+              (turn) =>
+                turn.providerTurnId === conversation.providerThread.forkedFrom?.providerTurnId,
+            )?.providerTurnOrdinal ?? 1;
+          const childAppThread = makeSubagentChildThread({
+            parentThread,
+            childThreadId: appThreadId,
+            parentNodeId: ownerNodeId,
+            activeProviderThreadId: conversation.providerThread.id,
+            providerInstanceId: adapterOptions.instanceId,
+            modelSelection:
+              zcodeReportedModelSelection({
+                config: conversation.config,
+                instanceId: adapterOptions.instanceId,
+              }) ?? parentThread.modelSelection,
+            title: subagentThreadTitle({
+              parentTitle: parentThread.title,
+              title: subagentTitle,
+              prompt: "",
+              ordinal: parentTurnOrdinal,
+            }),
+            now: yield* DateTime.now,
+            createdBy: "agent",
+            creationSource: "provider",
+          });
+          // 恢复路径无法分辨子线程是否已持久化；createOnly 让既有记录胜出。
+          yield* emit({
+            type: "app_thread.created",
+            driver: ZCODE_PROVIDER,
+            appThread: childAppThread,
+            createOnly: true,
+          });
+          knownAppThreads.set(appThreadId, childAppThread);
+          conversation.appThread = childAppThread;
+          return childAppThread;
+        });
+
         const ensureConversation = Effect.fn("ZcodeAdapterV2.ensureConversation")(function* (
           sessionId: string,
           providerThread: OrchestrationV2ProviderThread,
@@ -2182,6 +2284,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             );
           conversation.subscriptionId = subscribed.ack.subscriptionId;
           conversation.logEpoch = subscribed.ack.logEpoch;
+          // 冷恢复的子会话在首帧到达前尽量补回 appThread/锚点，使快照中的
+          // turn 与嵌套 subagent 行按原样投影。
+          yield* resolveConversationAppThread(conversation);
           // The session is live now; the workspace-config publisher can seed
           // a real catalog (slash commands + mode options) for this workspace.
           yield* ensureWorkspaceConfigSubscription();
@@ -2656,6 +2761,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             function* (turnInput) {
               const sessionId = yield* nativeSessionId(turnInput.providerThread);
               const conversation = yield* ensureConversation(sessionId, turnInput.providerThread);
+              // 记住 T3 线程记录：observed/嵌套 subagent 投影需要它作父线程。
+              conversation.appThread = turnInput.appThread;
+              knownAppThreads.set(turnInput.threadId, turnInput.appThread);
               const commandId = yield* Effect.orDie(crypto.randomUUIDv7());
               if (conversation.pendingInputs.size >= 256) {
                 const oldest = conversation.pendingInputs.keys().next().value;
@@ -2783,15 +2891,24 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           compactThread: Effect.fn("ZcodeAdapterV2.compactThread")(
             function* (compactInput) {
               const sessionId = yield* nativeSessionId(compactInput.providerThread);
-              yield* ensureConversation(sessionId, compactInput.providerThread);
+              const conversation = yield* ensureConversation(
+                sessionId,
+                compactInput.providerThread,
+              );
+              conversation.appThread = compactInput.appThread;
+              knownAppThreads.set(compactInput.threadId, compactInput.appThread);
               // compact is an input-type maintenance command: idle → immediate
               // compact turn, busy/held → queued FIFO (dedup'd by the CLI).
-              const { ack } = yield* sendCommand({
+              const { ack, envelope } = yield* sendCommand({
                 sessionId,
                 type: "compact",
                 payload: {},
               });
+              // 修复：compact 产生的 turnHeader 靠 commandId 关联回本 run；
+              // 否则它会被当成外部 turn 走 observed 投影，丢失 run 归属。
+              conversation.pendingInputs.set(envelope.commandId, compactInput);
               if (!isAckOk(ack) && ack.status !== "noop") {
+                conversation.pendingInputs.delete(envelope.commandId);
                 return yield* protocolError(`ZCode rejected compact: ${ackRejectedDetail(ack)}`);
               }
             },

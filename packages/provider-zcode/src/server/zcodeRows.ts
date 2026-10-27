@@ -163,6 +163,53 @@ export function zcodeProviderTurnStatus(
   }
 }
 
+const ZCODE_DEFAULT_MODEL_SLUG_VALUE = "default";
+/** Default reasoning level when the session config carries none. */
+export const ZCODE_DEFAULT_REASONING_LEVEL = "max";
+
+export interface ZcodeResolvedModelSelection {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly reasoningLevel: string;
+}
+
+/**
+ * Resolve a T3 model slug (`<providerId>/<modelId>`, a bare `<modelId>`, or
+ * `default` for the session's current selection) plus runtime reasoning
+ * effort into the wire ModelSelection. Returns undefined when no model can be
+ * named — the session's current selection then applies.
+ */
+export function zcodeResolveModelSelection(input: {
+  readonly model: string;
+  readonly reasoningEffort?: string | undefined;
+  readonly config?: ZCodeSchema.SessionConfigState | null;
+}): ZcodeResolvedModelSelection | undefined {
+  const slug = input.model.trim();
+  const separator = slug.indexOf("/");
+  const configProviderId = input.config?.modelSelection?.providerId ?? input.config?.provider;
+  const providerId =
+    (separator > 0 ? slug.slice(0, separator) : undefined) ??
+    (configProviderId === undefined || configProviderId === "" ? undefined : configProviderId);
+  const modelId =
+    separator > 0
+      ? slug.slice(separator + 1)
+      : slug === "" || slug === ZCODE_DEFAULT_MODEL_SLUG_VALUE
+        ? (input.config?.modelSelection?.modelId ?? input.config?.model)
+        : slug;
+  if (providerId === undefined || modelId === undefined || modelId === "") return undefined;
+  const levels = input.config?.thoughtLevels;
+  const reasoningLevel =
+    input.reasoningEffort?.trim() ||
+    input.config?.modelSelection?.options?.reasoningLevel ||
+    input.config?.thought ||
+    (levels !== undefined && levels.length > 0
+      ? levels.includes(ZCODE_DEFAULT_REASONING_LEVEL)
+        ? ZCODE_DEFAULT_REASONING_LEVEL
+        : (levels[0] ?? ZCODE_DEFAULT_REASONING_LEVEL)
+      : ZCODE_DEFAULT_REASONING_LEVEL);
+  return { providerId, modelId, reasoningLevel };
+}
+
 /**
  * T3 runtime modes onto ZCode submission modes (§4 of the plan):
  * approval-required→build, auto-accept-edits→edit, auto→guarded,

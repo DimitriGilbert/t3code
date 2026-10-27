@@ -3,6 +3,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -228,6 +229,11 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
 
   const clientScope = yield* Scope.Scope;
   const gate = yield* makeStorageGate(options.requireStorageStartup ?? true);
+  // Notifications dispatch on one drain fiber fed by the read loop, so handlers
+  // apply frames in wire order. Upstream's fire-and-forget listeners reorder
+  // per-frame work; topic state (revisions, row windows) is order-sensitive.
+  const notificationQueue =
+    yield* Queue.unbounded<ZCodeProtocol.ZCodeAppServerIncomingNotification>();
 
   // First-status watchdog only applies while the gate requires storage.
   // Upstream cancels it on the first ACCEPTED startup frame, so only a missing
@@ -263,22 +269,22 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
     if (notification.method === "startup/storageState") {
       return gate
         .accept(notification.params)
-        .pipe(Effect.andThen(dispatchDecodedNotification(notification)), Effect.ignore);
+        .pipe(Effect.andThen(Queue.offer(notificationQueue, notification)), Effect.ignore);
     }
-    return dispatchDecodedNotification(notification);
+    return Queue.offer(notificationQueue, notification).pipe(Effect.asVoid);
   };
 
-  // Notification handlers run on their own fiber, like upstream's unawaited
-  // emitter listeners: a handler may call client.request/notify without
-  // deadlocking the read loop. The storage gate stays on the read fiber so
-  // startup frames are always accepted in wire order.
-  const dispatchDecodedNotification = (
+  // Notification handlers run on the drain fiber off the read loop, like
+  // upstream's unawaited emitter listeners: a handler may call
+  // client.request/notify without deadlocking the read loop. The storage gate
+  // stays on the read fiber so startup frames are always accepted in wire order.
+  const dispatchQueuedNotification = (
     notification: ZCodeProtocol.ZCodeAppServerIncomingNotification,
   ): Effect.Effect<void, never> => {
     const schema = getSchema(ZCodeRpc.SERVER_NOTIFICATION_PARAMS, notification.method);
     const handlers = notificationHandlers.get(notification.method) ?? [];
 
-    const dispatch = schema
+    return schema
       ? decodeNotificationPayload(notification.method, schema, notification.params).pipe(
           Effect.flatMap((decoded) =>
             Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
@@ -288,9 +294,13 @@ export const make = Effect.fn("effect-zcode-protocol/ZCodeAppServerClient.make")
       : unknownNotificationHandler
         ? unknownNotificationHandler(notification.method, notification.params).pipe(Effect.ignore)
         : Effect.void;
-
-    return dispatch.pipe(Effect.forkIn(clientScope), Effect.asVoid);
   };
+
+  yield* Queue.take(notificationQueue).pipe(
+    Effect.andThen(dispatchQueuedNotification),
+    Effect.forever,
+    Effect.forkIn(clientScope),
+  );
 
   const dispatchRequest = (
     request: ZCodeProtocol.ZCodeAppServerIncomingRequest,

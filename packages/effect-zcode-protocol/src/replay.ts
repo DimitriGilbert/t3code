@@ -134,6 +134,9 @@ export interface ZCodeAppServerReplayDriver {
   readonly beforeEmitInbound?: (
     entry: Extract<ZCodeAppServerReplayEntry, { readonly type: "emit_inbound" }>,
   ) => Effect.Effect<void>;
+  // Observed outbound frames before transcript matching; tests use this to
+  // capture generated ids (commandId) and echo them in later inbound frames.
+  readonly onOutbound?: (actual: unknown) => Effect.Effect<void>;
 }
 
 const encoder = new TextEncoder();
@@ -198,7 +201,7 @@ export function layerReplay(
 export const makeReplayDriver = Effect.fn("effect-zcode-protocol/replay.makeReplayDriver")(
   function* (
     transcript: ZCodeAppServerReplayTranscript,
-    options: Pick<ZCodeAppServerReplayDriver, "beforeEmitInbound"> = {},
+    options: Pick<ZCodeAppServerReplayDriver, "beforeEmitInbound" | "onOutbound"> = {},
   ) {
     return {
       transcript,
@@ -283,6 +286,7 @@ const makeReplayClientWithState = Effect.fn(
 
   const processOutboundFrame = (actual: unknown) =>
     drainInbound().pipe(
+      Effect.andThen(driver.onOutbound === undefined ? Effect.void : driver.onOutbound(actual)),
       Effect.andThen(
         Effect.gen(function* () {
           const current = yield* Ref.get(state);

@@ -33,7 +33,7 @@ export const ZcodeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "binaryPath"],
+    order: ["binaryPath"],
   },
 );
 export type ZcodeSettings = typeof ZcodeSettings.Type;

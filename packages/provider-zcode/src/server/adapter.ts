@@ -32,7 +32,9 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -59,9 +61,15 @@ import {
   type ZcodeAppServerClientOpener,
 } from "./zcodeAppServer.ts";
 import {
+  buildZcodeAccountOverlay,
+  readZcodeCredentialStore,
+  resolveZcodeRequestApiKey,
+} from "./zcodeCredentials.ts";
+import {
   zcodeNativeItemId,
   zcodePermissionAnswer,
   zcodeProviderTurnStatus,
+  zcodeResolveModelSelection,
   zcodeRequestKindForTool,
   zcodeSessionModeForRuntimeMode,
   zcodeTimelineMarkerText,
@@ -218,7 +226,10 @@ interface ZcodeConversation {
   revision: number;
   rows: Map<number, ZCodeSchema.ConversationRow>;
   control: ZCodeSchema.SessionControl | null;
+  config: ZCodeSchema.SessionConfigState | null;
   usage: ZCodeSchema.SessionUsageState | null;
+  rowsTotalCount: number;
+  rowsFirstRowId: number | null;
   pendingInteractions: ReadonlyArray<ZCodeSchema.PendingInteraction>;
   backgroundWorks: ReadonlyArray<ZCodeSchema.BackgroundWorkSummary>;
   readonly firstSnapshot: Deferred.Deferred<void, ProviderAdapter.ProviderAdapterV2Error>;
@@ -226,6 +237,9 @@ interface ZcodeConversation {
   readonly pendingInputs: Map<string, ProviderAdapter.ProviderAdapterV2TurnInput>;
   readonly pendingRows: Map<string, Array<ZCodeSchema.ConversationRow>>;
   readonly interactions: Map<string, PendingInteractionRecord>;
+  // turnHeader(failed) can arrive before the state.updated patch carrying
+  // control.lastError; failure finalization is deferred to end of frame.
+  readonly deferredFailures: Array<{ turn: ActiveZcodeTurn; completedAt: DateTime.Utc }>;
 }
 
 const conversationRef = (sessionId: string) => ({
@@ -251,6 +265,8 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const crypto = yield* Crypto.Crypto;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const settings = adapterOptions.settings;
 
@@ -286,6 +302,65 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
         const clientId = `t3-${input.providerSessionId}`;
+
+        // The CLI asks for runtime preferences on createSession and again on
+        // each sendText; both scopes answer with T3's fixed defaults.
+        yield* client.handleServerRequest(
+          ZCodeRpc.SERVER_REQUEST_METHODS.sessionRequestRuntimePreferences,
+          () =>
+            Effect.succeed({
+              nativeSearchEnhancementsEnabled: false,
+              memoryEnabled: false,
+              askUserQuestionAutoResolutionEnabled: true,
+              modelContextBudgetStrategy: "preflight-v1" as const,
+            }),
+        );
+        // Per model request the CLI needs account auth material; the host
+        // decrypts ~/.zcode credentials locally (never logged).
+        yield* client.handleServerRequest(
+          ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestProviderRuntimeHeaders,
+          (params) =>
+            readZcodeCredentialStore(adapterOptions.environment).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+              Effect.map((credentials) => {
+                const apiKey = resolveZcodeRequestApiKey(credentials, params.providerId);
+                return apiKey === undefined
+                  ? {
+                      headersApplied: false as const,
+                      errorMessage: `No ZCode credential for provider ${params.providerId}.`,
+                    }
+                  : { headersApplied: true as const, requestAuth: { apiKey } };
+              }),
+            ),
+        );
+
+        // Without the account overlay the registry publishes zero executable
+        // models and every sendText fails modelUnavailable. Push once per
+        // process; requests self-gate on storage-ready.
+        yield* buildZcodeAccountOverlay({
+          environment: adapterOptions.environment,
+          revision: `t3-${input.providerSessionId}`,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.flatMap((overlay) =>
+            overlay === undefined
+              ? Effect.logWarning(
+                  "ZCode builtin provider config not found; account overlay skipped.",
+                )
+              : client.request(ZCodeRpc.LEGACY_METHODS.providerUpdateAccountConfig, overlay).pipe(
+                  Effect.andThen(
+                    client.request(ZCodeRpc.LEGACY_METHODS.providerRefreshRegistry, {
+                      reason: "t3-session-open",
+                    }),
+                  ),
+                  Effect.catch((cause) =>
+                    Effect.logWarning("ZCode account overlay push failed", { cause }),
+                  ),
+                ),
+          ),
+        );
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
           id: input.providerSessionId,
@@ -606,26 +681,38 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           return turn;
         });
 
+        const queuePendingRow = (
+          conversation: ZcodeConversation,
+          row: ZCodeSchema.ConversationRow,
+        ) => {
+          // Bounded: rows for a turnId that never gets adopted must not grow
+          // without limit across a long-lived subscription.
+          if (!conversation.pendingRows.has(row.turnId) && conversation.pendingRows.size >= 64) {
+            const oldest = conversation.pendingRows.keys().next().value;
+            if (oldest !== undefined) conversation.pendingRows.delete(oldest);
+          }
+          const pending = conversation.pendingRows.get(row.turnId) ?? [];
+          if (pending.length === 0) conversation.pendingRows.set(row.turnId, pending);
+          pending.push(row);
+        };
+
         const applyToolCallRow = Effect.fnUntraced(function* (
           conversation: ZcodeConversation,
           row: ZCodeSchema.ToolCallRow,
         ) {
           const turn = conversation.turns.get(row.turnId);
           if (turn === undefined) {
-            const pending = conversation.pendingRows.get(row.turnId) ?? [];
-            if (pending.length === 0) conversation.pendingRows.set(row.turnId, pending);
-            pending.push(row);
+            queuePendingRow(conversation, row);
             return;
           }
           const at = yield* DateTime.now;
           const status = zcodeToolCallItemStatus(row.status);
           const completed = status !== "running" && status !== "waiting";
           const itemKind = zcodeToolItemKind(row.toolName);
-          const nodeKind = itemKind === "dynamic_tool" ? "tool_call" : ("tool_call" as const);
           const node = nodeFor(
             turn,
             row,
-            nodeKind,
+            "tool_call",
             rowStatusToNodeStatus(status),
             completed ? at : null,
           );
@@ -717,9 +804,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         ) {
           const turn = conversation.turns.get(row.turnId);
           if (turn === undefined) {
-            const pending = conversation.pendingRows.get(row.turnId) ?? [];
-            if (pending.length === 0) conversation.pendingRows.set(row.turnId, pending);
-            pending.push(row);
+            queuePendingRow(conversation, row);
             return;
           }
           const at = yield* DateTime.now;
@@ -832,15 +917,14 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               return;
             }
             const completedAt = DateTime.makeUnsafe(row.endedAt ?? row.startedAt);
-            const failureDetail =
-              row.state === "failed" ? conversation.control?.lastError?.message : undefined;
-            yield* finalizeTurn(
-              conversation,
-              turn,
-              status,
-              completedAt,
-              ...(failureDetail === undefined ? [] : [failureDetail]),
-            );
+            // control.lastError lands in a state.updated patch that can follow
+            // the failed turnHeader in the same frame; defer so the failure
+            // text is read after the whole payload applied.
+            if (status === "failed") {
+              conversation.deferredFailures.push({ turn, completedAt });
+              return;
+            }
+            yield* finalizeTurn(conversation, turn, status, completedAt);
             return;
           }
 
@@ -1168,6 +1252,42 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           }
         });
 
+        const emitProviderThread = Effect.fnUntraced(function* (conversation: ZcodeConversation) {
+          const control = conversation.control;
+          const status: OrchestrationV2ProviderThread["status"] =
+            control === null || control.sessionEnded
+              ? "idle"
+              : control.phase === "error"
+                ? "error"
+                : control.phase === "running" || control.phase === "prewarming"
+                  ? "active"
+                  : "idle";
+          const usage = conversation.usage;
+          const updatedAt = yield* DateTime.now;
+          yield* emit({
+            type: "provider_thread.updated",
+            driver: ZCODE_PROVIDER,
+            providerThread: {
+              ...conversation.providerThread,
+              status,
+              updatedAt,
+              ...(usage === null
+                ? {}
+                : {
+                    contextUsage: {
+                      usedTokens: usage.contextWindow?.usedTokens ?? 0,
+                      ...(usage.contextWindow === null
+                        ? {}
+                        : { maxTokens: usage.contextWindow.maxTokens }),
+                      inputTokens: usage.cumulative.inputTokens,
+                      outputTokens: usage.cumulative.outputTokens,
+                      cachedInputTokens: usage.cumulative.cacheReadTokens,
+                    },
+                  }),
+            },
+          });
+        });
+
         const applySnapshot = Effect.fnUntraced(function* (
           conversation: ZcodeConversation,
           snapshot: ZCodeSchema.ConversationSnapshot,
@@ -1175,13 +1295,17 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           conversation.revision = snapshot.revision;
           conversation.logEpoch = snapshot.logEpoch;
           conversation.control = snapshot.control;
+          conversation.config = snapshot.config;
           conversation.usage = snapshot.usage;
+          conversation.rowsTotalCount = snapshot.rows.totalCount;
+          conversation.rowsFirstRowId = snapshot.rows.firstRowId;
           conversation.backgroundWorks = snapshot.backgroundWorks;
           for (const row of snapshot.rows.window) {
             conversation.rows.set(row.rowId, row);
           }
           yield* syncInteractions(conversation, snapshot.pendingInteractions);
           for (const row of snapshot.rows.window) yield* projectRow(conversation, row);
+          yield* emitProviderThread(conversation);
           yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
         });
 
@@ -1250,9 +1374,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 }
               }
             }
+            if (patch.config !== undefined) conversation.config = patch.config;
             if (patch.usage !== undefined) conversation.usage = patch.usage;
             if (patch.backgroundWorks !== undefined) {
               conversation.backgroundWorks = patch.backgroundWorks;
+            }
+            if (patch.control !== undefined || patch.usage !== undefined) {
+              yield* emitProviderThread(conversation);
             }
             if (patch.pendingInteractions !== undefined) {
               yield* syncInteractions(conversation, patch.pendingInteractions);
@@ -1285,6 +1413,19 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               for (const delta of decoded.value.payload.deltas) {
                 yield* applyDelta(conversation, delta);
               }
+            }
+            const deferred = conversation.deferredFailures.splice(0);
+            for (const { turn, completedAt } of deferred) {
+              yield* finalizeTurn(
+                conversation,
+                turn,
+                "failed",
+                completedAt,
+                ...(conversation.control?.lastError === null ||
+                conversation.control?.lastError === undefined
+                  ? []
+                  : [conversation.control.lastError.message]),
+              );
             }
             return;
           }
@@ -1352,7 +1493,10 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             revision: 0,
             rows: new Map(),
             control: null,
+            config: null,
             usage: null,
+            rowsTotalCount: 0,
+            rowsFirstRowId: null,
             pendingInteractions: [],
             backgroundWorks: [],
             firstSnapshot: yield* Deferred.make<void, ProviderAdapter.ProviderAdapterV2Error>(),
@@ -1360,6 +1504,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             pendingInputs: new Map(),
             pendingRows: new Map(),
             interactions: new Map(),
+            deferredFailures: [],
           };
           conversations.set(sessionId, conversation);
           const subscribed = yield* client
@@ -1369,6 +1514,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               clientMode: ZCODE_CLIENT_MODE,
             })
             .pipe(
+              // A half-initialized entry would wedge every later call path;
+              // failed subscribes must leave no conversation behind.
+              Effect.tapError(() => Effect.sync(() => conversations.delete(sessionId))),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterProtocolError({
@@ -1394,6 +1542,19 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             : Effect.succeed(nativeId);
         };
 
+        const zcodeModelSelectionPayload = (
+          resolved: ReturnType<typeof zcodeResolveModelSelection>,
+        ) =>
+          resolved === undefined
+            ? {}
+            : {
+                modelSelection: {
+                  providerId: resolved.providerId,
+                  modelId: resolved.modelId,
+                  options: { reasoningLevel: resolved.reasoningLevel },
+                },
+              };
+
         const sendTextCommand = Effect.fn("ZcodeAdapterV2.sendTextCommand")(function* (
           conversation: ZcodeConversation,
           text: string,
@@ -1404,7 +1565,6 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             type: "sendText",
             payload: {
               text,
-              inputOrigin: "desktop",
               ...(requestedDelivery === undefined ? {} : { requestedDelivery }),
             },
           });
@@ -1429,6 +1589,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             ),
           ),
           ensureThread: Effect.fn("ZcodeAdapterV2.ensureThread")(function* (threadInput) {
+            // No conversation exists yet: resolve the selection against the
+            // T3 slug alone; the session snapshot carries it from then on.
+            const resolved = zcodeResolveModelSelection({
+              model: threadInput.modelSelection.model,
+              reasoningEffort: threadInput.runtimePolicy.reasoningEffort,
+              config: null,
+            });
             const { ack } = yield* sendCommand({
               sessionId: null,
               type: "createSession",
@@ -1439,6 +1606,14 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   ...(threadInput.runtimePolicy.interactionMode === "plan"
                     ? { planEnabled: true }
                     : {}),
+                  ...(resolved === undefined
+                    ? {}
+                    : {
+                        provider: resolved.providerId,
+                        model: resolved.modelId,
+                        thought: resolved.reasoningLevel,
+                        ...zcodeModelSelectionPayload(resolved),
+                      }),
                 },
               },
             }).pipe(
@@ -1536,7 +1711,18 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               const sessionId = yield* nativeSessionId(turnInput.providerThread);
               const conversation = yield* ensureConversation(sessionId, turnInput.providerThread);
               const commandId = yield* Effect.orDie(crypto.randomUUIDv7());
+              if (conversation.pendingInputs.size >= 256) {
+                const oldest = conversation.pendingInputs.keys().next().value;
+                if (oldest !== undefined) conversation.pendingInputs.delete(oldest);
+              }
               conversation.pendingInputs.set(commandId, turnInput);
+              // sendText.modelSelection requires options.reasoningLevel — an
+              // accepted command without it still fails invalid_model_request.
+              const resolved = zcodeResolveModelSelection({
+                model: turnInput.modelSelection.model,
+                reasoningEffort: turnInput.runtimePolicy.reasoningEffort,
+                config: conversation.config,
+              });
               const envelope = ZCodeSchema.makeCommandEnvelope({
                 commandId,
                 clientId,
@@ -1546,7 +1732,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 payload: {
                   text: turnInput.message.text,
                   requestedDelivery: "startNow" as const,
-                  inputOrigin: "desktop" as const,
+                  ...zcodeModelSelectionPayload(resolved),
                 },
               });
               const ack = yield* client.request(ZCodeRpc.V4_METHODS.command, envelope).pipe(
@@ -1646,8 +1832,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   `Provider turn ${interruptInput.providerTurnId} is not active on ZCode session ${sessionId}.`,
                 );
               }
+              const { ack } = yield* sendCommand({ sessionId, type: "stop", payload: {} });
+              if (ack.status !== "accepted" && ack.status !== "duplicate") {
+                return yield* protocolError(
+                  `ZCode rejected stop: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
+                );
+              }
               turn.interrupted = true;
-              yield* sendCommand({ sessionId, type: "stop", payload: {} });
               yield* Deferred.await(turn.settled).pipe(
                 Effect.timeoutOrElse({
                   duration: INTERRUPT_GRACE,
@@ -1702,7 +1893,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                     answer =
                       requestInput.decision === "cancel" || requestInput.decision === "decline"
                         ? { action: "cancel" as const }
-                        : { content: requestInput.answers };
+                        : requestInput.answers === undefined
+                          ? {}
+                          : { content: requestInput.answers };
                   } else {
                     answer =
                       requestInput.decision === "accept" ||
@@ -1711,12 +1904,46 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                         ? { action: "accept" as const }
                         : { action: "decline" as const };
                   }
+                  const hookReview =
+                    interaction.payload.kind === "workspaceHookReview" && answer.action === "accept"
+                      ? interaction.payload
+                      : undefined;
+                  // Hook trust decisions go through the dedicated review
+                  // command; resolveInteraction still serves rejections.
+                  const { ack } =
+                    hookReview === undefined
+                      ? yield* sendCommand({
+                          sessionId: conversation.sessionId,
+                          type: "resolveInteraction",
+                          payload: { interactionId, answer },
+                        })
+                      : yield* sendCommand({
+                          sessionId: conversation.sessionId,
+                          type: "respondWorkspaceHookReview",
+                          payload: {
+                            sessionId: hookReview.sessionId,
+                            taskId: hookReview.taskId,
+                            runId: hookReview.runId,
+                            workspaceIdentity: hookReview.workspaceIdentity,
+                            bundleDigest: hookReview.bundleDigest,
+                            reviewFlowId: hookReview.reviewFlowId,
+                            generation: hookReview.generation,
+                            interactionId: hookReview.interactionId,
+                            ...(hookReview.remoteSessionId === undefined
+                              ? {}
+                              : { remoteSessionId: hookReview.remoteSessionId }),
+                            decision: {
+                              action: "trust_selected" as const,
+                              reviewItemIds: hookReview.items.map((item) => item.reviewItemId),
+                            },
+                          },
+                        });
+                  if (ack.status !== "accepted" && ack.status !== "duplicate") {
+                    return yield* protocolError(
+                      `ZCode rejected interaction resolution: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
+                    );
+                  }
                   conversation.interactions.delete(interactionId);
-                  yield* sendCommand({
-                    sessionId: conversation.sessionId,
-                    type: "resolveInteraction",
-                    payload: { interactionId, answer },
-                  });
                   const resolvedAt = yield* DateTime.now;
                   yield* emit({
                     type: "runtime_request.updated",
@@ -1771,17 +1998,57 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 sessionId,
                 snapshotInput.providerThread,
               );
-              yield* Deferred.await(conversation.firstSnapshot).pipe(
-                Effect.timeoutOrElse({
-                  duration: "10 seconds",
-                  orElse: () => Effect.void,
-                }),
+              const snapshotReady = yield* Deferred.await(conversation.firstSnapshot).pipe(
+                Effect.timeoutOption("10 seconds"),
+              );
+              if (snapshotReady._tag === "None") {
+                // Best-effort: project whatever has arrived so far rather than
+                // failing the read on a slow cold restore.
+                yield* Effect.logWarning(
+                  "ZCode conversation snapshot did not arrive within 10s; reading partial rows.",
+                  { sessionId },
+                );
+              }
+              // The snapshot only carries the recent rows window; page
+              // rowsRange backwards for earlier history.
+              const allRows = new Map(conversation.rows);
+              let beforeRowId = conversation.rowsFirstRowId ?? undefined;
+              while (
+                beforeRowId !== undefined &&
+                allRows.size < conversation.rowsTotalCount &&
+                allRows.size < 10_000
+              ) {
+                const page = yield* client
+                  .request(ZCodeRpc.V4_METHODS.conversationRowsRange, {
+                    sessionId,
+                    clientMode: ZCODE_CLIENT_MODE,
+                    beforeRowId,
+                    limit: 500,
+                  })
+                  .pipe(
+                    Effect.catch((cause) =>
+                      Effect.logWarning("ZCode rowsRange paging failed", { cause, sessionId }).pipe(
+                        Effect.as(undefined),
+                      ),
+                    ),
+                  );
+                if (page === undefined || page.rows.length === 0) break;
+                let oldest = beforeRowId;
+                for (const row of page.rows) {
+                  allRows.set(row.rowId, row);
+                  if (row.rowId < oldest) oldest = row.rowId;
+                }
+                if (!page.hasMore || oldest >= beforeRowId) break;
+                beforeRowId = oldest;
+              }
+              const projectedRows = [...allRows.values()].sort(
+                (left, right) => left.rowId - right.rowId,
               );
               const turns: Array<OrchestrationV2ProviderTurn> = [];
               const messages: Array<OrchestrationV2ConversationMessage> = [];
               const runtimeRequests: Array<OrchestrationV2RuntimeRequest> = [];
               const threadId = snapshotInput.providerThread.appThreadId;
-              for (const row of conversation.rows.values()) {
+              for (const row of projectedRows) {
                 if (row.kind === "turnHeader") {
                   const ordinal = turns.length + 1;
                   turns.push({
@@ -1921,7 +2188,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
 export type ZcodeAdapterV2DriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
-  | IdAllocator.IdAllocatorV2;
+  | FileSystem.FileSystem
+  | IdAllocator.IdAllocatorV2
+  | Path.Path;
 
 export const ZcodeAdapterV2Driver: ProviderAdapterDriver<ZcodeSettings, ZcodeAdapterV2DriverEnv> = {
   driverKind: ZCODE_PROVIDER,

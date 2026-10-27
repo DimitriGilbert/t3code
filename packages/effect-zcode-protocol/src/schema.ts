@@ -2223,6 +2223,40 @@ export const ZCodeWorkspaceCancelGenerateTextResult = Schema.Struct({
   cancelled: Schema.Boolean,
 });
 
+// ── server→client runtime preferences (session/requestRuntimePreferences) ──
+
+export const ZCodeSessionRuntimePreferencesScope = Schema.Literals([
+  "runtime-materialization",
+  "user-execution",
+]);
+export type ZCodeSessionRuntimePreferencesScope = typeof ZCodeSessionRuntimePreferencesScope.Type;
+
+export const ZCodeSessionRequestRuntimePreferencesParams = Schema.Struct({
+  sessionId: nonEmptyString,
+  scope: ZCodeSessionRuntimePreferencesScope,
+});
+export type ZCodeSessionRequestRuntimePreferencesParams =
+  typeof ZCodeSessionRequestRuntimePreferencesParams.Type;
+
+export const ZCodeModelContextBudgetStrategy = Schema.Literals(["legacy", "preflight-v1"]);
+export type ZCodeModelContextBudgetStrategy = typeof ZCodeModelContextBudgetStrategy.Type;
+
+// Upstream zcodeSessionRuntimePreferencesResultSchema; hosts may omit the
+// defaulted fields — the server normalizes them at the protocol boundary.
+export const ZCodeSessionRuntimePreferencesResult = Schema.Struct({
+  additionalDirectories: Schema.optionalKey(
+    Schema.Array(nonEmptyString).check(Schema.isMaxLength(256)),
+  ),
+  nativeSearchEnhancementsEnabled: Schema.Boolean,
+  toolSearchMode: Schema.optionalKey(Schema.String),
+  subagentRuntimeConfigEnabled: Schema.optionalKey(Schema.Boolean),
+  memoryEnabled: Schema.optionalKey(Schema.Boolean),
+  askUserQuestionAutoResolutionEnabled: Schema.optionalKey(Schema.Boolean),
+  integratedTerminalShell: Schema.optionalKey(Schema.Unknown),
+  modelContextBudgetStrategy: Schema.optionalKey(ZCodeModelContextBudgetStrategy),
+});
+export type ZCodeSessionRuntimePreferencesResult = typeof ZCodeSessionRuntimePreferencesResult.Type;
+
 // ── server→client reverse requests (interaction/*) ──
 
 export const ZCodePermissionOption = Schema.Struct({

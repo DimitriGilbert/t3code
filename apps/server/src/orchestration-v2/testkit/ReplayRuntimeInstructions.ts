@@ -6,6 +6,8 @@ export function materializeReplayTranscriptRuntimeInstructions(
   transcript: ProviderReplayTranscript,
   runtime: { readonly driver: ProviderDriverKind; readonly model: string },
 ): ProviderReplayTranscript {
+  // Native ZCode Protocol v4 carries no session/prompt frames; the adapter
+  // sends `sendText` payloads verbatim, so no instruction splicing applies.
   const harness =
     runtime.driver === "cursor"
       ? "Cursor"
@@ -13,9 +15,7 @@ export function materializeReplayTranscriptRuntimeInstructions(
         ? "Grok"
         : runtime.driver === "acpRegistry"
           ? "acpRegistry"
-          : runtime.driver === "zcode"
-            ? "ZCode"
-            : undefined;
+          : undefined;
   if (harness === undefined) return transcript;
   const instructions = buildRuntimeInstructions({ harness, model: runtime.model });
 

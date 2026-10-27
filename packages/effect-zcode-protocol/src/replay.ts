@@ -159,6 +159,7 @@ function stableStringify(value: unknown): string {
 // both are randomized per run, so transcript comparison masks them. The mask is
 // asymmetric by design: adapter-side correlation must match on method and
 // payload shape, never on commandId.
+const REPLAY_MASKED_PARAM_KEYS = new Set(["commandId", "issuedAt", "clientId", "connectionId"]);
 function normalizeReplayFrame(value: unknown): unknown {
   if (typeof value !== "object" || value === null) return value;
   if (Array.isArray(value)) return value.map(normalizeReplayFrame);
@@ -166,16 +167,13 @@ function normalizeReplayFrame(value: unknown): unknown {
   const normalized = Object.fromEntries(
     Object.entries(record).map(([key, entry]) => [key, normalizeReplayFrame(entry)]),
   );
-  if (
-    normalized.method === "v4/command" &&
-    typeof normalized.params === "object" &&
-    normalized.params !== null
-  ) {
-    normalized.params = {
-      ...(normalized.params as Record<string, unknown>),
-      commandId: "<ignored>",
-      issuedAt: "<ignored>",
-    };
+  // clientId/connectionId embed the randomized providerSessionId, so they vary
+  // per session exactly like commandId/issuedAt do per command.
+  if (typeof normalized.params === "object" && normalized.params !== null) {
+    const params = normalized.params as Record<string, unknown>;
+    for (const key of Object.keys(params)) {
+      if (REPLAY_MASKED_PARAM_KEYS.has(key)) params[key] = "<ignored>";
+    }
   }
   return normalized;
 }

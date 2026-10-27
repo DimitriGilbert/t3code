@@ -92,10 +92,10 @@ const ZCODE_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   },
 ];
 
-/** ZCode instance snapshots never offer application text generation. */
+/** Title/PR/commit generation rides `workspace/generateText`; it only works once `zcode` is installed. */
 const withZcodeSnapshotDefaults = (draft: ServerProviderDraft): ServerProviderDraft => ({
   ...draft,
-  supportsTextGeneration: false,
+  supportsTextGeneration: draft.installed === true,
   // Native sessions list/resume/delete are local `session/list` + v4
   // `deleteSession` calls; no credentials needed once the CLI is installed.
   ...(draft.installed

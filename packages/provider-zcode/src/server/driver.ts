@@ -5,11 +5,7 @@
  *
  * @module provider-zcode/server/driver
  */
-import {
-  AcpRegistryOperationError,
-  ProviderSetupError,
-  TextGenerationError,
-} from "@t3tools/contracts";
+import { AcpRegistryOperationError, ProviderSetupError } from "@t3tools/contracts";
 import { ZcodeSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -45,7 +41,6 @@ import {
   type ProviderDriver,
   type ProviderInstance,
 } from "@t3tools/provider-core/server/driver";
-import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
@@ -71,24 +66,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
   nativeUpdate: null,
 });
 
-// The zcode backend's text helpers are not exposed over ACP, so instances
-// never back application text generation; selectors read the snapshot flag.
-const makeUnsupportedTextGeneration = (): ProviderTextGeneration => {
-  const unsupported = (operation: string) =>
-    Effect.fail(
-      new TextGenerationError({
-        operation,
-        detail: "ZCode does not provide application text generation.",
-      }),
-    );
-  return {
-    generateCommitMessage: () => unsupported("generateCommitMessage"),
-    generatePrContent: () => unsupported("generatePrContent"),
-    generateBranchName: () => unsupported("generateBranchName"),
-    generateThreadTitle: () => unsupported("generateThreadTitle"),
-    generateReviewGuide: () => unsupported("generateReviewGuide"),
-  };
-};
+import { makeZcodeTextGeneration } from "./zcodeTextGeneration.ts";
 
 export type ZcodeDriverEnv =
   | ZcodeAdapterV2DriverEnv
@@ -185,9 +163,10 @@ export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
       ),
     );
 
-    // Live workspace-config catalogs pushed by the adapter's sessions; keyed
-    // by workspaceId (the session's cwd). readPresentation probes stay the
-    // cold path; these win once a live session seeds the real catalog.
+    // Live workspace-config catalogs pushed by the adapter's sessions win
+    // over readPresentation probes once a real catalog is seeded.
+    // configOptions.mode is not projected to optionDescriptors — the runtime
+    // mode control already drives sendText.mode; a second selector is dead.
     const liveWorkspaceConfigs = new Map<string, ZCodeSchema.WorkspaceConfigState>();
 
     const orchestrationAdapter = yield* makeZcodeAdapterV2({
@@ -460,7 +439,12 @@ export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
           ),
       },
       orchestrationAdapter,
-      textGeneration: makeUnsupportedTextGeneration(),
+      textGeneration: yield* makeZcodeTextGeneration({
+        instanceId,
+        settings: effectiveConfig,
+        environment: processEnv,
+        liveWorkspaceConfigs,
+      }),
     } satisfies ProviderInstance;
   }),
 };

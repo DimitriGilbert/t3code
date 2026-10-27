@@ -108,10 +108,10 @@
     {
       "driver": "zcode",
       "t3CodeRange": ">=0.0.46",
-      "recommendedRange": ">=0.72.0",
+      "recommendedRange": ">=0.17.0",
       "ranges": [
-        { "range": ">=0.72.0", "status": "supported" },
-        { "range": "<0.72.0", "status": "unknown" }
+        { "range": ">=0.17.0", "status": "supported" },
+        { "range": "<0.17.0", "status": "unknown" }
       ]
     }
   ],

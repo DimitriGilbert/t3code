@@ -73,10 +73,9 @@ import {
   type ZcodeAppServerClientOpener,
 } from "./zcodeAppServer.ts";
 import {
-  buildZcodeAccountOverlay,
-  readZcodeCredentialStore,
-  resolveZcodeRequestApiKey,
-} from "./zcodeCredentials.ts";
+  installZcodeRuntimeRequestHandlers,
+  pushZcodeAccountOverlay,
+} from "./zcodeSessionSetup.ts";
 import {
   zcodeApprovalOptions,
   zcodeExecutionStateForRuntimePolicy,
@@ -443,64 +442,21 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           (params) => holdInteractionLeg<ZCodeSchema.ZCodeUserInputResponse>(params.requestId),
         );
 
-        // The CLI asks for runtime preferences on createSession and again on
-        // each sendText; both scopes answer with T3's fixed defaults.
-        yield* client.handleServerRequest(
-          ZCodeRpc.SERVER_REQUEST_METHODS.sessionRequestRuntimePreferences,
-          () =>
-            Effect.succeed({
-              nativeSearchEnhancementsEnabled: false,
-              memoryEnabled: false,
-              askUserQuestionAutoResolutionEnabled: true,
-              modelContextBudgetStrategy: "preflight-v1" as const,
-            }),
-        );
-        // Per model request the CLI needs account auth material; the host
-        // decrypts ~/.zcode credentials locally (never logged).
-        yield* client.handleServerRequest(
-          ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestProviderRuntimeHeaders,
-          (params) =>
-            readZcodeCredentialStore(adapterOptions.environment).pipe(
-              Effect.provideService(FileSystem.FileSystem, fileSystem),
-              Effect.provideService(Path.Path, path),
-              Effect.map((credentials) => {
-                const apiKey = resolveZcodeRequestApiKey(credentials, params.providerId);
-                return apiKey === undefined
-                  ? {
-                      headersApplied: false as const,
-                      errorMessage: `No ZCode credential for provider ${params.providerId}.`,
-                    }
-                  : { headersApplied: true as const, requestAuth: { apiKey } };
-              }),
-            ),
-        );
-
+        yield* installZcodeRuntimeRequestHandlers(client, {
+          environment: adapterOptions.environment,
+          fileSystem,
+          path,
+        });
         // Without the account overlay the registry publishes zero executable
         // models and every sendText fails modelUnavailable. Push once per
         // process; requests self-gate on storage-ready.
-        yield* buildZcodeAccountOverlay({
+        yield* pushZcodeAccountOverlay(client, {
           environment: adapterOptions.environment,
+          fileSystem,
+          path,
           revision: `t3-${input.providerSessionId}`,
-        }).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
-          Effect.flatMap((overlay) =>
-            overlay === undefined
-              ? Effect.logWarning(
-                  "ZCode builtin provider config not found; account overlay skipped.",
-                )
-              : client.request(ZCodeRpc.LEGACY_METHODS.providerUpdateAccountConfig, overlay).pipe(
-                  Effect.andThen(
-                    client.request(ZCodeRpc.LEGACY_METHODS.providerRefreshRegistry, {
-                      reason: "t3-session-open",
-                    }),
-                  ),
-                  Effect.catch((cause) =>
-                    Effect.logWarning("ZCode account overlay push failed", { cause }),
-                  ),
-                ),
-          ),
-        );
+          refreshReason: "t3-session-open",
+        });
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
           id: input.providerSessionId,

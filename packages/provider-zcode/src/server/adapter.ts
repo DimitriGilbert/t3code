@@ -41,6 +41,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -423,6 +424,36 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
         const clientId = `t3-${input.providerSessionId}`;
+
+        // Drain latch for releaseConversation. The process-kill finalizer
+        // registered first inside openClient, so the scope's sequential LIFO
+        // close runs this drain — transport and process still live — before
+        // the kill; releases starting after `draining` skip the wire.
+        const releaseDrain = yield* Ref.make({ draining: false, inFlight: 0 });
+        const releaseDrained = yield* Deferred.make<void>();
+        const enterRelease = Ref.modify(releaseDrain, (state) =>
+          state.draining
+            ? ([false, state] as const)
+            : ([true, { ...state, inFlight: state.inFlight + 1 }] as const),
+        );
+        const exitRelease = Ref.modify(releaseDrain, (state) => {
+          const inFlight = state.inFlight - 1;
+          return [inFlight === 0 && state.draining, { ...state, inFlight }] as const;
+        }).pipe(
+          Effect.flatMap((drained) =>
+            drained ? Deferred.succeed(releaseDrained, undefined) : Effect.void,
+          ),
+          Effect.asVoid,
+        );
+        yield* Scope.addFinalizer(
+          scope,
+          Ref.modify(releaseDrain, (state) => [
+            state.inFlight === 0,
+            { ...state, draining: true },
+          ]).pipe(
+            Effect.flatMap((drained) => (drained ? Effect.void : Deferred.await(releaseDrained))),
+          ),
+        );
 
         // The CLI races each permission/userInput's legacy reverse request
         // against our resolveInteraction; an error response kills the race, so
@@ -2342,20 +2373,31 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           conversations.delete(conversation.sessionId);
           yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
           yield* settleSessionInteractionLegs(conversation.sessionId);
-          if (conversation.subscriptionId !== null) {
-            yield* client
-              .request(ZCodeRpc.V4_METHODS.conversationUnsubscribe, {
-                topic: conversation.topic,
-                subscriptionId: conversation.subscriptionId,
-                connectionId: clientId,
-              })
-              .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
-          }
-          yield* client
-            .request(ZCodeRpc.LEGACY_METHODS.sessionClose, {
-              sessionId: conversation.sessionId,
-            })
-            .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
+          yield* Effect.acquireUseRelease(
+            enterRelease,
+            (entered) =>
+              entered
+                ? Effect.gen(function* () {
+                    if (conversation.subscriptionId !== null) {
+                      yield* client
+                        .request(ZCodeRpc.V4_METHODS.conversationUnsubscribe, {
+                          topic: conversation.topic,
+                          subscriptionId: conversation.subscriptionId,
+                          connectionId: clientId,
+                        })
+                        .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
+                    }
+                    yield* client
+                      .request(ZCodeRpc.LEGACY_METHODS.sessionClose, {
+                        sessionId: conversation.sessionId,
+                      })
+                      .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
+                  })
+                : // Teardown already closed the gate: the process's own death
+                  // cleans sessions server-side, so no wire requests.
+                  Effect.void,
+            (entered) => (entered ? exitRelease : Effect.void),
+          );
         });
 
         const nativeSessionId = (

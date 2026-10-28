@@ -283,6 +283,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as Ref from "effect/Ref";
@@ -1075,6 +1076,294 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         // Past the second bound the unload completes instead of stalling.
         yield* TestClock.adjust("3 seconds");
         yield* Fiber.join(fiber);
+      }),
+    );
+
+    it.effect("drains an in-flight unload before the session scope tears down", () =>
+      Effect.gen(function* () {
+        // Teardown ordering: the drain finalizer (registered after openClient)
+        // runs while the transport is still live, so a release in flight when
+        // the scope closes gets real responses — no dead requests, no stall.
+        // Releases arriving after `draining` skip the wire entirely.
+        const fileSystem = yield* FileSystem.FileSystem;
+        const zcodeHome = yield* fileSystem.makeTempDirectory();
+        const environment: NodeJS.ProcessEnv = { ZCODE_HOME: zcodeHome };
+
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "unload drained across session-scope close",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 1,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psD",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 1,
+                result: {
+                  commandId: "c1",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "createSession", sessionId: "s1" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s1",
+                  connectionId: "t3-psD",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 2,
+                result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(1, { kind: "snapshot", snapshot: snapshotFrame }, "initial"),
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psD",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 2,
+                  result: { type: "createSession", sessionId: "s2" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s2",
+                  connectionId: "t3-psD",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: { ack: { subscriptionId: "sub2", mode: "snapshot", logEpoch: "e2" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                1,
+                {
+                  kind: "snapshot",
+                  snapshot: { ...snapshotFrame, sessionId: "s2", logEpoch: "e2" },
+                },
+                "initial",
+                "conversation/s2",
+                "sub2",
+              ),
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 5,
+                method: "v4/conversation/unsubscribe",
+                params: {
+                  topic: "conversation/s1",
+                  subscriptionId: "sub1",
+                  connectionId: "t3-psD",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "unsubscribe-response",
+              frame: { id: 5, result: {} },
+            },
+            {
+              type: "expect_outbound",
+              frame: { id: 6, method: "session/close", params: { sessionId: "s1" } },
+            },
+            { type: "emit_inbound", frame: { id: 6, result: { closed: true } } },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const unsubscribeResponseGate = yield* Deferred.make<void>();
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+          beforeEmitInbound: (entry) =>
+            entry.label === "unsubscribe-response"
+              ? Deferred.await(unsubscribeResponseGate)
+              : Effect.void,
+        });
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment,
+          openClient,
+        });
+        const sessionScope = yield* Scope.make();
+        const runtimePolicy = {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/tmp/ws",
+          reasoningEffort: "low",
+        } as never;
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-d1" as never,
+            providerSessionId: "psD" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, sessionScope));
+        const providerThread1 = yield* runtime.ensureThread({
+          threadId: "thread-d1" as never,
+          modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+          runtimePolicy,
+        });
+        const providerThread2 = yield* runtime.ensureThread({
+          threadId: "thread-d2" as never,
+          modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+          runtimePolicy,
+        });
+
+        const unloadThread = runtime.unloadThread;
+        if (unloadThread === undefined) return yield* Effect.die("unloadThread unsupported");
+        // Cursor index of the gated emit: the s1 unsubscribe went out and its
+        // response is held back.
+        const gatedCursor = transcript.entries.length - 3;
+
+        const unloadFiber = yield* unloadThread({ providerThread: providerThread1 }).pipe(
+          Effect.forkScoped,
+        );
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        let st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, gatedCursor);
+        assert.isUndefined(unloadFiber.pollUnsafe(), "s1 unload should still be in flight");
+
+        // Teardown starts mid-release: the drain latch holds the scope close.
+        const closeFiber = yield* Scope.close(sessionScope, Exit.void).pipe(Effect.forkScoped);
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        assert.isUndefined(closeFiber.pollUnsafe(), "scope close should wait on the drain");
+
+        // A release arriving after `draining` evicts locally but never hits
+        // the wire — anything queued here would fail the next expect_outbound.
+        const unload2Fiber = yield* unloadThread({ providerThread: providerThread2 }).pipe(
+          Effect.forkScoped,
+        );
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, gatedCursor);
+        const unload2Exit = unload2Fiber.pollUnsafe();
+        assert.isTrue(
+          unload2Exit !== undefined && Exit.isSuccess(unload2Exit),
+          "post-teardown unloadThread should return without touching the wire",
+        );
+        assert.isUndefined(unloadFiber.pollUnsafe(), "s1 unload should still be gated");
+        assert.isUndefined(closeFiber.pollUnsafe(), "scope close should still be draining");
+
+        // The gated response lands on the still-live transport; s1's release
+        // finishes, the drain resolves, and the close completes behind it.
+        yield* Deferred.succeed(unsubscribeResponseGate, undefined);
+        yield* Fiber.join(closeFiber);
+        yield* Fiber.join(unloadFiber);
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
       }),
     );
 

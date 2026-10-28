@@ -254,11 +254,18 @@ interface PendingInteractionRecord {
 }
 
 interface HeldInteractionLeg {
+  readonly sessionId: string;
+  /** Deny/decline response sent if the session is released before settling. */
+  readonly expiredResponse: unknown;
   readonly deferred: Deferred.Deferred<unknown>;
 }
 
 /** Bounded so an abandoned interaction can't grow it without limit. */
 const SETTLED_RESPONSE_CACHE_LIMIT = 256;
+
+// The app-server can be mid-teardown while these requests are in flight;
+// bound them under the caller's unload budget so unloadThread never stalls.
+const ZCODE_RELEASE_REQUEST_TIMEOUT = "2 seconds" as const;
 
 interface ZcodeConversation {
   readonly sessionId: string;
@@ -438,23 +445,55 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           heldInteractionLegs.delete(interactionId);
           for (const leg of legs) yield* Deferred.succeed(leg.deferred, response);
         });
-        const holdInteractionLeg = Effect.fnUntraced(function* <A>(interactionId: string) {
+        // A released session can never resolve its interactions; free the
+        // held handler fibers (and the CLI's pending legs) instead of
+        // parking them for the connection's lifetime.
+        const settleSessionInteractionLegs = Effect.fnUntraced(function* (sessionId: string) {
+          const released: Array<[HeldInteractionLeg, string]> = [];
+          for (const [interactionId, legs] of heldInteractionLegs) {
+            const owned = legs.filter((leg) => leg.sessionId === sessionId);
+            if (owned.length === 0) continue;
+            const remaining = legs.filter((leg) => leg.sessionId !== sessionId);
+            if (remaining.length === 0) heldInteractionLegs.delete(interactionId);
+            else heldInteractionLegs.set(interactionId, remaining);
+            for (const leg of owned) released.push([leg, interactionId]);
+          }
+          for (const [leg, interactionId] of released) {
+            rememberSettledResponse(interactionId, leg.expiredResponse);
+            yield* Deferred.succeed(leg.deferred, leg.expiredResponse).pipe(Effect.ignore);
+          }
+        });
+        const holdInteractionLeg = Effect.fnUntraced(function* <A>(
+          interactionId: string,
+          sessionId: string,
+          expiredResponse: unknown,
+        ) {
           const settled = settledInteractionResponses.get(interactionId) as A | undefined;
           if (settled !== undefined) return settled;
           const deferred = yield* Deferred.make<unknown>();
           const legs = heldInteractionLegs.get(interactionId) ?? [];
-          legs.push({ deferred });
+          legs.push({ sessionId, expiredResponse, deferred });
           heldInteractionLegs.set(interactionId, legs);
           return (yield* Deferred.await(deferred)) as A;
         });
         // params.requestId is the pending interaction's interactionId.
         yield* client.handleServerRequest(
           ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestPermission,
-          (params) => holdInteractionLeg<ZCodeSchema.ZCodePermissionResponse>(params.requestId),
+          (params) =>
+            holdInteractionLeg<ZCodeSchema.ZCodePermissionResponse>(
+              params.requestId,
+              params.sessionId,
+              { decision: "deny", reason: zcodePermissionDeniedReason() },
+            ),
         );
         yield* client.handleServerRequest(
           ZCodeRpc.SERVER_REQUEST_METHODS.interactionRequestUserInput,
-          (params) => holdInteractionLeg<ZCodeSchema.ZCodeUserInputResponse>(params.requestId),
+          (params) =>
+            holdInteractionLeg<ZCodeSchema.ZCodeUserInputResponse>(
+              params.requestId,
+              params.sessionId,
+              { action: "decline" },
+            ),
         );
 
         yield* installZcodeRuntimeRequestHandlers(client, {
@@ -2296,6 +2335,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         // Release our subscription + evict the resident runtime; the durable
         // session record stays (session/close is not deleteSession).
         const releaseConversation = Effect.fnUntraced(function* (conversation: ZcodeConversation) {
+          // Evict first: a hung or dead release must not leave a stale
+          // subscribed entry behind (same wedge class as the subscribe
+          // failure path in ensureConversation). Unblock firstSnapshot
+          // waiters and free held interaction legs for this session.
+          conversations.delete(conversation.sessionId);
+          yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
+          yield* settleSessionInteractionLegs(conversation.sessionId);
           if (conversation.subscriptionId !== null) {
             yield* client
               .request(ZCodeRpc.V4_METHODS.conversationUnsubscribe, {
@@ -2303,14 +2349,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 subscriptionId: conversation.subscriptionId,
                 connectionId: clientId,
               })
-              .pipe(Effect.ignore);
+              .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
           }
-          conversations.delete(conversation.sessionId);
           yield* client
             .request(ZCodeRpc.LEGACY_METHODS.sessionClose, {
               sessionId: conversation.sessionId,
             })
-            .pipe(Effect.ignore);
+            .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
         });
 
         const nativeSessionId = (

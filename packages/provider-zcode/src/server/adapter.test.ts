@@ -6017,5 +6017,607 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         assert.equal(st.cursor, transcript.entries.length);
       }),
     );
+
+    it.effect("settles adopted turns when a recovery snapshot reports the session ended", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "sessionEnded rides the snapshot, not a terminal row",
+          entries: [
+            ...seededSessionEntries("t3-psR"),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psR",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "sendText",
+                  payload: {
+                    text: "work",
+                    requestedDelivery: "startNow",
+                    heldQueueDisposition: "keepQueueAndSend",
+                    mode: "build",
+                    planEnabled: false,
+                    modelSelection: {
+                      providerId: PROVIDER_ID,
+                      modelId: MODEL_ID,
+                      options: { reasoningLevel: "low" },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 40,
+                      createdAt: 1735689603000,
+                      createdAtSeq: 10,
+                      turnId: "turn-9",
+                      kind: "turnHeader",
+                      origin: "userInput",
+                      state: "running",
+                      startedAt: 1735689603000,
+                      sourceCommandId: "<sendText-commandId>",
+                    },
+                  },
+                ],
+              }),
+            },
+            // Publisher restart: the session ended while frames were missed.
+            // The recovery snapshot's window does not carry a terminal
+            // turnHeader for the adopted turn — control.sessionEnded is the
+            // state truth that must settle it.
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                3,
+                {
+                  kind: "snapshot",
+                  snapshot: {
+                    ...rollbackSnapshot,
+                    seq: 3,
+                    revision: 3,
+                  },
+                },
+                "recovery",
+              ),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const sentCommandId = yield* Ref.make<string | undefined>(undefined);
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+          onOutbound: (actual) => {
+            const frame = actual as {
+              method?: string;
+              params?: { type?: string; commandId?: string };
+            };
+            return frame.method === "v4/command" && frame.params?.type === "sendText"
+              ? Ref.set(sentCommandId, frame.params.commandId)
+              : Effect.void;
+          },
+          beforeEmitInbound: (entry) =>
+            Ref.get(sentCommandId).pipe(
+              Effect.andThen((commandId) =>
+                Effect.sync(() => {
+                  const params = (
+                    entry.frame as {
+                      params?: {
+                        frame?: {
+                          payload?: { deltas?: Array<{ row?: Record<string, unknown> }> };
+                        };
+                      };
+                    }
+                  ).params?.frame?.payload;
+                  for (const delta of params?.deltas ?? []) {
+                    if (delta.row?.sourceCommandId === "<sendText-commandId>") {
+                      delta.row.sourceCommandId = commandId;
+                    }
+                  }
+                }),
+              ),
+            ),
+        });
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psR" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        const awaitEvent = Effect.fnUntraced(function* (
+          predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+        ) {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (predicate(event)) return event;
+          }
+        });
+        yield* runtime.readThreadSnapshot({ providerThread });
+        yield* runtime.startTurn({
+          appThread: {
+            id: "thread-1",
+            title: "Parent thread",
+            lineage: { rootThreadId: "thread-1" },
+            modelSelection: { instanceId: "zcode-test", model: `${PROVIDER_ID}/${MODEL_ID}` },
+          } as never,
+          threadId: "thread-1" as never,
+          runId: "run-1" as never,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: "attempt-1" as never,
+          rootNodeId: "node-1" as never,
+          providerThread,
+          message: {
+            messageId: "msg-1" as never,
+            text: "work",
+            attachments: [],
+            createdBy: null,
+            creationSource: "web",
+          } as never,
+          modelSelection: sessionOpenInput.modelSelection,
+          runtimePolicy: sessionOpenInput.runtimePolicy,
+        });
+        yield* awaitEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        const terminal = yield* awaitEvent((event) => event.type === "turn.terminal");
+        assert.equal(terminal.type === "turn.terminal" ? terminal.status : undefined, "completed");
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("projects the wire goal state surface onto the provider thread", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "goal patch drives providerThread.goal",
+          entries: [
+            ...seededSessionEntries("t3-psG"),
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "state.updated",
+                    patch: {
+                      goal: {
+                        objective: "Ship the feature",
+                        status: "active",
+                        iteration: 1,
+                        verifications: [],
+                      },
+                    },
+                  },
+                ],
+              }),
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(3, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "state.updated",
+                    patch: {
+                      goal: {
+                        objective: "Ship the feature",
+                        status: "verified",
+                        iteration: 1,
+                        verifications: [
+                          { iteration: 1, outcome: "pass", at: 1735689600000, anchorRowId: null },
+                        ],
+                      },
+                    },
+                  },
+                ],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psG" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        const awaitGoal = Effect.fnUntraced(function* (
+          predicate: (goal: OrchestrationV2ProviderThread["goal"]) => boolean,
+        ) {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (event.type === "provider_thread.updated" && predicate(event.providerThread.goal)) {
+              return event.providerThread.goal;
+            }
+          }
+        });
+        const active = yield* awaitGoal((goal) => goal?.status === "active");
+        assert.equal(active?.objective, "Ship the feature");
+        const complete = yield* awaitGoal((goal) => goal?.status === "complete");
+        assert.equal(complete?.checks, 1);
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("pins interrupt stops to the turn's published foreground execution", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "interrupt carries expectedForegroundExecutionId",
+          entries: [
+            ...seededSessionEntries("t3-psI"),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psI",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "sendText",
+                  payload: {
+                    text: "work",
+                    requestedDelivery: "startNow",
+                    heldQueueDisposition: "keepQueueAndSend",
+                    mode: "build",
+                    planEnabled: false,
+                    modelSelection: {
+                      providerId: PROVIDER_ID,
+                      modelId: MODEL_ID,
+                      options: { reasoningLevel: "low" },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 40,
+                      createdAt: 1735689603000,
+                      createdAtSeq: 10,
+                      turnId: "turn-9",
+                      kind: "turnHeader",
+                      origin: "userInput",
+                      state: "running",
+                      startedAt: 1735689603000,
+                      sourceCommandId: "<sendText-commandId>",
+                    },
+                  },
+                  {
+                    op: "state.updated",
+                    patch: {
+                      control: {
+                        ...snapshotFrame.control,
+                        canStop: true,
+                        stopState: "stoppable",
+                        stopTargetKind: "assistant",
+                        activeWorks: [
+                          {
+                            kind: "primaryTurn",
+                            foregroundExecutionId: "fe-9",
+                            sourceCommandId: "<sendText-commandId>",
+                            startedAt: 1735689600000,
+                          },
+                        ],
+                      },
+                    },
+                  },
+                ],
+              }),
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psI",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "stop",
+                  payload: { expectedForegroundExecutionId: "fe-9" },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: { commandId: "c4", status: "accepted", revisionAtDecision: 2 },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(3, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 40,
+                      createdAt: 1735689603000,
+                      createdAtSeq: 10,
+                      turnId: "turn-9",
+                      kind: "turnHeader",
+                      origin: "userInput",
+                      state: "completedInterrupted",
+                      startedAt: 1735689603000,
+                      endedAt: 1735689608000,
+                      sourceCommandId: "<sendText-commandId>",
+                    },
+                  },
+                ],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const sentCommandId = yield* Ref.make<string | undefined>(undefined);
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+          onOutbound: (actual) => {
+            const frame = actual as {
+              method?: string;
+              params?: { type?: string; commandId?: string };
+            };
+            return frame.method === "v4/command" && frame.params?.type === "sendText"
+              ? Ref.set(sentCommandId, frame.params.commandId)
+              : Effect.void;
+          },
+          beforeEmitInbound: (entry) =>
+            Ref.get(sentCommandId).pipe(
+              Effect.andThen((commandId) =>
+                Effect.sync(() => {
+                  const params = (
+                    entry.frame as {
+                      params?: {
+                        frame?: {
+                          payload?: {
+                            deltas?: Array<{
+                              row?: Record<string, unknown>;
+                              patch?: {
+                                control?: { activeWorks?: Array<Record<string, unknown>> };
+                              };
+                            }>;
+                          };
+                        };
+                      };
+                    }
+                  ).params?.frame?.payload;
+                  for (const delta of params?.deltas ?? []) {
+                    if (delta.row?.sourceCommandId === "<sendText-commandId>") {
+                      delta.row.sourceCommandId = commandId;
+                    }
+                    for (const work of delta.patch?.control?.activeWorks ?? []) {
+                      if (work.sourceCommandId === "<sendText-commandId>") {
+                        work.sourceCommandId = commandId;
+                      }
+                    }
+                  }
+                }),
+              ),
+            ),
+        });
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psI" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        yield* runtime.readThreadSnapshot({ providerThread });
+        yield* runtime.startTurn({
+          appThread: {
+            id: "thread-1",
+            title: "Parent thread",
+            lineage: { rootThreadId: "thread-1" },
+            modelSelection: { instanceId: "zcode-test", model: `${PROVIDER_ID}/${MODEL_ID}` },
+          } as never,
+          threadId: "thread-1" as never,
+          runId: "run-1" as never,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: "attempt-1" as never,
+          rootNodeId: "node-1" as never,
+          providerThread,
+          message: {
+            messageId: "msg-1" as never,
+            text: "work",
+            attachments: [],
+            createdBy: null,
+            creationSource: "web",
+          } as never,
+          modelSelection: sessionOpenInput.modelSelection,
+          runtimePolicy: sessionOpenInput.runtimePolicy,
+        });
+        const providerTurnId = yield* Effect.gen(function* () {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.status === "running" &&
+              event.providerTurn.nativeTurnRef?.nativeId === "turn-9"
+            ) {
+              return event.providerTurn.id;
+            }
+          }
+        });
+        yield* runtime.interruptTurn({ providerThread, providerTurnId });
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("does not page deleted-branch history after a whole-branch row.removed", () =>
+      Effect.gen(function* () {
+        const seeded = seededSessionEntries("t3-psW");
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "row.removed whole-branch rewind resets paging anchors",
+          entries: [
+            ...seeded.slice(0, -1),
+            {
+              type: "emit_inbound",
+              frame: wireFrame(
+                1,
+                {
+                  kind: "snapshot",
+                  snapshot: {
+                    ...snapshotFrame,
+                    rows: {
+                      window: [
+                        {
+                          rowId: 8,
+                          createdAt: 1735689600000,
+                          createdAtSeq: 1,
+                          turnId: "t-old",
+                          kind: "turnHeader",
+                          origin: "userInput",
+                          state: "completedSuccess",
+                          startedAt: 1735689600000,
+                          endedAt: 1735689600100,
+                        },
+                        {
+                          rowId: 9,
+                          createdAt: 1735689600001,
+                          createdAtSeq: 2,
+                          turnId: "t-old",
+                          kind: "assistantText",
+                          text: "dead branch text",
+                          state: "complete",
+                        },
+                      ],
+                      totalCount: 10,
+                      firstRowId: 8,
+                    },
+                  },
+                },
+                "initial",
+              ),
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [{ op: "row.removed", fromRowId: 1 }],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psW" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        // The turnHeader truncation emits retainedNativeTurnIds — the sync
+        // point that proves row.removed has been applied.
+        yield* Effect.gen(function* () {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (
+              event.type === "provider_thread.updated" &&
+              event.retainedNativeTurnIds !== undefined
+            ) {
+              break;
+            }
+          }
+        });
+        // With stale anchors the read would issue a rowsRange page for the
+        // deleted branch — an outbound frame this transcript never expects.
+        const snapshot = yield* runtime.readThreadSnapshot({ providerThread });
+        assert.equal(snapshot.providerTurns.length, 0);
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
   },
 );

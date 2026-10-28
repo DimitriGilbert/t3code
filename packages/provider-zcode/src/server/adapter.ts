@@ -89,6 +89,7 @@ import {
   zcodePermissionDeniedReason,
   zcodePermissionRpcResponse,
   zcodeProjectedQuestions,
+  zcodeProviderGoal,
   zcodeProviderTurnStatus,
   zcodeReportedModelSelection,
   zcodeResolveModelSelection,
@@ -233,6 +234,10 @@ interface ActiveZcodeTurn {
   readonly projectionThreadId: ThreadId;
   readonly projectionRunId: ProviderAdapter.ProviderAdapterV2TurnInput["runId"] | null;
   readonly rootNodeId: NodeId;
+  // The sendText/compact commandId that admitted this turn — matches
+  // `control.activeWorks[].sourceCommandId`, which is how a late stop
+  // names the execution it means (expectedForegroundExecutionId).
+  readonly sourceCommandId: string | undefined;
   // Observed turns only: nativeItemId the root_turn node was derived from.
   readonly rootNativeItemId?: string;
   readonly startedAt: DateTime.Utc;
@@ -957,12 +962,14 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
           nativeTurnId: string,
           startedAt: DateTime.Utc,
+          sourceCommandId?: string,
         ) {
           const existing = conversation.turns.get(nativeTurnId);
           if (existing !== undefined) return existing;
           const turn: ActiveZcodeTurn = {
             input: turnInput,
             nativeTurnId,
+            sourceCommandId,
             providerTurnId: idAllocator.derive.providerTurn({
               driver: ZCODE_PROVIDER,
               nativeTurnId,
@@ -1013,6 +1020,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           const turn: ActiveZcodeTurn = {
             input: null,
             nativeTurnId,
+            sourceCommandId: undefined,
             providerTurnId: idAllocator.derive.providerTurn({
               driver: ZCODE_PROVIDER,
               nativeTurnId,
@@ -1569,6 +1577,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 pending,
                 row.turnId,
                 DateTime.makeUnsafe(row.startedAt),
+                sourceCommandId,
               );
             }
             // 修复：observed 投影同样适用于根线程 —— 上游或其他客户端
@@ -2098,6 +2107,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               ...conversation.providerThread,
               status,
               updatedAt,
+              // Codex parity: the wire `goal` state surface drives the
+              // thread's goal card; it rides patches, not rows.
+              goal: zcodeProviderGoal(conversation.goal),
               ...(reportedModel === undefined
                 ? {}
                 : {
@@ -2182,6 +2194,21 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           }
         });
 
+        // `sessionEnded` is a state truth, not a row: turns whose terminal
+        // turnHeader never arrives (recovery after missed frames) stay open
+        // otherwise — the same zombie class as dropped subagents.
+        const finalizeEndedSessionTurns = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+        ) {
+          if (conversation.control?.sessionEnded !== true) return;
+          for (const turn of conversation.turns.values()) {
+            if (!turn.terminalEmitted) {
+              const at = yield* DateTime.now;
+              yield* finalizeTurn(conversation, turn, "completed", at);
+            }
+          }
+        });
+
         const applySnapshot = Effect.fnUntraced(function* (
           conversation: ZcodeConversation,
           snapshot: ZCodeSchema.ConversationSnapshot,
@@ -2204,6 +2231,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           yield* inspectActiveWorksForForeignStart(conversation, snapshot.control);
           yield* syncInteractions(conversation, snapshot.pendingInteractions);
           for (const row of snapshot.rows.window) yield* projectRow(conversation, row);
+          yield* finalizeEndedSessionTurns(conversation);
           yield* reconcileEndedSubagents(conversation);
           yield* emitProviderThread(conversation);
           yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
@@ -2215,17 +2243,36 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         ): Effect.fn.Return<void, IdAllocator.IdAllocatorV2AllocationError> {
           if (delta.op === "row.appended" || delta.op === "row.upserted") {
             conversation.rows.set(delta.row.rowId, delta.row);
+            // Same interval accounting as upstream apply.ts: appends grow
+            // the total row count and seed the first-row anchor once.
+            if (delta.op === "row.appended") {
+              conversation.rowsTotalCount += 1;
+              conversation.rowsFirstRowId ??= delta.row.rowId;
+            }
             yield* projectRow(conversation, delta.row);
             return;
           }
           if (delta.op === "row.removed") {
             let removedTurnBoundary = false;
+            let removedCount = 0;
             for (const [rowId, row] of conversation.rows) {
               if (rowId >= delta.fromRowId) {
                 if (row.kind === "turnHeader") removedTurnBoundary = true;
                 conversation.rows.delete(rowId);
+                removedCount += 1;
               }
             }
+            // Upstream apply.ts keeps the paging anchor honest: a rewind
+            // that cuts the entire active branch resets count + firstRowId
+            // (old firstRowId would read as a loadable gap); a partial
+            // trim only shrinks the count.
+            const removesEntireActiveBranch =
+              conversation.rowsFirstRowId !== null &&
+              delta.fromRowId <= conversation.rowsFirstRowId;
+            conversation.rowsTotalCount = removesEntireActiveBranch
+              ? 0
+              : Math.max(0, conversation.rowsTotalCount - removedCount);
+            if (removesEntireActiveBranch) conversation.rowsFirstRowId = null;
             // Upstream only truncates on a committed conversation rewind
             // (edit/retry/fork-cut); report the surviving turn ids so T3
             // retires the rewound runs (rollBackRewoundRuns).
@@ -2286,14 +2333,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             if (patch.revision !== undefined) conversation.revision = patch.revision;
             if (patch.control !== undefined) {
               yield* inspectActiveWorksForForeignStart(conversation, patch.control);
-              if (patch.control.sessionEnded) {
-                for (const turn of conversation.turns.values()) {
-                  if (!turn.terminalEmitted) {
-                    const at = yield* DateTime.now;
-                    yield* finalizeTurn(conversation, turn, "completed", at);
-                  }
-                }
-              }
+              yield* finalizeEndedSessionTurns(conversation);
             }
             if (patch.inputRouting !== undefined) conversation.inputRouting = patch.inputRouting;
             if (patch.queue !== undefined) {
@@ -2314,7 +2354,8 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             if (
               patch.control !== undefined ||
               patch.usage !== undefined ||
-              patch.config !== undefined
+              patch.config !== undefined ||
+              patch.goal !== undefined
             ) {
               yield* emitProviderThread(conversation);
             }
@@ -3301,7 +3342,27 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   `Provider turn ${interruptInput.providerTurnId} is not active on ZCode session ${sessionId}.`,
                 );
               }
-              const { ack } = yield* sendCommand({ sessionId, type: "stop", payload: {} });
+              // expectedForegroundExecutionId guards the renderer→host async
+              // window: without it a late stop aborts whatever newer
+              // execution replaced ours. activeWorks attributes it by our
+              // sendText commandId (transcript 04).
+              const expectedExecutionId =
+                turn.sourceCommandId === undefined
+                  ? undefined
+                  : conversation.control?.activeWorks.find(
+                      (work) => work.sourceCommandId === turn.sourceCommandId,
+                    )?.foregroundExecutionId;
+              const { ack } = yield* sendCommand({
+                sessionId,
+                type: "stop",
+                payload:
+                  expectedExecutionId === undefined
+                    ? {}
+                    : { expectedForegroundExecutionId: expectedExecutionId },
+              });
+              // noop (guard.stopTargetChanged): the execution we meant is
+              // already gone upstream — the interrupt is moot, not failed.
+              if (ack.status === "noop") return;
               if (ack.status !== "accepted" && ack.status !== "duplicate") {
                 return yield* protocolError(
                   `ZCode rejected stop: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,

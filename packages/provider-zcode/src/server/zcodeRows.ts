@@ -6,6 +6,7 @@
  */
 import type {
   ModelSelection,
+  OrchestrationV2ProviderGoal,
   OrchestrationV2TurnItem,
   ProviderApprovalDecision,
   ProviderApprovalOption,
@@ -147,6 +148,31 @@ export function zcodeTimelineMarkerText(marker: ZCodeSchema.TimelineMarkerPayloa
       return unreachable;
     }
   }
+}
+
+/**
+ * Wire `goal` → the providerThread goal card (Codex parity). The target
+ * stays live through `verifying`/`notSatisfied`; `failed` is terminal too,
+ * and T3's enum has no "failed", so it folds into "complete".
+ */
+export function zcodeProviderGoal(
+  goal: ZCodeSchema.GoalState | null,
+): OrchestrationV2ProviderGoal | null {
+  if (goal === null) return null;
+  const objective = goal.objective.trim();
+  if (objective.length === 0) return null;
+  const status =
+    goal.status === "paused"
+      ? "paused"
+      : goal.status === "verified" || goal.status === "failed"
+        ? "complete"
+        : "active";
+  return {
+    objective,
+    status,
+    timeUsedSeconds: Math.max(0, goal.timeUsedSeconds ?? 0),
+    ...(goal.verifications.length > 0 ? { checks: goal.verifications.length } : {}),
+  };
 }
 
 export function zcodeProviderTurnStatus(

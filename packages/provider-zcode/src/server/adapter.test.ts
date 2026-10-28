@@ -281,7 +281,10 @@ it("renders timeline markers into user-facing text", () => {
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Ref from "effect/Ref";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -838,6 +841,240 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
           `cursor=${st.cursor} events=${JSON.stringify(seen)}`,
         );
         assert.isTrue(seen.includes("turn.terminal"), JSON.stringify(seen));
+      }),
+    );
+
+    it.effect("unloadThread finishes when the app-server never answers release requests", () =>
+      Effect.gen(function* () {
+        // The provider-session scope release kills the app-server while the
+        // idle unloader is still working: unsubscribe/sessionClose then go
+        // unanswered. unloadThread must bound those requests rather than
+        // stall the caller's unload budget (the live `10s` TimeoutError).
+        const fileSystem = yield* FileSystem.FileSystem;
+        const zcodeHome = yield* fileSystem.makeTempDirectory();
+        yield* fileSystem.makeDirectory(`${zcodeHome}/v2/runtime/provider/bundled`, {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(
+          `${zcodeHome}/v2/runtime/provider/bundled/zcode-builtin.json`,
+          JSON.stringify({
+            schemaVersion: 1,
+            revision: 7,
+            config: {
+              providerConfigRules: {
+                providerRules: [
+                  {
+                    providerId: PROVIDER_ID,
+                    providerName: "ZAI",
+                    config: {
+                      access: {
+                        type: "zhipu-account",
+                        accountType: "zai",
+                        mode: "individual-coding-plan",
+                      },
+                      builtinModelIds: [MODEL_ID],
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+        );
+        yield* fileSystem.writeFileString(`${zcodeHome}/v2/credentials.json`, "{}");
+        yield* fileSystem.writeFileString(`${zcodeHome}/v2/provider_config.json`, "{}");
+        yield* fileSystem.writeFileString(`${zcodeHome}/v2/setting.json`, "{}");
+        const environment: NodeJS.ProcessEnv = { ZCODE_HOME: zcodeHome };
+        const overlay = yield* buildZcodeAccountOverlay({ environment, revision: "t3-psU" });
+        if (overlay === undefined) return yield* Effect.die("overlay unresolved");
+
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "unload during app-server teardown",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: { id: 1, method: "provider/updateAccountConfig", params: overlay },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 1,
+                result: { receivedRevision: "t3-psU", providerCount: 1, status: "received" },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "provider/refreshRegistry",
+                params: { reason: "t3-session-open" },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 2, result: { refreshed: true } } },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psU",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "createSession", sessionId: "s1" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s1",
+                  connectionId: "t3-psU",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(1, { kind: "snapshot", snapshot: snapshotFrame }, "initial"),
+            },
+            // The release requests go out but the process is already draining;
+            // neither ever gets a response.
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 5,
+                method: "v4/conversation/unsubscribe",
+                params: {
+                  topic: "conversation/s1",
+                  subscriptionId: "sub1",
+                  connectionId: "t3-psU",
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: { id: 6, method: "session/close", params: { sessionId: "s1" } },
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment,
+          openClient,
+        });
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-u" as never,
+            providerSessionId: "psU" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy: {
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: "/tmp/ws",
+              reasoningEffort: "low",
+            } as never,
+          })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread({
+          threadId: "thread-u" as never,
+          modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+          runtimePolicy: {
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/tmp/ws",
+            reasoningEffort: "low",
+          } as never,
+        });
+
+        const unloadThread = runtime.unloadThread;
+        if (unloadThread === undefined) return yield* Effect.die("unloadThread unsupported");
+        const fiber = yield* unloadThread({ providerThread }).pipe(Effect.forkScoped);
+        const pending = Effect.timeoutOrElse(Fiber.join(fiber), {
+          duration: Duration.zero,
+          orElse: () => Effect.succeed("pending" as const),
+        });
+        // The unsubscribe request goes out and stays unanswered.
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        let st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length - 1);
+        assert.equal(yield* pending, "pending");
+        // Its bound fires; sessionClose goes out — also unanswered.
+        yield* TestClock.adjust("3 seconds");
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+        assert.equal(yield* pending, "pending");
+        // Past the second bound the unload completes instead of stalling.
+        yield* TestClock.adjust("3 seconds");
+        yield* Fiber.join(fiber);
       }),
     );
 

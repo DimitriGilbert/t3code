@@ -622,8 +622,15 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             readonly rootNodeId: NodeId;
             readonly startedAt: DateTime.Utc;
             readonly ordinal: number;
+            readonly nativeTurnId: string;
+            readonly childSessionId: string | undefined;
+            readonly subagentType: string;
           }
         >();
+        // Children T3 knows are running — the wire's `subagents` state
+        // drops them on completion without a terminal row, so reconcile
+        // marks them ended instead of leaving "running" zombies.
+        const runningSubagentChildren = new Set<string>();
         // T3 threads this session has seen by id — lets cold-restored
         // conversations recover their appThread without a new lookup.
         const knownAppThreads = new Map<ThreadId, OrchestrationV2AppThread>();
@@ -1201,6 +1208,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   rootNodeId: turn.rootNodeId,
                   startedAt: turn.startedAt,
                   ordinal: itemOrdinal(turn, nativeItemId),
+                  nativeTurnId: row.turnId,
+                  childSessionId: row.childSessionId,
+                  subagentType: row.subagentType,
                 }
               : subagentAnchors.get(subagentNodeId);
           if (projection === undefined) {
@@ -1227,6 +1237,13 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   : "cancelled";
           const completed = status !== "running";
           const childSessionId = row.childSessionId;
+          if (childSessionId !== undefined) {
+            if (status === "running") {
+              runningSubagentChildren.add(childSessionId);
+            } else {
+              runningSubagentChildren.delete(childSessionId);
+            }
+          }
           const childThreadId =
             childSessionId === undefined
               ? null
@@ -1426,6 +1443,111 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           };
           yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
           yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+        });
+
+        // Completion rides the `subagents` state, not always a terminal
+        // row: an ended child simply leaves the running list. Reconcile
+        // that into a terminal projection — the zombies otherwise stick.
+        const reconcileEndedSubagents = Effect.fnUntraced(function* (
+          conversation: ZcodeConversation,
+        ) {
+          const subagents = conversation.subagents;
+          if (subagents === undefined || runningSubagentChildren.size === 0) return;
+          const runningIds = new Set(subagents.running.map((summary) => summary.childSessionId));
+          for (const childSessionId of runningSubagentChildren) {
+            if (runningIds.has(childSessionId)) continue;
+            runningSubagentChildren.delete(childSessionId);
+            const projected = projectedChildren.get(childSessionId);
+            if (projected === undefined) continue;
+            const nativeItemId = projected.observedRootNativeItemId.replace(/:thread-root$/, "");
+            const subagentNodeId = idAllocator.derive.nodeFromProviderItem({
+              driver: ZCODE_PROVIDER,
+              nativeItemId,
+            });
+            const anchor = subagentAnchors.get(subagentNodeId);
+            if (anchor === undefined) continue;
+            const at = yield* DateTime.now;
+            const phase = conversations.get(childSessionId)?.control?.phase;
+            const status =
+              phase === "error"
+                ? "failed"
+                : phase === "completedInterrupted"
+                  ? "cancelled"
+                  : "completed";
+            const providerTurnId = idAllocator.derive.providerTurn({
+              driver: ZCODE_PROVIDER,
+              nativeTurnId: anchor.nativeTurnId,
+            });
+            const childThreadId = projected.providerThread.appThreadId;
+            const subagent: OrchestrationV2Subagent = {
+              id: subagentNodeId,
+              threadId: anchor.threadId,
+              runId: anchor.runId,
+              parentNodeId: anchor.rootNodeId,
+              origin: "provider_native",
+              createdBy: "agent",
+              driver: ZCODE_PROVIDER,
+              providerInstanceId: adapterOptions.instanceId,
+              providerThreadId: projected.providerThread.id,
+              childThreadId,
+              nativeTaskRef: conversationRef(nativeItemId),
+              prompt: "",
+              title: anchor.subagentType,
+              model: null,
+              status,
+              result: null,
+              startedAt: anchor.startedAt,
+              completedAt: at,
+              updatedAt: at,
+            };
+            yield* emit({ type: "subagent.updated", driver: ZCODE_PROVIDER, subagent });
+            const node: OrchestrationV2ExecutionNode = {
+              id: subagentNodeId,
+              threadId: anchor.threadId,
+              runId: anchor.runId,
+              parentNodeId: anchor.rootNodeId,
+              rootNodeId: anchor.rootNodeId,
+              kind: "subagent",
+              status: rowStatusToNodeStatus(status),
+              countsForRun: false,
+              providerThreadId: conversation.providerThread.id,
+              providerTurnId,
+              nativeItemRef: conversationRef(nativeItemId),
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: anchor.startedAt,
+              completedAt: at,
+            };
+            const turnItem: OrchestrationV2TurnItem = {
+              id: idAllocator.derive.turnItemFromProviderItem({
+                driver: ZCODE_PROVIDER,
+                nativeItemId,
+              }),
+              threadId: anchor.threadId,
+              runId: anchor.runId,
+              nodeId: node.id,
+              providerThreadId: conversation.providerThread.id,
+              providerTurnId,
+              nativeItemRef: node.nativeItemRef,
+              parentItemId: null,
+              ordinal: anchor.ordinal,
+              status,
+              title: anchor.subagentType,
+              startedAt: anchor.startedAt,
+              completedAt: at,
+              updatedAt: at,
+              type: "subagent",
+              subagentId: subagentNodeId,
+              origin: "provider_native",
+              driver: ZCODE_PROVIDER,
+              providerInstanceId: adapterOptions.instanceId,
+              childThreadId,
+              prompt: "",
+              result: null,
+            };
+            yield* emit({ type: "node.updated", driver: ZCODE_PROVIDER, node });
+            yield* emit({ type: "turn_item.updated", driver: ZCODE_PROVIDER, turnItem });
+          }
         });
 
         const projectRow = Effect.fnUntraced(function* (
@@ -2082,6 +2204,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           yield* inspectActiveWorksForForeignStart(conversation, snapshot.control);
           yield* syncInteractions(conversation, snapshot.pendingInteractions);
           for (const row of snapshot.rows.window) yield* projectRow(conversation, row);
+          yield* reconcileEndedSubagents(conversation);
           yield* emitProviderThread(conversation);
           yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
         });
@@ -2183,6 +2306,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             }
             if (patch.subagents !== undefined) {
               conversation.subagents = patch.subagents;
+              yield* reconcileEndedSubagents(conversation);
             }
             if (patch.goal !== undefined) {
               conversation.goal = patch.goal;

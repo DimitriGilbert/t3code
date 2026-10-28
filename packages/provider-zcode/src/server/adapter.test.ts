@@ -4369,6 +4369,259 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         }),
     );
 
+    it.effect("marks a subagent ended when it leaves the wire's running list", () =>
+      Effect.gen(function* () {
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "subagent ends via subagents state shrink",
+          entries: [
+            ...seededSessionEntries("t3-psE"),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psE",
+                  sessionId: "s1",
+                  issuedAt: "<ignored>",
+                  type: "sendText",
+                  payload: {
+                    text: "spawn",
+                    requestedDelivery: "startNow",
+                    heldQueueDisposition: "keepQueueAndSend",
+                    mode: "build",
+                    planEnabled: false,
+                    modelSelection: {
+                      providerId: PROVIDER_ID,
+                      modelId: MODEL_ID,
+                      options: { reasoningLevel: "low" },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                result: {
+                  commandId: "c3",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(2, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 1,
+                      createdAt: 1735689600000,
+                      createdAtSeq: 1,
+                      turnId: "turn-1",
+                      kind: "turnHeader",
+                      origin: "userInput",
+                      state: "running",
+                      startedAt: 1735689600000,
+                      sourceCommandId: "<sendText-commandId>",
+                    },
+                  },
+                  {
+                    op: "row.upserted",
+                    row: {
+                      rowId: 2,
+                      createdAt: 1735689600100,
+                      createdAtSeq: 2,
+                      turnId: "turn-1",
+                      kind: "subagent",
+                      subagentType: "Explore",
+                      status: "running",
+                      summaryText: "",
+                      childSessionId: "child-1",
+                    },
+                  },
+                  {
+                    op: "state.updated",
+                    patch: {
+                      subagents: {
+                        revision: 2,
+                        childSessionIds: ["child-1"],
+                        running: [
+                          {
+                            childSessionId: "child-1",
+                            subagentType: "Explore",
+                            title: "Explore",
+                            status: "running",
+                          },
+                        ],
+                        endedTotal: 0,
+                      },
+                    },
+                  },
+                ],
+              }),
+            },
+            // The running child is subscribed eagerly.
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/child-1",
+                  connectionId: "t3-psE",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: { ack: { subscriptionId: "subc1", mode: "snapshot", logEpoch: "ec1" } },
+              },
+            },
+            // The child ends: it leaves the running list — no terminal row.
+            {
+              type: "emit_inbound",
+              frame: wireFrame(3, {
+                kind: "deltas",
+                deltas: [
+                  {
+                    op: "state.updated",
+                    patch: {
+                      subagents: {
+                        revision: 3,
+                        childSessionIds: ["child-1"],
+                        running: [],
+                        endedTotal: 1,
+                      },
+                    },
+                  },
+                ],
+              }),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+        const sentCommandId = yield* Ref.make<string | undefined>(undefined);
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+          onOutbound: (actual) => {
+            const frame = actual as {
+              method?: string;
+              params?: { type?: string; commandId?: string };
+            };
+            return frame.method === "v4/command" && frame.params?.type === "sendText"
+              ? Ref.set(sentCommandId, frame.params.commandId)
+              : Effect.void;
+          },
+          beforeEmitInbound: (entry) =>
+            Ref.get(sentCommandId).pipe(
+              Effect.andThen((commandId) =>
+                Effect.sync(() => {
+                  const params = (
+                    entry.frame as {
+                      params?: {
+                        frame?: {
+                          payload?: { deltas?: Array<{ row?: Record<string, unknown> }> };
+                        };
+                      };
+                    }
+                  ).params?.frame?.payload;
+                  for (const delta of params?.deltas ?? []) {
+                    if (delta.row?.sourceCommandId === "<sendText-commandId>") {
+                      delta.row.sourceCommandId = commandId;
+                    }
+                  }
+                }),
+              ),
+            ),
+        });
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+          openClient: makeReplayOpenClient(driver),
+        });
+        const runtime = yield* adapter
+          .openSession({ ...sessionOpenInput, providerSessionId: "psE" as never })
+          .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+        const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+        const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+          Effect.forkScoped,
+        );
+        const awaitEvent = Effect.fnUntraced(function* (
+          predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+        ) {
+          for (;;) {
+            const event = yield* Queue.take(seen);
+            if (predicate(event)) return event;
+          }
+        });
+        yield* runtime.readThreadSnapshot({ providerThread });
+        yield* runtime.startTurn({
+          appThread: {
+            id: "thread-1",
+            title: "Parent thread",
+            lineage: { rootThreadId: "thread-1" },
+            modelSelection: { instanceId: "zcode-test", model: `${PROVIDER_ID}/${MODEL_ID}` },
+          } as never,
+          threadId: "thread-1" as never,
+          runId: "run-1" as never,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: "attempt-1" as never,
+          rootNodeId: "node-1" as never,
+          providerThread,
+          message: {
+            messageId: "msg-1" as never,
+            text: "spawn",
+            attachments: [],
+            createdBy: null,
+            creationSource: "web",
+          } as never,
+          modelSelection: sessionOpenInput.modelSelection,
+          runtimePolicy: sessionOpenInput.runtimePolicy,
+        });
+        yield* awaitEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "running",
+        );
+        const ended = yield* awaitEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.status !== "running",
+        );
+        assert.equal(
+          ended.type === "subagent.updated" ? ended.subagent.status : undefined,
+          "completed",
+        );
+        assert.equal(
+          ended.type === "subagent.updated" ? ended.subagent.completedAt === null : "set",
+          false,
+        );
+        const terminalItem = yield* awaitEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.status !== "running",
+        );
+        assert.equal(
+          terminalItem.type === "turn_item.updated" ? terminalItem.turnItem.status : undefined,
+          "completed",
+        );
+        const st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
     it.effect(
       "reports pending work while its own upstream execution is in flight so idle unload cannot cut the frame stream",
       () =>

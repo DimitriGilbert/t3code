@@ -279,6 +279,7 @@ it("renders timeline markers into user-facing text", () => {
 // ── replayed app-server lifecycle (P2 seam) ──
 
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -1361,6 +1362,505 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         yield* Deferred.succeed(unsubscribeResponseGate, undefined);
         yield* Fiber.join(closeFiber);
         yield* Fiber.join(unloadFiber);
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("drains an in-flight createSession and fails post-teardown load ops fast", () =>
+      Effect.gen(function* () {
+        // Load side of the same latch: a request in flight when the scope
+        // closes finishes on the still-live transport, while load ops
+        // starting after `draining` fail locally instead of riding a dying
+        // process out to the request timeout.
+        const fileSystem = yield* FileSystem.FileSystem;
+        const zcodeHome = yield* fileSystem.makeTempDirectory();
+        const environment: NodeJS.ProcessEnv = { ZCODE_HOME: zcodeHome };
+
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "createSession drained across session-scope close",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 1,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psC",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "createSession-response",
+              frame: {
+                id: 1,
+                result: {
+                  commandId: "c1",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "createSession", sessionId: "s1" },
+                },
+              },
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const createResponseGate = yield* Deferred.make<void>();
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+          beforeEmitInbound: (entry) =>
+            entry.label === "createSession-response"
+              ? Deferred.await(createResponseGate)
+              : Effect.void,
+        });
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment,
+          openClient,
+        });
+        const sessionScope = yield* Scope.make();
+        const runtimePolicy = {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/tmp/ws",
+          reasoningEffort: "low",
+        } as never;
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-c1" as never,
+            providerSessionId: "psC" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, sessionScope));
+
+        const ensureFiber = yield* runtime
+          .ensureThread({
+            threadId: "thread-c1" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkScoped);
+        // The createSession went out; its response is held at the gate.
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        let st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length - 1);
+        assert.isUndefined(ensureFiber.pollUnsafe(), "createSession should be gated");
+
+        // Teardown starts mid-createSession: the drain latch holds the close.
+        const closeFiber = yield* Scope.close(sessionScope, Exit.void).pipe(Effect.forkScoped);
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        assert.isUndefined(closeFiber.pollUnsafe(), "scope close should wait on the drain");
+
+        // A load op arriving after `draining` fails fast — it can never
+        // "skip" like a release — and never reaches the wire.
+        const lateExit = yield* Effect.exit(
+          runtime.ensureThread({
+            threadId: "thread-c2" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(lateExit), "post-teardown ensureThread should fail fast");
+        if (Exit.isFailure(lateExit)) {
+          const failure = Cause.findErrorOption(lateExit.cause);
+          assert.isTrue(
+            Option.isSome(failure) && failure.value._tag === "ProviderAdapterEnsureThreadError",
+            `expected ProviderAdapterEnsureThreadError, got ${JSON.stringify(lateExit.cause)}`,
+          );
+        }
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length - 1);
+
+        // The gated response lands on the still-live transport and the drain
+        // resolves; the follow-up subscribe is a fresh post-drain entry, so
+        // ensureThread still fails cleanly instead of hanging.
+        yield* Deferred.succeed(createResponseGate, undefined);
+        const ensureExit = yield* Fiber.await(ensureFiber);
+        assert.isTrue(
+          Exit.isFailure(ensureExit),
+          "ensureThread should fail at its post-drain subscribe",
+        );
+        yield* Fiber.join(closeFiber);
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("drains an in-flight subscribe and fails its firstSnapshot wait", () =>
+      Effect.gen(function* () {
+        // A conversation registered before its subscribe ACK lands is inside
+        // the latch; the drain holds the close for the in-flight request but
+        // fails the conversation's firstSnapshot deferred, so the read that
+        // follows cannot wait out its 10s on a dying session.
+        const fileSystem = yield* FileSystem.FileSystem;
+        const zcodeHome = yield* fileSystem.makeTempDirectory();
+        const environment: NodeJS.ProcessEnv = { ZCODE_HOME: zcodeHome };
+
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "subscribe drained across session-scope close",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 1,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s1",
+                  connectionId: "t3-psS",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "subscribe-ack",
+              frame: {
+                id: 1,
+                result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: wireFrame(1, { kind: "snapshot", snapshot: snapshotFrame }, "initial"),
+            },
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const subscribeAckGate = yield* Deferred.make<void>();
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+          beforeEmitInbound: (entry) =>
+            entry.label === "subscribe-ack" ? Deferred.await(subscribeAckGate) : Effect.void,
+        });
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment,
+          openClient,
+        });
+        const sessionScope = yield* Scope.make();
+        const runtimePolicy = {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/tmp/ws",
+          reasoningEffort: "low",
+        } as never;
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-s0" as never,
+            providerSessionId: "psS" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, sessionScope));
+        const providerThread = (nativeId: string, appThreadId: string) =>
+          ({
+            id: `pt-${nativeId}` as never,
+            driver: "zcode" as never,
+            providerInstanceId: "zcode-test" as never,
+            providerSessionId: "psS" as never,
+            appThreadId: appThreadId as never,
+            ownerNodeId: null,
+            nativeThreadRef: { driver: "zcode" as never, nativeId, strength: "strong" },
+            nativeConversationHeadRef: null,
+            status: "idle" as const,
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            pendingBackgroundTasks: [],
+            contextUsage: null,
+            nativeMetadata: null,
+            goal: null,
+            createdAt: DateTime.makeUnsafe(1735689600000),
+            updatedAt: DateTime.makeUnsafe(1735689600000),
+          }) as OrchestrationV2ProviderThread;
+
+        const snapshotFiber = yield* runtime
+          .readThreadSnapshot({ providerThread: providerThread("s1", "thread-s1") })
+          .pipe(Effect.forkScoped);
+        // The subscribe went out; its ACK is held at the gate.
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        let st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length - 2);
+        assert.isUndefined(snapshotFiber.pollUnsafe(), "subscribe should be gated");
+
+        const closeFiber = yield* Scope.close(sessionScope, Exit.void).pipe(Effect.forkScoped);
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        assert.isUndefined(closeFiber.pollUnsafe(), "scope close should wait on the drain");
+
+        // Post-drain reads on another session fail fast and stay off the wire.
+        const lateExit = yield* Effect.exit(
+          runtime.readThreadSnapshot({ providerThread: providerThread("s2", "thread-s2") }),
+        );
+        assert.isTrue(
+          Exit.isFailure(lateExit),
+          "post-teardown readThreadSnapshot should fail fast",
+        );
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length - 2);
+
+        // The ACK lands and the subscribe drains; the firstSnapshot deferred
+        // was already failed by the drain, so the parked read fails rather
+        // than returning a snapshot for a dead session.
+        yield* Deferred.succeed(subscribeAckGate, undefined);
+        const snapshotExit = yield* Fiber.await(snapshotFiber);
+        assert.isTrue(
+          Exit.isFailure(snapshotExit),
+          "readThreadSnapshot should fail on the closing session",
+        );
+        if (Exit.isFailure(snapshotExit)) {
+          const failure = Cause.findErrorOption(snapshotExit.cause);
+          assert.isTrue(
+            Option.isSome(failure) &&
+              failure.value._tag === "ProviderAdapterReadThreadSnapshotError",
+            `expected ProviderAdapterReadThreadSnapshotError, got ${JSON.stringify(snapshotExit.cause)}`,
+          );
+        }
+        yield* Fiber.join(closeFiber);
+        st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+      }),
+    );
+
+    it.effect("releases a parked firstSnapshot wait when the session scope closes", () =>
+      Effect.gen(function* () {
+        // firstSnapshot holds no latch entry; a subscribe that never produced
+        // a snapshot parks readThreadSnapshot on the deferred. The drain
+        // finalizer fails every conversation's deferred so the waiter fails
+        // with the close — no 10s ride against a dead process.
+        const fileSystem = yield* FileSystem.FileSystem;
+        const zcodeHome = yield* fileSystem.makeTempDirectory();
+        const environment: NodeJS.ProcessEnv = { ZCODE_HOME: zcodeHome };
+
+        const transcript = {
+          provider: "zcode",
+          protocol: "zcode.app-server-v4",
+          version: "1",
+          scenario: "firstSnapshot wait released by session-scope close",
+          entries: [
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "startup/storageState",
+                params: {
+                  schemaVersion: 1,
+                  attemptId: "a1",
+                  sequence: 1,
+                  databaseId: "db",
+                  databaseKind: "session",
+                  phase: "ready",
+                  elapsedMs: 1,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 1,
+                method: "v4/command",
+                params: {
+                  commandId: "<ignored>",
+                  clientId: "t3-psW",
+                  sessionId: null,
+                  issuedAt: "<ignored>",
+                  type: "createSession",
+                  payload: {
+                    workspaceId: "/tmp/ws",
+                    config: {
+                      mode: "build",
+                      planEnabled: false,
+                      provider: PROVIDER_ID,
+                      model: MODEL_ID,
+                      thought: "low",
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 1,
+                result: {
+                  commandId: "c1",
+                  status: "accepted",
+                  revisionAtDecision: 1,
+                  result: { type: "createSession", sessionId: "s1" },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "v4/conversation/subscribe",
+                params: {
+                  topic: "conversation/s1",
+                  connectionId: "t3-psW",
+                  clientMode: "desktop-continuous",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 2,
+                result: { ack: { subscriptionId: "sub1", mode: "snapshot", logEpoch: "e1" } },
+              },
+            },
+            // No snapshot frame: the firstSnapshot wait stays parked.
+          ],
+        } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+
+        const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+        const openClient = (_input: ZcodeAppServerSpawnInput) =>
+          Layer.build(ZCodeReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.map((ctx) => Context.get(ctx, ZCodeClient.ZCodeAppServerClient)),
+            Effect.mapError(
+              (cause) => new ZcodeAppServerSpawnOpenError({ command: "replay", cause }),
+            ),
+          );
+
+        const adapter = yield* makeZcodeAdapterV2({
+          instanceId: "zcode-test" as never,
+          settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+          environment,
+          openClient,
+        });
+        const sessionScope = yield* Scope.make();
+        const runtimePolicy = {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/tmp/ws",
+          reasoningEffort: "low",
+        } as never;
+        const runtime = yield* adapter
+          .openSession({
+            threadId: "thread-w1" as never,
+            providerSessionId: "psW" as never,
+            modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, sessionScope));
+        const providerThread = yield* runtime.ensureThread({
+          threadId: "thread-w1" as never,
+          modelSelection: { model: `${PROVIDER_ID}/${MODEL_ID}` } as never,
+          runtimePolicy,
+        });
+        let st = yield* Ref.get(driver.state);
+        assert.isNull(st.failure, JSON.stringify(st.failure));
+        assert.equal(st.cursor, transcript.entries.length);
+
+        const snapshotFiber = yield* runtime
+          .readThreadSnapshot({ providerThread })
+          .pipe(Effect.forkScoped);
+        for (let i = 0; i < 10; i += 1) yield* Effect.yieldNow;
+        assert.isUndefined(
+          snapshotFiber.pollUnsafe(),
+          "readThreadSnapshot should be parked on firstSnapshot",
+        );
+
+        // The close completes without a clock adjustment: the drain fails
+        // the deferred, the waiter fails, and the scope finishes closing.
+        yield* Scope.close(sessionScope, Exit.void);
+        const snapshotExit = yield* Fiber.await(snapshotFiber);
+        assert.isTrue(
+          Exit.isFailure(snapshotExit),
+          "firstSnapshot waiter should fail with the closing session",
+        );
+        if (Exit.isFailure(snapshotExit)) {
+          const failure = Cause.findErrorOption(snapshotExit.cause);
+          assert.isTrue(
+            Option.isSome(failure) &&
+              failure.value._tag === "ProviderAdapterReadThreadSnapshotError",
+            `expected ProviderAdapterReadThreadSnapshotError, got ${JSON.stringify(snapshotExit.cause)}`,
+          );
+        }
         st = yield* Ref.get(driver.state);
         assert.isNull(st.failure, JSON.stringify(st.failure));
         assert.equal(st.cursor, transcript.entries.length);

@@ -425,33 +425,65 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         );
         const clientId = `t3-${input.providerSessionId}`;
 
-        // Drain latch for releaseConversation. The process-kill finalizer
+        // Drain latch for every wire call. The process-kill finalizer
         // registered first inside openClient, so the scope's sequential LIFO
         // close runs this drain — transport and process still live — before
-        // the kill; releases starting after `draining` skip the wire.
-        const releaseDrain = yield* Ref.make({ draining: false, inFlight: 0 });
-        const releaseDrained = yield* Deferred.make<void>();
-        const enterRelease = Ref.modify(releaseDrain, (state) =>
+        // the kill; calls starting after `draining` get a local verdict.
+        const wireDrain = yield* Ref.make({ draining: false, inFlight: 0 });
+        const wireDrained = yield* Deferred.make<void>();
+        const enterWire = Ref.modify(wireDrain, (state) =>
           state.draining
             ? ([false, state] as const)
             : ([true, { ...state, inFlight: state.inFlight + 1 }] as const),
         );
-        const exitRelease = Ref.modify(releaseDrain, (state) => {
+        const exitWire = Ref.modify(wireDrain, (state) => {
           const inFlight = state.inFlight - 1;
           return [inFlight === 0 && state.draining, { ...state, inFlight }] as const;
         }).pipe(
           Effect.flatMap((drained) =>
-            drained ? Deferred.succeed(releaseDrained, undefined) : Effect.void,
+            drained ? Deferred.succeed(wireDrained, undefined) : Effect.void,
           ),
           Effect.asVoid,
         );
+        // Post-`draining` verdicts: load ops fail fast (a createSession can't
+        // "skip"), best-effort sends drop — the wire never sees either.
+        const wireFail = <A, E, R>(
+          op: Effect.Effect<A, E, R>,
+        ): Effect.Effect<A, E | ProviderAdapter.ProviderAdapterProtocolError, R> =>
+          Effect.acquireUseRelease(
+            enterWire,
+            (entered): Effect.Effect<A, E | ProviderAdapter.ProviderAdapterProtocolError, R> =>
+              entered ? op : Effect.fail(protocolError("ZCode provider session is closing.")),
+            (entered) => (entered ? exitWire : Effect.void),
+          );
+        const wireSkip = <A, E, R>(op: Effect.Effect<A, E, R>): Effect.Effect<A | void, E, R> =>
+          Effect.acquireUseRelease(
+            enterWire,
+            (entered): Effect.Effect<A | void, E, R> => (entered ? op : Effect.void),
+            (entered) => (entered ? exitWire : Effect.void),
+          );
+        const conversations = new Map<string, ZcodeConversation>();
         yield* Scope.addFinalizer(
           scope,
-          Ref.modify(releaseDrain, (state) => [
+          Ref.modify(wireDrain, (state) => [
             state.inFlight === 0,
             { ...state, draining: true },
           ]).pipe(
-            Effect.flatMap((drained) => (drained ? Effect.void : Deferred.await(releaseDrained))),
+            // firstSnapshot awaits hold no latch entry; fail their deferreds
+            // in the drain so waiters settle here instead of riding their own
+            // timeouts out to a dead process.
+            Effect.tap(() =>
+              Effect.forEach(
+                conversations.values(),
+                (conversation) =>
+                  Deferred.fail(
+                    conversation.firstSnapshot,
+                    protocolError("ZCode provider session is closing."),
+                  ),
+                { discard: true },
+              ),
+            ),
+            Effect.flatMap((drained) => (drained ? Effect.void : Deferred.await(wireDrained))),
           ),
         );
 
@@ -535,13 +567,15 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         // Without the account overlay the registry publishes zero executable
         // models and every sendText fails modelUnavailable. Push once per
         // process; requests self-gate on storage-ready.
-        yield* pushZcodeAccountOverlay(client, {
-          environment: adapterOptions.environment,
-          fileSystem,
-          path,
-          revision: `t3-${input.providerSessionId}`,
-          refreshReason: "t3-session-open",
-        });
+        yield* wireFail(
+          pushZcodeAccountOverlay(client, {
+            environment: adapterOptions.environment,
+            fileSystem,
+            path,
+            revision: `t3-${input.providerSessionId}`,
+            refreshReason: "t3-session-open",
+          }),
+        );
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
           id: input.providerSessionId,
@@ -558,7 +592,6 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
-        const conversations = new Map<string, ZcodeConversation>();
         // childSessionIds already given a T3 thread/provider thread pair.
         const projectedChildSessions = new Set<string>();
         // T3 threads this session has seen by id — lets cold-restored
@@ -572,17 +605,19 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         const ensureWorkspaceConfigSubscription = Effect.fnUntraced(function* () {
           if (adapterOptions.onWorkspaceConfig === undefined || workspaceConfigSubscribed) return;
           workspaceConfigSubscribed = true;
-          yield* client
-            .request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
-              topic: ZCodeSchema.workspaceConfigTopic(workspaceId),
-              connectionId: clientId,
-              clientMode: ZCODE_CLIENT_MODE,
-            })
-            .pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("ZCode workspace-config subscribe failed", { cause }),
+          yield* wireSkip(
+            client
+              .request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
+                topic: ZCodeSchema.workspaceConfigTopic(workspaceId),
+                connectionId: clientId,
+                clientMode: ZCODE_CLIENT_MODE,
+              })
+              .pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("ZCode workspace-config subscribe failed", { cause }),
+                ),
               ),
-            );
+          );
         });
 
         const sendCommand = Effect.fn("ZcodeAdapterV2.sendCommand")(function* <
@@ -596,7 +631,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             readonly ack: ZCodeSchema.CommandAck;
             readonly envelope: ZCodeSchema.CommandEnvelopeFor<T>;
           },
-          ZCodeError.ZCodeAppServerError | Schema.SchemaError
+          | ZCodeError.ZCodeAppServerError
+          | Schema.SchemaError
+          | ProviderAdapter.ProviderAdapterProtocolError
         > {
           const conversation =
             input.sessionId === null ? undefined : conversations.get(input.sessionId);
@@ -615,9 +652,8 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             type: input.type,
             payload: input.payload,
           } as ZCodeSchema.CommandEnvelopeFor<T>);
-          const ack = yield* client.request(
-            ZCodeRpc.V4_METHODS.command,
-            envelope as ZCodeSchema.CommandEnvelope,
+          const ack = yield* wireFail(
+            client.request(ZCodeRpc.V4_METHODS.command, envelope as ZCodeSchema.CommandEnvelope),
           );
           return { ack, envelope };
         });
@@ -2333,25 +2369,25 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             deferredFailures: [],
           };
           conversations.set(sessionId, conversation);
-          const subscribed = yield* client
-            .request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
+          const subscribed = yield* wireFail(
+            client.request(ZCodeRpc.V4_METHODS.conversationSubscribe, {
               topic: conversation.topic,
               connectionId: clientId,
               clientMode: ZCODE_CLIENT_MODE,
-            })
-            .pipe(
-              // A half-initialized entry would wedge every later call path;
-              // failed subscribes must leave no conversation behind.
-              Effect.tapError(() => Effect.sync(() => conversations.delete(sessionId))),
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: ZCODE_PROVIDER,
-                    detail: `Failed to subscribe ${conversation.topic}.`,
-                    cause,
-                  }),
-              ),
-            );
+            }),
+          ).pipe(
+            // A half-initialized entry would wedge every later call path;
+            // failed subscribes must leave no conversation behind.
+            Effect.tapError(() => Effect.sync(() => conversations.delete(sessionId))),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: ZCODE_PROVIDER,
+                  detail: `Failed to subscribe ${conversation.topic}.`,
+                  cause,
+                }),
+            ),
+          );
           conversation.subscriptionId = subscribed.ack.subscriptionId;
           conversation.logEpoch = subscribed.ack.logEpoch;
           // 冷恢复的子会话在首帧到达前尽量补回 appThread/锚点，使快照中的
@@ -2373,30 +2409,25 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           conversations.delete(conversation.sessionId);
           yield* Deferred.succeed(conversation.firstSnapshot, undefined).pipe(Effect.ignore);
           yield* settleSessionInteractionLegs(conversation.sessionId);
-          yield* Effect.acquireUseRelease(
-            enterRelease,
-            (entered) =>
-              entered
-                ? Effect.gen(function* () {
-                    if (conversation.subscriptionId !== null) {
-                      yield* client
-                        .request(ZCodeRpc.V4_METHODS.conversationUnsubscribe, {
-                          topic: conversation.topic,
-                          subscriptionId: conversation.subscriptionId,
-                          connectionId: clientId,
-                        })
-                        .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
-                    }
-                    yield* client
-                      .request(ZCodeRpc.LEGACY_METHODS.sessionClose, {
-                        sessionId: conversation.sessionId,
-                      })
-                      .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
+          // Teardown already closed the gate: the process's own death cleans
+          // sessions server-side, so post-drain releases skip the wire.
+          yield* wireSkip(
+            Effect.gen(function* () {
+              if (conversation.subscriptionId !== null) {
+                yield* client
+                  .request(ZCodeRpc.V4_METHODS.conversationUnsubscribe, {
+                    topic: conversation.topic,
+                    subscriptionId: conversation.subscriptionId,
+                    connectionId: clientId,
                   })
-                : // Teardown already closed the gate: the process's own death
-                  // cleans sessions server-side, so no wire requests.
-                  Effect.void,
-            (entered) => (entered ? exitRelease : Effect.void),
+                  .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
+              }
+              yield* client
+                .request(ZCodeRpc.LEGACY_METHODS.sessionClose, {
+                  sessionId: conversation.sessionId,
+                })
+                .pipe(Effect.timeoutOption(ZCODE_RELEASE_REQUEST_TIMEOUT), Effect.ignore);
+            }),
           );
         });
 
@@ -2489,10 +2520,12 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             const committed = yield* client.request(ZCodeRpc.V4_METHODS.attachmentCommit, upload);
             return committed.ref;
           });
-          const ref = yield* transfer.pipe(
+          const ref = yield* wireFail(transfer).pipe(
             // A half-finished transaction must not stage forever on the CLI.
             Effect.onError(() =>
-              client.request(ZCodeRpc.V4_METHODS.attachmentAbort, upload).pipe(Effect.ignore),
+              wireSkip(client.request(ZCodeRpc.V4_METHODS.attachmentAbort, upload)).pipe(
+                Effect.ignore,
+              ),
             ),
           );
           return {
@@ -2886,7 +2919,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                   ...zcodeModelSelectionPayload(resolved),
                 },
               });
-              const ack = yield* client.request(ZCodeRpc.V4_METHODS.command, envelope).pipe(
+              const ack = yield* wireFail(
+                client.request(ZCodeRpc.V4_METHODS.command, envelope),
+              ).pipe(
                 Effect.onError(() =>
                   Effect.sync(() => {
                     conversation.pendingInputs.delete(commandId);
@@ -3243,20 +3278,23 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 allRows.size < conversation.rowsTotalCount &&
                 allRows.size < 10_000
               ) {
-                const page = yield* client
-                  .request(ZCodeRpc.V4_METHODS.conversationRowsRange, {
-                    sessionId,
-                    clientMode: ZCODE_CLIENT_MODE,
-                    beforeRowId,
-                    limit: 500,
-                  })
-                  .pipe(
-                    Effect.catch((cause) =>
-                      Effect.logWarning("ZCode rowsRange paging failed", { cause, sessionId }).pipe(
-                        Effect.as(undefined),
+                const page = yield* wireSkip(
+                  client
+                    .request(ZCodeRpc.V4_METHODS.conversationRowsRange, {
+                      sessionId,
+                      clientMode: ZCODE_CLIENT_MODE,
+                      beforeRowId,
+                      limit: 500,
+                    })
+                    .pipe(
+                      Effect.catch((cause) =>
+                        Effect.logWarning("ZCode rowsRange paging failed", {
+                          cause,
+                          sessionId,
+                        }).pipe(Effect.as(undefined)),
                       ),
                     ),
-                  );
+                );
                 if (page === undefined || page.rows.length === 0) break;
                 let oldest = beforeRowId;
                 for (const row of page.rows) {

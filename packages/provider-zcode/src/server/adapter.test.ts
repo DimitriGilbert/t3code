@@ -4369,6 +4369,505 @@ it.layer(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))(
         }),
     );
 
+    it.effect(
+      "reports pending work while its own upstream execution is in flight so idle unload cannot cut the frame stream",
+      () =>
+        Effect.gen(function* () {
+          const transcript = {
+            provider: "zcode",
+            protocol: "zcode.app-server-v4",
+            version: "1",
+            scenario: "pending work covers own execution",
+            entries: [
+              ...seededSessionEntries("t3-psW"),
+              // An upstream-driven (observed) turn starts: no T3 input owns
+              // it, but the session is mid-execution — exactly what an
+              // in-flight subagent child looks like.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(2, {
+                  kind: "deltas",
+                  deltas: [
+                    {
+                      op: "state.updated",
+                      patch: {
+                        control: {
+                          ...rollbackSnapshot.control,
+                          phase: "running",
+                          sessionEnded: false,
+                          activeWorks: [
+                            {
+                              kind: "primaryTurn",
+                              startedAt: 1735689603000,
+                            },
+                          ],
+                        },
+                      },
+                    },
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 40,
+                        createdAt: 1735689603000,
+                        createdAtSeq: 40,
+                        turnId: "turn-obs",
+                        kind: "turnHeader",
+                        origin: "backgroundResult",
+                        executionKind: "agent",
+                        state: "running",
+                        startedAt: 1735689603000,
+                      },
+                    },
+                  ],
+                }),
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(3, {
+                  kind: "deltas",
+                  deltas: [
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 40,
+                        createdAt: 1735689603000,
+                        createdAtSeq: 41,
+                        turnId: "turn-obs",
+                        kind: "turnHeader",
+                        origin: "backgroundResult",
+                        executionKind: "agent",
+                        state: "completedSuccess",
+                        startedAt: 1735689603000,
+                        endedAt: 1735689605000,
+                      },
+                    },
+                    {
+                      op: "state.updated",
+                      patch: {
+                        control: {
+                          ...rollbackSnapshot.control,
+                          phase: "completedSuccess",
+                          sessionEnded: true,
+                          activeWorks: [],
+                        },
+                      },
+                    },
+                  ],
+                }),
+              },
+            ],
+          } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+          const completionGate = yield* Deferred.make<void>();
+          const driver = yield* ZCodeReplay.makeReplayDriver(transcript, {
+            // Hold the terminal frame until the in-flight asserts land;
+            // without a gate the replay drains both frames before the
+            // probe reads state.
+            beforeEmitInbound: (entry) =>
+              (entry.frame as { params?: { logicalFrameOrdinal?: number } }).params
+                ?.logicalFrameOrdinal === 3
+                ? Deferred.await(completionGate)
+                : Effect.void,
+          });
+          const adapter = yield* makeZcodeAdapterV2({
+            instanceId: "zcode-test" as never,
+            settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+            environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+            openClient: makeReplayOpenClient(driver),
+          });
+          const runtime = yield* adapter
+            .openSession({ ...sessionOpenInput, providerSessionId: "psW" as never })
+            .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+          const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+          yield* runtime.readThreadSnapshot({ providerThread });
+          const hasPending = runtime.hasPendingBackgroundWork ?? Effect.succeed(false);
+          const forThread =
+            runtime.hasPendingBackgroundWorkForThread ?? (() => Effect.succeed(false));
+          assert.isFalse(yield* hasPending);
+          assert.isFalse(yield* forThread(providerThread));
+          // The observed turn's provider_turn emission marks the frame apply.
+          const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+          yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+            Effect.forkScoped,
+          );
+          const awaitEvent = Effect.fnUntraced(function* (
+            predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+          ) {
+            for (;;) {
+              const event = yield* Queue.take(seen);
+              if (predicate(event)) return event;
+            }
+          });
+          yield* awaitEvent(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.nativeTurnRef?.nativeId === "turn-obs" &&
+              event.providerTurn.status === "running",
+          );
+          assert.isTrue(yield* hasPending);
+          assert.isTrue(yield* forThread(providerThread));
+          yield* Deferred.succeed(completionGate, undefined);
+          yield* awaitEvent(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.nativeTurnRef?.nativeId === "turn-obs" &&
+              event.providerTurn.status === "completed",
+          );
+          // The control patch trails the terminal header inside the same
+          // frame; the idle provider_thread.updated is the full-apply
+          // milestone (the earlier running patch emitted an active one).
+          yield* awaitEvent(
+            (event) =>
+              event.type === "provider_thread.updated" && event.providerThread.status === "idle",
+          );
+          assert.isFalse(yield* hasPending);
+          assert.isFalse(yield* forThread(providerThread));
+          const st = yield* Ref.get(driver.state);
+          assert.isNull(st.failure, JSON.stringify(st.failure));
+          assert.equal(st.cursor, transcript.entries.length);
+        }),
+    );
+
+    it.effect(
+      "projects a subagent terminal update after resubscribe even when its spawning turn scrolled out of the rows window",
+      () =>
+        Effect.gen(function* () {
+          const childSnapshot = {
+            ...snapshotFrame,
+            sessionId: "c9",
+            logEpoch: "ec9",
+            control: { ...snapshotFrame.control, phase: "running", sessionEnded: false },
+            rows: {
+              window: [
+                {
+                  rowId: 1,
+                  createdAt: 1735689600200,
+                  createdAtSeq: 1,
+                  turnId: "cturn-9",
+                  kind: "turnHeader",
+                  origin: "userInput",
+                  executionKind: "agent",
+                  state: "running",
+                  startedAt: 1735689600200,
+                },
+              ],
+              totalCount: 1,
+              firstRowId: null,
+            },
+          };
+          const transcript = {
+            provider: "zcode",
+            protocol: "zcode.app-server-v4",
+            version: "1",
+            scenario: "resubscribe zombie heal",
+            entries: [
+              ...seededSessionEntries("t3-psZ"),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "v4/command",
+                  params: {
+                    commandId: "<ignored>",
+                    clientId: "t3-psZ",
+                    sessionId: "s1",
+                    issuedAt: "<ignored>",
+                    type: "sendText",
+                    payload: {
+                      text: "spawn",
+                      requestedDelivery: "startNow",
+                      heldQueueDisposition: "keepQueueAndSend",
+                      mode: "build",
+                      planEnabled: false,
+                      modelSelection: {
+                        providerId: PROVIDER_ID,
+                        modelId: MODEL_ID,
+                        options: { reasoningLevel: "low" },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 3,
+                  result: {
+                    commandId: "c3",
+                    status: "accepted",
+                    revisionAtDecision: 1,
+                    result: { type: "inputAccepted", delivery: "startNow", inputId: "in1" },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(2, {
+                  kind: "deltas",
+                  deltas: [
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 7,
+                        createdAt: 1735689600000,
+                        createdAtSeq: 7,
+                        turnId: "turn-9",
+                        kind: "turnHeader",
+                        origin: "userInput",
+                        state: "running",
+                        startedAt: 1735689600000,
+                        sourceCommandId: "c3",
+                      },
+                    },
+                    {
+                      op: "row.upserted",
+                      row: {
+                        rowId: 8,
+                        createdAt: 1735689600100,
+                        createdAtSeq: 8,
+                        turnId: "turn-9",
+                        kind: "subagent",
+                        subagentType: "Explore",
+                        status: "running",
+                        summaryText: "",
+                        childSessionId: "c9",
+                      },
+                    },
+                  ],
+                }),
+              },
+              // Running child is eagerly subscribed.
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/c9",
+                    connectionId: "t3-psZ",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 4,
+                  result: { ack: { subscriptionId: "subc9", mode: "snapshot", logEpoch: "ec9" } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  1,
+                  { kind: "snapshot", snapshot: childSnapshot },
+                  "initial",
+                  "conversation/c9",
+                  "subc9",
+                ),
+              },
+              // Idle unload releases the parent conversation: unsubscribe +
+              // session/close go out.
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 5,
+                  method: "v4/conversation/unsubscribe",
+                  params: {
+                    topic: "conversation/s1",
+                    subscriptionId: "sub1",
+                    connectionId: "t3-psZ",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: { id: 5, result: { ok: true } },
+              },
+              {
+                type: "expect_outbound",
+                frame: { id: 6, method: "session/close", params: { sessionId: "s1" } },
+              },
+              {
+                type: "emit_inbound",
+                frame: { id: 6, result: { closed: true } },
+              },
+              // Resume: tail-window snapshot drops turn-9's header but keeps
+              // the still-running subagent row.
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 7,
+                  method: "v4/conversation/subscribe",
+                  params: {
+                    topic: "conversation/s1",
+                    connectionId: "t3-psZ",
+                    clientMode: "desktop-continuous",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 7,
+                  result: { ack: { subscriptionId: "sub1b", mode: "snapshot", logEpoch: "e1" } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  4,
+                  {
+                    kind: "snapshot",
+                    snapshot: {
+                      ...rollbackSnapshot,
+                      rows: {
+                        window: [
+                          {
+                            rowId: 8,
+                            createdAt: 1735689600100,
+                            createdAtSeq: 8,
+                            turnId: "turn-9",
+                            kind: "subagent",
+                            subagentType: "Explore",
+                            status: "running",
+                            summaryText: "",
+                            childSessionId: "c9",
+                          },
+                        ],
+                        totalCount: 8,
+                        firstRowId: 8,
+                      },
+                    },
+                  },
+                  "initial",
+                  "conversation/s1",
+                  "sub1b",
+                ),
+              },
+              // The child completes: its row upsert arrives on the parent
+              // topic while turn-9 is still unadopted.
+              {
+                type: "emit_inbound",
+                frame: wireFrame(
+                  5,
+                  {
+                    kind: "deltas",
+                    deltas: [
+                      {
+                        op: "row.upserted",
+                        row: {
+                          rowId: 8,
+                          createdAt: 1735689600100,
+                          createdAtSeq: 9,
+                          turnId: "turn-9",
+                          kind: "subagent",
+                          subagentType: "Explore",
+                          status: "success",
+                          summaryText: "explored the codebase",
+                          childSessionId: "c9",
+                          endedAt: 1735689609000,
+                        },
+                      },
+                      {
+                        op: "state.updated",
+                        patch: {
+                          subagents: {
+                            revision: 2,
+                            childSessionIds: ["c9"],
+                            running: [],
+                            endedTotal: 1,
+                          },
+                        },
+                      },
+                    ],
+                  },
+                  "online",
+                  "conversation/s1",
+                  "sub1b",
+                ),
+              },
+            ],
+          } satisfies ZCodeReplay.ZCodeAppServerReplayTranscript;
+          const driver = yield* ZCodeReplay.makeReplayDriver(transcript);
+          const adapter = yield* makeZcodeAdapterV2({
+            instanceId: "zcode-test" as never,
+            settings: { binaryPath: "zcode", enabled: true, customModels: [] } as never,
+            environment: { ZCODE_HOME: "/nonexistent-zcode-home" },
+            openClient: makeReplayOpenClient(driver),
+          });
+          const runtime = yield* adapter
+            .openSession({ ...sessionOpenInput, providerSessionId: "psZ" as never })
+            .pipe(Effect.provideService(Scope.Scope, yield* Scope.make()));
+          const providerThread = yield* runtime.ensureThread(sessionOpenInput);
+          const seen = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+          yield* Stream.runForEach(runtime.events, (event) => Queue.offer(seen, event)).pipe(
+            Effect.forkScoped,
+          );
+          const awaitEvent = Effect.fnUntraced(function* (
+            predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+          ) {
+            for (;;) {
+              const event = yield* Queue.take(seen);
+              if (predicate(event)) return event;
+            }
+          });
+          yield* runtime.startTurn({
+            appThread: {
+              id: "thread-1",
+              title: "Parent thread",
+              lineage: { rootThreadId: "thread-1" },
+              modelSelection: { instanceId: "zcode-test", model: `${PROVIDER_ID}/${MODEL_ID}` },
+            } as never,
+            threadId: "thread-1" as never,
+            runId: "run-9" as never,
+            runOrdinal: 9,
+            providerTurnOrdinal: 9,
+            attemptId: "attempt-9" as never,
+            rootNodeId: "node-9" as never,
+            providerThread,
+            message: {
+              messageId: "msg-9" as never,
+              text: "spawn",
+              attachments: [],
+              createdBy: null,
+              creationSource: "web",
+            } as never,
+            modelSelection: sessionOpenInput.modelSelection,
+            runtimePolicy: sessionOpenInput.runtimePolicy,
+          });
+          yield* awaitEvent(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "running",
+          );
+          const unloadThread = runtime.unloadThread;
+          if (unloadThread === undefined) return yield* Effect.die("unloadThread unsupported");
+          yield* unloadThread({ providerThread });
+          yield* runtime.resumeThread({
+            providerThread,
+            threadId: "thread-1" as never,
+            modelSelection: sessionOpenInput.modelSelection,
+            runtimePolicy: sessionOpenInput.runtimePolicy,
+          });
+          // turn-9 is outside the resubscribed window: its terminal subagent
+          // update must still land through the recorded anchor.
+          const done = yield* awaitEvent(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          );
+          assert.equal(
+            done.type === "subagent.updated" ? done.subagent.status : undefined,
+            "completed",
+          );
+          yield* awaitEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "subagent" &&
+              event.turnItem.status === "completed",
+          );
+          const st = yield* Ref.get(driver.state);
+          assert.isNull(st.failure, JSON.stringify(st.failure));
+          assert.equal(st.cursor, transcript.entries.length);
+        }),
+    );
+
     it.effect("projects provider-started turns on the root thread as runless observed turns", () =>
       Effect.gen(function* () {
         const transcript = {

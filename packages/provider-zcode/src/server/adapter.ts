@@ -318,11 +318,17 @@ const conversationRef = (sessionId: string) => ({
   strength: "strong" as const,
 });
 
-// Work the session will still produce without input: live background works
-// (resultPending = done, continuation turn already queued), running
-// subagents, and the goal loop's running statuses — upstream's own "active"
-// set. A merely live, idle session is not pending work.
+// Work the session will still produce without input — upstream's own
+// "active" set, including its in-flight execution and queued follow-ups.
+// An unhydrated conversation counts too: release sends session/close,
+// which kills the resident runtime and drops settlement frames.
 const zcodeConversationHasPendingWork = (conversation: ZcodeConversation): boolean =>
+  conversation.control === null ||
+  conversation.control.phase === "running" ||
+  conversation.control.phase === "prewarming" ||
+  conversation.control.activeWorks.length > 0 ||
+  (conversation.queue?.items.length ?? 0) > 0 ||
+  conversation.pendingInteractions.length > 0 ||
   conversation.backgroundWorks.some(
     (work) => work.status === "running" || work.status === "resultPending",
   ) ||
@@ -330,7 +336,8 @@ const zcodeConversationHasPendingWork = (conversation: ZcodeConversation): boole
   (conversation.goal !== null &&
     (conversation.goal.status === "active" ||
       conversation.goal.status === "verifying" ||
-      conversation.goal.status === "notSatisfied"));
+      conversation.goal.status === "notSatisfied")) ||
+  [...conversation.turns.values()].some((turn) => !turn.terminalEmitted);
 
 const rowStatusToNodeStatus = (
   status: OrchestrationV2TurnItem["status"],
@@ -593,7 +600,30 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
         const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
         // childSessionIds already given a T3 thread/provider thread pair.
-        const projectedChildSessions = new Set<string>();
+        // The stored handles let a released child re-subscribe when the
+        // parent still reports it running — a lost subscription is the
+        // class of bug that leaves "running" zombies behind.
+        const projectedChildren = new Map<
+          string,
+          {
+            readonly providerThread: OrchestrationV2ProviderThread;
+            readonly appThread: OrchestrationV2AppThread;
+            readonly observedRootNativeItemId: string;
+          }
+        >();
+        // Anchors recorded when a subagent row first projects under its
+        // turn — enough to re-emit the same node/item/subagent ids when the
+        // spawning turnHeader has fallen out of a resubscribed window.
+        const subagentAnchors = new Map<
+          NodeId,
+          {
+            readonly threadId: ThreadId;
+            readonly runId: ActiveZcodeTurn["projectionRunId"];
+            readonly rootNodeId: NodeId;
+            readonly startedAt: DateTime.Utc;
+            readonly ordinal: number;
+          }
+        >();
         // T3 threads this session has seen by id — lets cold-restored
         // conversations recover their appThread without a new lookup.
         const knownAppThreads = new Map<ThreadId, OrchestrationV2AppThread>();
@@ -1153,17 +1183,40 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           conversation: ZcodeConversation,
           row: ZCodeSchema.SubagentRow,
         ) {
-          const turn = conversation.turns.get(row.turnId);
-          if (turn === undefined) {
-            queuePendingRow(conversation, row);
-            return;
-          }
           const at = yield* DateTime.now;
           const nativeItemId = zcodeNativeItemId(row.turnId, row.rowId);
           const subagentNodeId = idAllocator.derive.nodeFromProviderItem({
             driver: ZCODE_PROVIDER,
             nativeItemId,
           });
+          const turn = conversation.turns.get(row.turnId);
+          // Resubscribed windows can drop the spawning turnHeader; the
+          // anchor recorded at first projection replays the update under
+          // the same ids instead of queueing forever (the zombie path).
+          const projection =
+            turn !== undefined
+              ? {
+                  threadId: turn.projectionThreadId,
+                  runId: turn.projectionRunId,
+                  rootNodeId: turn.rootNodeId,
+                  startedAt: turn.startedAt,
+                  ordinal: itemOrdinal(turn, nativeItemId),
+                }
+              : subagentAnchors.get(subagentNodeId);
+          if (projection === undefined) {
+            queuePendingRow(conversation, row);
+            return;
+          }
+          if (turn !== undefined) {
+            subagentAnchors.set(subagentNodeId, projection);
+          }
+          const {
+            threadId: projectionThreadId,
+            runId: projectionRunId,
+            rootNodeId,
+            startedAt: turnStartedAt,
+            ordinal,
+          } = projection;
           const status =
             row.status === "running"
               ? "running"
@@ -1195,9 +1248,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           // For nested subagent rows under an observed turn there is no T3
           // input; the child's own thread + reported model stand in as parent.
           const parentThread =
-            turn.input?.appThread ?? (yield* resolveConversationAppThread(conversation));
+            turn?.input?.appThread ?? (yield* resolveConversationAppThread(conversation));
           const childModelSelection =
-            turn.input?.modelSelection ??
+            turn?.input?.modelSelection ??
             zcodeReportedModelSelection({
               config: conversation.config,
               instanceId: adapterOptions.instanceId,
@@ -1209,9 +1262,8 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             childProviderThreadId !== null &&
             parentThread !== undefined &&
             childModelSelection !== undefined &&
-            !projectedChildSessions.has(childSessionId)
+            !projectedChildren.has(childSessionId)
           ) {
-            projectedChildSessions.add(childSessionId);
             childProviderThread = {
               id: childProviderThreadId,
               driver: ZCODE_PROVIDER,
@@ -1226,8 +1278,11 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               lastRunOrdinal: null,
               handoffIds: [],
               forkedFrom: {
-                providerThreadId: turn.providerThread.id,
-                providerTurnId: turn.providerTurnId,
+                providerThreadId: conversation.providerThread.id,
+                providerTurnId: idAllocator.derive.providerTurn({
+                  driver: ZCODE_PROVIDER,
+                  nativeTurnId: row.turnId,
+                }),
               },
               pendingBackgroundTasks: [],
               contextUsage: null,
@@ -1247,11 +1302,16 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
                 parentTitle: parentThread.title,
                 title: row.subagentType,
                 prompt: "",
-                ordinal: turn.providerTurnOrdinal,
+                ordinal: turn?.providerTurnOrdinal ?? 1,
               }),
               now: at,
               createdBy: "agent",
               creationSource: "provider",
+            });
+            projectedChildren.set(childSessionId, {
+              providerThread: childProviderThread,
+              appThread: childAppThread,
+              observedRootNativeItemId: `${nativeItemId}:thread-root`,
             });
             knownAppThreads.set(childThreadId, childAppThread);
             yield* emit({
@@ -1264,10 +1324,20 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               driver: ZCODE_PROVIDER,
               providerThread: childProviderThread,
             });
-            if (row.status === "running") {
-              yield* ensureConversation(childSessionId, childProviderThread, {
-                appThread: childAppThread,
-                observedRootNativeItemId: `${nativeItemId}:thread-root`,
+          }
+          // While the parent reports the child running it must stay
+          // subscribed: a released-then-resumed child would otherwise lose
+          // its frame stream and its terminal state would never arrive.
+          if (
+            row.status === "running" &&
+            childSessionId !== undefined &&
+            !conversations.has(childSessionId)
+          ) {
+            const projected = projectedChildren.get(childSessionId);
+            if (projected !== undefined) {
+              yield* ensureConversation(childSessionId, projected.providerThread, {
+                appThread: projected.appThread,
+                observedRootNativeItemId: projected.observedRootNativeItemId,
               }).pipe(
                 Effect.catch((cause) =>
                   Effect.logWarning("ZCode child session subscribe failed", {
@@ -1280,14 +1350,14 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
           }
           const subagent: OrchestrationV2Subagent = {
             id: subagentNodeId,
-            threadId: turn.projectionThreadId,
-            runId: turn.projectionRunId,
-            parentNodeId: turn.rootNodeId,
+            threadId: projectionThreadId,
+            runId: projectionRunId,
+            parentNodeId: rootNodeId,
             origin: "provider_native",
             createdBy: "agent",
             driver: ZCODE_PROVIDER,
             providerInstanceId: adapterOptions.instanceId,
-            providerThreadId: childProviderThreadId ?? turn.providerThread.id,
+            providerThreadId: childProviderThreadId ?? conversation.providerThread.id,
             childThreadId,
             nativeTaskRef: conversationRef(nativeItemId),
             prompt: "",
@@ -1295,34 +1365,54 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             model: null,
             status,
             result: row.summaryText.length > 0 ? row.summaryText : null,
-            startedAt: turn.startedAt,
+            startedAt: turnStartedAt,
             completedAt: completed ? at : null,
             updatedAt: at,
           };
           yield* emit({ type: "subagent.updated", driver: ZCODE_PROVIDER, subagent });
-          const node = nodeFor(
-            turn,
-            zcodeNativeItemId(row.turnId, row.rowId),
-            "subagent",
-            rowStatusToNodeStatus(status),
-            completed ? at : null,
-          );
+          const node: OrchestrationV2ExecutionNode = {
+            id: subagentNodeId,
+            threadId: projectionThreadId,
+            runId: projectionRunId,
+            parentNodeId: rootNodeId,
+            rootNodeId,
+            kind: "subagent",
+            status: rowStatusToNodeStatus(status),
+            countsForRun: false,
+            providerThreadId: conversation.providerThread.id,
+            providerTurnId:
+              turn?.providerTurnId ??
+              idAllocator.derive.providerTurn({
+                driver: ZCODE_PROVIDER,
+                nativeTurnId: row.turnId,
+              }),
+            nativeItemRef: conversationRef(nativeItemId),
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: turnStartedAt,
+            completedAt: completed ? at : null,
+          };
           const turnItem: OrchestrationV2TurnItem = {
             id: idAllocator.derive.turnItemFromProviderItem({
               driver: ZCODE_PROVIDER,
               nativeItemId,
             }),
-            threadId: turn.projectionThreadId,
-            runId: turn.projectionRunId,
+            threadId: projectionThreadId,
+            runId: projectionRunId,
             nodeId: node.id,
-            providerThreadId: turn.providerThread.id,
-            providerTurnId: turn.providerTurnId,
+            providerThreadId: conversation.providerThread.id,
+            providerTurnId:
+              turn?.providerTurnId ??
+              idAllocator.derive.providerTurn({
+                driver: ZCODE_PROVIDER,
+                nativeTurnId: row.turnId,
+              }),
             nativeItemRef: node.nativeItemRef,
             parentItemId: null,
-            ordinal: itemOrdinal(turn, nativeItemId),
+            ordinal,
             status,
             title: row.subagentType,
-            startedAt: turn.startedAt,
+            startedAt: turnStartedAt,
             completedAt: completed ? at : null,
             updatedAt: at,
             type: "subagent",

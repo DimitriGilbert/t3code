@@ -685,6 +685,18 @@ it("decodes real command-failure ACK variants", () => {
     }),
     true,
   );
+  // rejected + guard.actionUnavailable: row resolves but the action doesn't
+  // apply to its kind/state (e.g. forkAssistant on a timelineMarker, editUserQuery
+  // on assistantText). Wrong entityId on a real rowId is staleTarget instead.
+  assert.equal(
+    isAck({
+      commandId: "c6b",
+      status: "rejected",
+      reasonCode: "guard.actionUnavailable",
+      revisionAtDecision: 23,
+    }),
+    true,
+  );
   // stale + proto.staleTarget: row-targeting command (forkAssistant/
   // editUserQuery/applyFileRewind/retryTurn) whose rowId/entityId doesn't
   // resolve in the current projection. Distinct from staleRevision/staleLogEpoch.

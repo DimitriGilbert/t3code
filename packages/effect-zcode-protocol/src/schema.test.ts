@@ -398,3 +398,274 @@ it("preserves opaque workflowRun.updated delta fields through decode", () => {
   // workflowRunDeltas subscribers receive these fields verbatim.
   assert.deepEqual(delta, wire);
 });
+
+// Sanitized real `zcode app-server --stdio` captures (2026-10-29 probes):
+// ids/timestamps normalized, no credentials or user content.
+it("decodes real captured subagent-end state patches", () => {
+  // Parent topic when the child session starts (transcript2.ndjson).
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: {
+        subagents: {
+          revision: 1,
+          childSessionIds: ["sess_subagent_agent_1"],
+          running: [
+            {
+              childSessionId: "sess_subagent_agent_1",
+              agentId: "agent_1",
+              toolCallId: "call_1",
+              subagentType: "general-purpose",
+              title: "Wait 60s then reply PONG",
+              status: "running",
+              startedAt: 1793135941176,
+            },
+          ],
+          endedTotal: 0,
+        },
+        revision: 9,
+      },
+    }),
+    true,
+  );
+  // At child end: running shrinks to [], endedTotal increments; the
+  // backgroundWorks entry flips running -> resultPending + endedAt.
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: {
+        backgroundWorks: [
+          {
+            workId: "agent_1",
+            kind: "subagent",
+            title: "Wait 60s then reply PONG",
+            status: "resultPending",
+            startedAt: 1793135941200,
+            endedAt: 1793136008053,
+            cancellable: false,
+            anchorRowId: null,
+            childSessionId: "sess_subagent_agent_1",
+          },
+        ],
+        revision: 17,
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: {
+        subagents: {
+          revision: 2,
+          childSessionIds: ["sess_subagent_agent_1"],
+          running: [],
+          endedTotal: 1,
+        },
+        revision: 18,
+      },
+    }),
+    true,
+  );
+});
+
+it("decodes the real terminal subagent row.upserted", () => {
+  // The wire DOES emit a terminal `subagent` row — running -> success via
+  // row.upserted on the same rowId (transcript2.ndjson seq 20->28/139->143).
+  assert.equal(
+    isRow({
+      rowId: 4,
+      turnId: "t1",
+      entityId: "agent_1",
+      productTurnId: "t1",
+      visibility: "visible",
+      createdAt: 1793135941176,
+      createdAtSeq: 21,
+      kind: "subagent",
+      parentToolCallId: "call_1",
+      subagentType: "general-purpose",
+      status: "running",
+      summaryText: "Wait 60s then reply PONG",
+      childSessionId: "sess_subagent_agent_1",
+      backgrounded: true,
+      workId: "agent_1",
+      startedAt: 1793135941176,
+    }),
+    true,
+  );
+  assert.equal(
+    isRow({
+      rowId: 4,
+      turnId: "t1",
+      entityId: "agent_1",
+      productTurnId: "t1",
+      visibility: "visible",
+      createdAt: 1793135941176,
+      createdAtSeq: 21,
+      kind: "subagent",
+      parentToolCallId: "call_1",
+      subagentType: "general-purpose",
+      status: "success",
+      summaryText: "Wait 60s then reply PONG",
+      childSessionId: "sess_subagent_agent_1",
+      backgrounded: true,
+      workId: "agent_1",
+      startedAt: 1793135941176,
+      endedAt: 1793136008168,
+    }),
+    true,
+  );
+});
+
+it("decodes a real AskUserQuestion pendingInteraction patch", () => {
+  // Captured live (transcript5.ndjson): interactionId is `perm_*` even for
+  // kind:"userInput"; anchorRowId is a number; resolution = array empties.
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: {
+        pendingInteractions: [
+          {
+            interactionId: "perm_1",
+            kind: "userInput",
+            anchorRowId: 3,
+            createdAt: 1793261909274,
+            payload: {
+              kind: "userInput",
+              prompt: "Tool AskUserQuestion requires user interaction",
+              freeText: true,
+              toolCallId: "call_1",
+              toolName: "AskUserQuestion",
+              traceId: "trace-1",
+              input: {
+                questions: [
+                  {
+                    question: "Do you prefer option A or option B?",
+                    header: "Preference",
+                    options: [
+                      { label: "Option A", description: "Choose option A" },
+                      { label: "Option B", description: "Choose option B" },
+                    ],
+                    multiSelect: false,
+                  },
+                ],
+              },
+              schema: { toolName: "AskUserQuestion" },
+              questions: [
+                {
+                  question: "Do you prefer option A or option B?",
+                  header: "Preference",
+                  options: [
+                    { value: "Option A", label: "Option A", description: "Choose option A" },
+                    { value: "Option B", label: "Option B", description: "Choose option B" },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        revision: 8,
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isDelta({ op: "state.updated", patch: { pendingInteractions: [], revision: 9 } }),
+    true,
+  );
+});
+
+it("decodes the real goal lifecycle patches", () => {
+  // sendGoalCommand accepted -> goal patches (transcript3.ndjson):
+  // active -> verifying (goalVerifier activeWork) -> verified.
+  const goal = (over: Record<string, unknown>) => ({
+    targetId: "target_1",
+    objective: "Reply DONE2.",
+    summaryTitle: "Reply DONE2",
+    timeUsedSeconds: 5,
+    activeRunStartedAtMs: null,
+    iteration: 1,
+    verifications: [],
+    iterations: [],
+    ...over,
+  });
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: {
+        goal: goal({ status: "active", activeRunStartedAtMs: 1793261697136 }),
+        revision: 22,
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: { goal: goal({ status: "verifying" }), revision: 29 },
+    }),
+    true,
+  );
+  assert.equal(
+    isDelta({
+      op: "state.updated",
+      patch: {
+        goal: goal({
+          status: "verified",
+          verifications: [
+            { iteration: 1, outcome: "pass", at: 1793261703728, anchorRowId: 11, reason: "ok" },
+          ],
+        }),
+        revision: 30,
+      },
+    }),
+    true,
+  );
+});
+
+it("decodes real command-ACK variants", () => {
+  // noop: switchModelConfig with an unchanged config (transcript3.ndjson).
+  assert.equal(
+    isAck({
+      commandId: "c1",
+      status: "noop",
+      revisionAtDecision: 2,
+      reasonCode: "config.unchanged",
+    }),
+    true,
+  );
+  // stale: CAS command whose baseRevision fell behind (transcript3.ndjson).
+  assert.equal(
+    isAck({
+      commandId: "c2",
+      status: "stale",
+      reasonCode: "proto.staleRevision",
+      revisionAtDecision: 3,
+    }),
+    true,
+  );
+  // duplicate: same commandId resent — no reasonCode, result may replay.
+  assert.equal(isAck({ commandId: "c3", status: "duplicate", revisionAtDecision: 3 }), true);
+  // failed: sendText when the overlay model isn't in the registry.
+  assert.equal(
+    isAck({
+      commandId: "c4",
+      status: "failed",
+      revisionAtDecision: 0,
+      reasonCode: "modelUnavailable",
+      message: "Provider Registry: model missing",
+    }),
+    true,
+  );
+});
+
+it("decodes real resync acks and the rewind row.removed op", () => {
+  const isAck2 = Schema.is(ZCodeSchema.V4ConversationResyncResult);
+  // base:{logEpoch,seq} at current watermark -> resume + recovery deltas frame.
+  assert.equal(isAck2({ ack: { subscriptionId: "s1", mode: "resume", logEpoch: "e1" } }), true);
+  // base:null + forceSnapshot -> snapshot + recovery snapshot frame.
+  assert.equal(isAck2({ ack: { subscriptionId: "s1", mode: "snapshot", logEpoch: "e1" } }), true);
+  // Whole-branch rewind emits only {op, fromRowId}; rows continue at the
+  // next id afterwards (transcript4.ndjson editUserQuery rewind).
+  assert.equal(isDelta({ op: "row.removed", fromRowId: 1 }), true);
+});

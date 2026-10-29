@@ -632,9 +632,9 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
             readonly subagentType: string;
           }
         >();
-        // Children T3 knows are running — the wire's `subagents` state
-        // drops them on completion without a terminal row, so reconcile
-        // marks them ended instead of leaving "running" zombies.
+        // Children T3 knows are running. The wire upserts a terminal
+        // `subagent` row AND shrinks `subagents.running`/`endedTotal`;
+        // this reconcile still covers a missed or out-of-window row.
         const runningSubagentChildren = new Set<string>();
         // T3 threads this session has seen by id — lets cold-restored
         // conversations recover their appThread without a new lookup.

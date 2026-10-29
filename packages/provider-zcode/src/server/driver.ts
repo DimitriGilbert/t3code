@@ -402,7 +402,10 @@ export const ZcodeDriver: ProviderDriver<ZcodeSettings, ZcodeDriverEnv> = {
                 ) {
                   return yield* new AcpRegistryOperationError({
                     reason: "session_delete_failed",
-                    message: `ZCode rejected deleteSession: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
+                    // reasonCode is the only signal on some failures: an
+                    // unknown session comes back `failed` +
+                    // `fault.command.queryUnavailable` with no message.
+                    message: `ZCode rejected deleteSession: ${ack.status}${ack.reasonCode === undefined ? "" : ` ${ack.reasonCode}`}${ack.message === undefined ? "" : ` (${ack.message})`}`,
                   });
                 }
               }),

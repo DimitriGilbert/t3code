@@ -659,6 +659,93 @@ it("decodes real command-ACK variants", () => {
   );
 });
 
+it("decodes real command-failure ACK variants", () => {
+  // rejected + proto.invalidPayload (live capture, transcript-ack.ndjson):
+  // envelope/payload parse failures — missing CAS fields, unknown command
+  // type, invalid enum value. `message` is a raw multi-line ZodError dump.
+  assert.equal(
+    isAck({
+      commandId: "c5",
+      status: "rejected",
+      reasonCode: "proto.invalidPayload",
+      message:
+        '[\n  {\n    "code": "custom",\n    "path": [\n      "baseRevision"\n    ],\n    "message": "CAS commands require baseRevision and baseLogEpoch"\n  }\n]',
+      revisionAtDecision: 0,
+    }),
+    true,
+  );
+  // rejected + proto.sessionNotFound: sendText/compact to a session the host
+  // doesn't know (or a non-createSession command with sessionId null).
+  assert.equal(
+    isAck({
+      commandId: "c6",
+      status: "rejected",
+      reasonCode: "proto.sessionNotFound",
+      revisionAtDecision: 0,
+    }),
+    true,
+  );
+  // stale + proto.staleTarget: row-targeting command (forkAssistant/
+  // editUserQuery/applyFileRewind/retryTurn) whose rowId/entityId doesn't
+  // resolve in the current projection. Distinct from staleRevision/staleLogEpoch.
+  assert.equal(
+    isAck({
+      commandId: "c7",
+      status: "stale",
+      reasonCode: "proto.staleTarget",
+      revisionAtDecision: 0,
+    }),
+    true,
+  );
+  assert.equal(
+    isAck({
+      commandId: "c8",
+      status: "stale",
+      reasonCode: "proto.staleLogEpoch",
+      revisionAtDecision: 0,
+    }),
+    true,
+  );
+  // failed + provider.notInRegistry: switchModelConfig to a provider outside
+  // the workspace registry — a domain reasonCode, not executionFailed.
+  assert.equal(
+    isAck({
+      commandId: "c9",
+      status: "failed",
+      revisionAtDecision: 0,
+      reasonCode: "provider.notInRegistry",
+      message: 'provider "account:bogus-provider-probe" is not in the workspace model registry',
+    }),
+    true,
+  );
+  // failed + fault.command.executionFailed: switchModelConfig to a model the
+  // registry doesn't have — the generic execute-failure bucket; message is
+  // server-localized (this capture was zh).
+  assert.equal(
+    isAck({
+      commandId: "c10",
+      status: "failed",
+      revisionAtDecision: 0,
+      reasonCode: "fault.command.executionFailed",
+      message:
+        "Provider Registry 中不存在 Model: account:zai-individual-coding-plan/nonexistent-model-probe",
+    }),
+    true,
+  );
+  // failed + fault.command.queryUnavailable, NO message: deleteSession/
+  // renameSession on an unknown session cold-resume-throws inside the inbox
+  // prepareDecision step and lands here — not proto.sessionNotFound.
+  assert.equal(
+    isAck({
+      commandId: "c11",
+      status: "failed",
+      reasonCode: "fault.command.queryUnavailable",
+      revisionAtDecision: 0,
+    }),
+    true,
+  );
+});
+
 it("decodes real resync acks and the rewind row.removed op", () => {
   const isAck2 = Schema.is(ZCodeSchema.V4ConversationResyncResult);
   // base:{logEpoch,seq} at current watermark -> resume + recovery deltas frame.

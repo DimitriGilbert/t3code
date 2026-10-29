@@ -3056,7 +3056,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               return yield* new ProviderAdapter.ProviderAdapterEnsureThreadError({
                 driver: ZCODE_PROVIDER,
                 threadId: threadInput.threadId,
-                cause: `ZCode rejected createSession: ${ack.status}`,
+                cause: `ZCode rejected createSession: ${ackRejectedDetail(ack)}`,
               });
             }
             const result = ack.result;
@@ -3185,9 +3185,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               );
               if (ack.status !== "accepted" && ack.status !== "duplicate") {
                 conversation.pendingInputs.delete(commandId);
-                return yield* protocolError(
-                  `ZCode rejected sendText: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
-                );
+                return yield* protocolError(`ZCode rejected sendText: ${ackRejectedDetail(ack)}`);
               }
             },
             (effect, turnInput) =>
@@ -3364,9 +3362,7 @@ export const makeZcodeAdapterV2 = Effect.fn("makeZcodeAdapterV2")(function* (
               // already gone upstream — the interrupt is moot, not failed.
               if (ack.status === "noop") return;
               if (ack.status !== "accepted" && ack.status !== "duplicate") {
-                return yield* protocolError(
-                  `ZCode rejected stop: ${ack.status}${ack.message === undefined ? "" : ` (${ack.message})`}`,
-                );
+                return yield* protocolError(`ZCode rejected stop: ${ackRejectedDetail(ack)}`);
               }
               turn.interrupted = true;
               yield* Deferred.await(turn.settled).pipe(
